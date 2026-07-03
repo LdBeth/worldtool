@@ -291,7 +291,9 @@ the cold world matches a host-side count of distinct (pname, package)."
                              (when (and pkg
                                         (not (member (vsym-name v) '("NIL" "T")
                                                      :test #'string=)))
-                               (setf (gethash (cons (vsym-name v) pkg)
+                               (setf (gethash (cons (vsym-name v)
+                                                    (cold-resolve-home
+                                                     (vsym-name v) pkg))
                                               host-symbols)
                                      t))))
                      (vop (mapc #'visit (vop-args v)))
@@ -309,7 +311,9 @@ the cold world matches a host-side count of distinct (pname, package)."
                                      host-symbols)
                             t
                             (gethash (cons "*COLD-MAKE-INSTANCE-MARKER*"
-                                           "SYSTEM-INTERNALS")
+                                           (cold-resolve-home
+                                            "*COLD-MAKE-INSTANCE-MARKER*"
+                                            "SYSTEM-INTERNALS"))
                                      host-symbols)
                             t)
                       (visit (vinstance-flavor v))
@@ -476,6 +480,169 @@ points to (1C:F8046C44 in genera-8-5-wired.txt)."
                                            (ldb (byte 8 0) rd))))
                             "entry-pc offset ~D matches reference" ours)))))))))
 
+;;; M3d: vop dispatcher + mini-eval over the whole cold set
+
+(defun cold-eval-stats-report ()
+  (let ((rows nil))
+    (maphash (lambda (k v) (push (cons k v) rows)) *cold-eval-stats*)
+    (dolist (r (sort rows (lambda (a b)
+                            (if (= (cdr a) (cdr b))
+                                (string< (car a) (car b))
+                                (> (cdr a) (cdr b))))))
+      (format t "  ~6D  ~A~%" (cdr r) (car r)))))
+
+;;; Boot-time callability of the deferred list.  MAPC #'EVAL runs it before
+;;; the banner (cold-load.lisp:547) with only the cold fdefinitions plus the
+;;; LISP-INITIALIZE-FIRST-TIME stubs installed; any other head crashes boot.
+
+(defparameter *cold-boot-stub-functions*
+  '("SPECIAL-LOAD" "DEFCONSTANT-LOAD-2" "DEFGENERIC-INTERNAL"
+    "REDEFINE-FORMAT-DIRECTIVE" "MAKE-VARIABLE-OBSOLETE" "SUBTYPEP"
+    "WARN" "FERROR" "ERROR" "MAKE-INSTANCE" "FIND-PACKAGE" "FIND-CLASS")
+  "Stubbed by *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131).")
+
+(defparameter *cold-known-pending-functions*
+  '("PROCLAIM")
+  "Defined in SYS:SYS;LISP-DATABASE-COLD, which the distribution cold load
+contained but the M2 file list missed; its .vbin must be compiled in the
+M2 Genera environment before M3f.  Accepted by the audit so the gate
+tracks only NEW problems.")
+
+(defparameter *cold-interpreter-special-forms*
+  '("IF" "PROGN" "QUOTE" "SETQ" "LET" "LET*" "COND" "AND" "OR" "BLOCK"
+    "RETURN-FROM" "TAGBODY" "GO" "PROG1" "PROG2" "FUNCTION" "THE"
+    "MULTIPLE-VALUE-BIND" "LAMBDA" "DECLARE")
+  "Digested natively by the cold interpreter (sys/eval.lisp); no function
+cell needed.")
+
+(defun check-deferred-boot-safety (w)
+  "Walk every deferred form; flag call heads that are neither cold-defined,
+stub-backed, FBOUNDP-guarded, nor interpreter special forms."
+  (let ((bad (make-hash-table :test #'equal)))
+    (loop for (pkg . form) in (cold-world-deferred w)
+          do (let ((*cold-default-package* pkg))
+               (labels
+                   ((callable-p (v)
+                      (let ((name (vsym-name v)))
+                        (or (member name *cold-interpreter-special-forms*
+                                    :test #'string=)
+                            (member name *cold-boot-stub-functions*
+                                    :test #'string=)
+                            (member name *cold-known-pending-functions*
+                                    :test #'string=)
+                            (gethash (fspec-key v) (cold-world-fdefs w)))))
+                    (guardp (f)
+                      ;; (IF (FBOUNDP 'head) body): body exempt.
+                      (and (consp f) (vsym-named-p (first f) "IF")
+                           (consp (second f))
+                           (vsym-named-p (first (second f)) "FBOUNDP")))
+                    (walk (f)
+                      (when (consp f)
+                        (cond
+                          ((vsym-named-p (first f) "QUOTE"))
+                          ;; (FUNCTION fspec): the fspec is data, and list
+                          ;; fspecs like (:PROPERTY ...) are not calls.
+                          ((vsym-named-p (first f) "FUNCTION"))
+                          ((guardp f))
+                          ((or (vsym-named-p (first f) "LET")
+                               (vsym-named-p (first f) "LET*"))
+                           ;; bindings are (var value) pairs, not calls
+                           (dolist (b (second f))
+                             (when (consp b) (walk (second b))))
+                           (mapc #'walk (cddr f)))
+                          ((vsym-named-p (first f) "TAGBODY")
+                           (dolist (s (rest f))
+                             (when (consp s) (walk s))))
+                          (t
+                           (when (vsym-p (first f))
+                             (unless (callable-p (first f))
+                               (setf (gethash (vsym-name (first f)) bad) t)))
+                           (loop for sub = (rest f) then (cdr sub)
+                                 while (consp sub)
+                                 do (walk (car sub))))))))
+                 (walk form))))
+    (let ((names (sort (loop for k being the hash-keys of bad collect k)
+                       #'string<)))
+      (cold-check (null names)
+                  "deferred forms call undefined-at-boot: ~{~A~^ ~}" names))))
+
+(defun check-cold-eval (w reference)
+  "M3d gate: full 85-file load with zero unhandled forms and zero
+unresolved fixups; register-map ASETs took; the trap page carries real
+vectors; SYSTEM-STARTUP is Q-for-Q EXACT against the reference
+(CURRENT-DEFINITION-P included, courtesy of the fdefine handler)."
+  (with-cold-checks ("cold eval (full cold set)")
+    (let ((*cold-eval-stats* (make-hash-table :test #'equal))
+          (failures nil)
+          (fixup-failures 0))
+      (handler-case
+          (setf fixup-failures (cold-load-cold-set w))
+        (error (e) (push (format nil "~A" e) failures)))
+      (dolist (msg failures) (cold-check nil "load error: ~A" msg))
+      (cold-check (zerop fixup-failures)
+                  "~D unresolved fixups" fixup-failures)
+      (format t "  mini-eval actions:~%")
+      (cold-eval-stats-report)
+      (format t "  deferred forms: ~D, patches: ~D, magic blocks: ~D~%"
+              (length (cold-world-deferred w))
+              (length (cold-world-patches w))
+              (length (cold-world-magic w)))
+      (when (null failures)
+        (check-deferred-boot-safety w)
+        ;; ASET spot check: the readable register map has symbol entries.
+        (multiple-value-bind (tag data boundp)
+            (cold-symbol-value-q
+             w (make-vsym "SYSTEM" "*INTERNAL-READABLE-REGISTER-MAP*"))
+          (cold-check (and boundp (= (tag-type tag) (cold-dtp w "ARRAY")))
+                      "readable register map is a bound array")
+          (when boundp
+            (let ((symbols 0))
+              (multiple-value-bind (ht hd) (cw-ref w data)
+                (declare (ignore ht))
+                (dotimes (i (ldb (byte 15 0) hd))
+                  (multiple-value-bind (et ed) (cw-ref w (+ data 1 i))
+                    (declare (ignore ed))
+                    (when (= (tag-type et) (cold-dtp w "SYMBOL"))
+                      (incf symbols)))))
+              (cold-check (> symbols 50)
+                          "register map has ~D symbol entries" symbols))))
+        ;; Trap page: a healthy population of explicit vectors.
+        (let ((trap-base (cold-address w "%TRAP-VECTOR-BASE"))
+              (catch-all (cold-world-catch-all-pc w))
+              (explicit 0))
+          (dotimes (i (layout-value (cold-world-layout w)
+                                    "%TRAP-VECTOR-LENGTH"))
+            (multiple-value-bind (tag data) (cw-ref w (+ trap-base i))
+              (when (and (= (tag-type tag) (cold-dtp w "EVEN-PC"))
+                         (/= data catch-all))
+                (incf explicit))))
+          (cold-check (> explicit 500)
+                      "trap page: only ~D explicit vectors" explicit))
+        ;; SYSTEM-STARTUP oracle, now exact (no bit-28 mask).
+        (when reference
+          (let ((cell (gethash (fspec-key (make-vsym "SYSTEM-INTERNALS"
+                                                     "SYSTEM-STARTUP"))
+                               (cold-world-fdefs w))))
+            (cold-check cell "SYSTEM-STARTUP was fdefined")
+            (when cell
+              (multiple-value-bind (tag fn)
+                  (cw-ref w (cold-follow-cell w cell))
+                (cold-check (= (tag-type tag)
+                               (cold-dtp w "COMPILED-FUNCTION"))
+                            "SYSTEM-STARTUP cell holds a function")
+                ;; The M3c oracle already matched every instruction modulo
+                ;; the FDEFINE bit; here the entry instruction must be
+                ;; EXACT -- fdefine set CURRENT-DEFINITION-P (bit 28).
+                (multiple-value-bind (rt ref-fn) (world-q reference #xF8041102)
+                  (declare (ignore rt))
+                  (multiple-value-bind (gt gd) (cw-ref w fn)
+                    (multiple-value-bind (rt2 rd) (world-q reference ref-fn)
+                      (cold-check (logbitp 28 gd)
+                                  "CURRENT-DEFINITION-P set on entry instruction")
+                      (cold-check (and rt2 (= gt rt2) (= gd rd))
+                                  "entry instruction exact: ~2,'0X:~8,'0X vs ~2,'0X:~8,'0X"
+                                  gt gd rt2 rd))))))))))))
+
 ;;; Stage-test driver (CLI: worldtool coldtest TMPDIR [REFERENCE-WORLD])
 
 (defun cold-test (tmpdir &key reference layout-path sysdir)
@@ -487,6 +654,16 @@ number of failed stages (0 = success)."
          (out (format nil "~A/cold-skeleton.ilod" tmpdir))
          (model (cold-world-model w))
          (reference-model (when reference (read-world reference))))
+    (multiple-value-bind (homes aliases)
+        (if reference-model
+            (world-symbol-homes reference-model)
+            (values nil nil))
+      (setf *cold-symbol-homes* homes
+            *cold-package-aliases* aliases))
+    (when *cold-symbol-homes*
+      (format t "~&symbol-home oracle: ~D pnames, ~D package aliases~%"
+              (hash-table-count *cold-symbol-homes*)
+              (hash-table-count *cold-package-aliases*)))
     (write-file-bytes out (write-world model))
     (let ((reread (read-world out)))
       (unless (check-skeleton w reread :reference reference-model)
@@ -514,5 +691,10 @@ number of failed stages (0 = success)."
           (let ((w5 (make-skeleton-world layout)))
             (cold-add-heap-regions w5)
             (unless (check-system-startup-oracle w5 reference-model)
-              (incf failures))))))
+              (incf failures))))
+        ;; M3d: the vop dispatcher + mini-eval over the whole cold set.
+        (let ((w6 (make-skeleton-world layout)))
+          (cold-add-heap-regions w6)
+          (unless (check-cold-eval w6 reference-model)
+            (incf failures)))))
     failures))

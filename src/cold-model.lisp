@@ -34,8 +34,16 @@
   (fdefs (make-hash-table :test #'equal))   ; fspec key -> function vma
   (values (make-hash-table :test #'equal))  ; symbol key -> build-time value
   (plists (make-hash-table :test #'equal))  ; symbol key -> build-time plist
-  (deferred nil)                            ; reversed *COLD-LOAD-DEFERRED-FORMS*
-  (fixups nil)                              ; list of (vma . thunk)
+  (deferred nil)                            ; reversed *COLD-LOAD-DEFERRED-FORMS*,
+                                            ; entries (package-string . host-form)
+  (fixups nil)                              ; thunks re-run until quiescent at finalize
+  (patches nil)                             ; (vma package-string form): first-boot
+                                            ; %P-STORE-CONTENTS patches for Qs whose
+                                            ; value only exists at run time
+  (magic nil)                               ; DEFINE-MAGIC-LOCATIONS-1 stash (M3e)
+  ;; DECLARE-STORAGE-CATEGORY-LOAD wired-cell forwarding (cold-eval):
+  (wired-cell-table 0)                      ; FORWARDED-SYMBOL-CELL-TABLE header vma
+  (wired-cell-fill 0)                       ; its fill pointer
   ;; Landmarks stamped by cold-wired:
   (nil-vma 0) (t-vma 0) (catch-all-pc 0)
   ;; MAKE-INSTANCE-COLD marker (cold-load.lisp:404): instances in the cold

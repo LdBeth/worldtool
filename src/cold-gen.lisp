@@ -7,6 +7,14 @@
 ;;; (sys/sys/sysdcl.lisp:119-360).  The four :readtable-type modules load
 ;;; between RTC and LDATA, matching sysdcl's module order.  SYS:SYS;PKGDCL
 ;;; is :lisp-read-only -- the generator reads it as source (M3f).
+;;;
+;;; PENDING (M3d finding): the distribution cold load also contained
+;;; SYS:SYS;LISP-DATABASE-COLD (defines PROCLAIM and the DEFVAR-1 boot
+;;; bookkeeping; load it after "SYS: SYS; EVAL") and
+;;; SYS:DEBUGGER;ITRAP-DISPATCH (the trap handlers, incl. the trap-page
+;;; catch-all; late, near WIRED).  Their .vbins do not exist yet -- run
+;;; M2-COMPILE-COLD-SET in the OG2 Genera world (m2-compile.lisp
+;;; *cold-set-late-found-files*), then add them here.
 
 (in-package #:worldtool)
 

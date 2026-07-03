@@ -90,7 +90,12 @@
                           (if tft
                               (ldb (byte 8 0) op)
                               (logior (logand op #xC0) (tag-type vtag)))
-                          vdata)))))
+                          vdata)
+                  ;; A load-time-eval operand the mini-eval could not value
+                  ;; leaves a first-boot patch request for the Q just stored.
+                  (when *cold-eval-patch-form*
+                    (cold-note-patch w (+ fn i)
+                                     (shiftf *cold-eval-patch-form* nil)))))))
           fn))))
 
 (defun cold-fun-entry-pc (w fn &key pc-to-entry-p)

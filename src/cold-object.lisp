@@ -50,6 +50,15 @@ CCA-relative.")
   "Hook: (**EVAL** form) reached as an operand; returns the value's
 (values tag data).  Bound to the mini-eval by the driver.")
 
+(defvar *cold-eval-patch-form* nil
+  "Set by the mini-eval when an operand's value only exists at run time:
+the Q-store site that consumed the placeholder records a first-boot patch
+(cold-note-patch) and clears this.")
+
+(defun cold-note-patch (w vma form)
+  "Queue a first-boot %P-STORE-CONTENTS of (eval FORM) into VMA."
+  (push (list vma *cold-default-package* form) (cold-world-patches w)))
+
 ;;; The vembed dtp-code -> type name (l-bin/defs.lisp embedded constants).
 (defparameter *cold-embed-types*
   #("LIST" "LEXICAL-CLOSURE" "DYNAMIC-CLOSURE" "DOUBLE-FLOAT"
@@ -108,6 +117,36 @@ CCA-relative.")
 
 ;;; ---------------- Symbols ----------------
 
+;;; Package nicknames (sys/pkgdcl.lisp DEFPACKAGE :NICKNAMES clauses).
+;;; File attribute lists and refnames use nicknames ("SI", "CLI"); folding
+;;; them to the full name keeps the (pname . package) intern table from
+;;; splitting one runtime symbol into duplicates.
+(defparameter *cold-package-nicknames*
+  '(("" . "KEYWORD")                    ; pkgdcl: (:NICKNAMES "")
+    ("CL" . "LISP") ("COMMON-LISP" . "LISP") ("COMMON-LISP-GLOBAL" . "LISP")
+    ("SCL" . "SYMBOLICS-COMMON-LISP")
+    ("SYS" . "SYSTEM") ("ZETALISP-SYSTEM" . "SYSTEM")
+    ("COMMON-LISP-SYSTEM" . "SYSTEM") ("CL-SYS" . "SYSTEM")
+    ("ZL" . "GLOBAL") ("ZETALISP" . "GLOBAL") ("ZETALISP-GLOBAL" . "GLOBAL")
+    ("ZL-USER" . "ZETALISP-USER")
+    ("SCT" . "SYSTEM-CONSTRUCTION-TOOL")
+    ("SI" . "SYSTEM-INTERNALS")
+    ("DBG" . "DEBUGGER")
+    ("FS" . "FILE-SYSTEM")
+    ("NETI" . "NETWORK-INTERNALS")
+    ("LT" . "LANGUAGE-TOOLS")
+    ("CLI" . "COMMON-LISP-INTERNALS")
+    ("CL-USER" . "COMMON-LISP-USER")
+    ("FCLI" . "FUTURE-COMMON-LISP-INTERNALS")
+    ("FCL-USER" . "FUTURE-COMMON-LISP-USER")
+    ("SU" . "SERVER-UTILITIES")
+    ("DW" . "DYNAMIC-WINDOWS")
+    ("CP" . "COMMAND-PROCESSOR")
+    ("NET" . "NETWORK")))
+
+(defun canonical-package-string (name)
+  (or (cdr (assoc name *cold-package-nicknames* :test #'string=)) name))
+
 (defun canonical-package-name (package)
   "Fold a vsym/vpackage package spec to the name string stored in the cold
 symbol's package cell (PKG-FIND-PACKAGE resolves it at first boot).
@@ -115,19 +154,52 @@ Refname lists fold to their last package string: the INTERNAL marker only
 selects plain interning (l-bin/load.lisp GET-PACKAGE-FROM-REFNAME-LIST);
 dotted (\"syntax\" . \"name\") pairs fold to the name."
   (etypecase package
-    ((eql :default) *cold-default-package*)
+    ((eql :default) (canonical-package-string *cold-default-package*))
     ((eql :uninterned) nil)
-    (string package)
+    (string (canonical-package-string package))
     (vpackage (canonical-package-name (vpackage-spec package)))
     (cons
-     (if (stringp (cdr package))
-         (cdr package)
-         (let ((name nil))
-           (dolist (p package (or name (error "Empty refname list")))
-             (when (stringp p) (setf name p))))))))
+     (canonical-package-string
+      (if (stringp (cdr package))
+          (cdr package)
+          (let ((name nil))
+            (dolist (p package (or name (error "Empty refname list")))
+              (when (stringp p) (setf name p)))))))))
+
+;;; Symbol-home resolution.  A dumped plain symbol means "accessible from
+;;; the file package" -- possibly inherited -- so interning by file package
+;;; would split one runtime symbol into per-package duplicates with
+;;; disconnected value/function cells.  The distribution world's symbol
+;;; blocks provide the true pname -> home mapping (world-symbol-homes);
+;;; when it is loaded, references resolve through it.
+(defvar *cold-symbol-homes* nil)     ; pname -> list of home package names
+(defvar *cold-package-aliases* nil)  ; package name/nickname -> primary name
+
+(defparameter *cold-home-priority*
+  '("GLOBAL" "LISP" "SYSTEM" "SYMBOLICS-COMMON-LISP" "SYSTEM-INTERNALS"
+    "COMMON-LISP-INTERNALS" "LANGUAGE-TOOLS" "STORAGE" "KEYWORD")
+  "Tie-break order for pnames with several homes when the referencing
+package is not itself one of them: the widely-inherited packages first.")
+
+(defun cold-resolve-home (pname context-package)
+  "Home package PNAME should intern under, seen from CONTEXT-PACKAGE."
+  (let* ((ctx (or (and *cold-package-aliases*
+                       (gethash context-package *cold-package-aliases*))
+                  context-package))
+         (homes (and *cold-symbol-homes*
+                     (gethash pname *cold-symbol-homes*))))
+    (cond ((null homes) ctx)
+          ((null (rest homes)) (first homes))
+          ;; A package's own symbol shadows inherited ones.
+          ((member ctx homes :test #'string=) ctx)
+          (t (or (loop for p in *cold-home-priority*
+                       when (member p homes :test #'string=) return p)
+                 (first homes))))))
 
 (defun cold-symbol (w pname package-name)
-  "Intern (PNAME, PACKAGE-NAME); returns the symbol block VMA."
+  "Intern (PNAME, home of PACKAGE-NAME); returns the symbol block VMA."
+  (when package-name
+    (setf package-name (cold-resolve-home pname package-name)))
   (let ((key (cons pname package-name)))
     (or (and package-name (gethash key (cold-world-symbols w)))
         (let* ((vma (cold-alloc w "SYMBOL-AREA" 5))
@@ -265,18 +337,20 @@ tails -- terminate the run with a cdr-normal link."
       (values code (ldb (byte 2 4) code) (ldb (byte 3 1) code)))))
 
 (defun cold-array (w varray area)
-  "Materialize a decoded array.  Short-prefix one-dimensional arrays only;
-multi-dimensional and displaced arrays error until the cold set demands
-them.  Returns the array HEADER vma."
+  "Materialize a decoded array; returns the array HEADER vma.
+Multi-dimensional (and overlong 1-D) arrays get the long-prefix format:
+[header][long-length][index-offset 0][locative to data][len mult]*dims,
+data contiguous after the prefix -- verified against the distribution
+world's STANDARD-READTABLE (header 43:0A930002, locative +3 -> +8)."
   (or (gethash varray *cold-object-vmas*)
       (let ((dims (let ((d (varray-dimensions varray)))
                     (if (integerp d) (list d) d))))
-        (unless (and (= (length dims) 1) (integerp (first dims)))
-          (error "Multi-dimensional array ~S not yet supported" dims))
+        (unless (every #'integerp dims)
+          (error "Array dimensions ~S unsupported" dims))
         (multiple-value-bind (type-code element-type packing)
             (cold-array-type w varray)
           (declare (ignore element-type))
-          (let* ((len (first dims))
+          (let* ((len (reduce #'* dims))
                  (per-word (ash 1 packing))
                  (options (varray-options varray))
                  (leader-length
@@ -285,13 +359,13 @@ them.  Returns the array HEADER vma."
                  (fill-pointer (varray-option options "FILL-POINTER"))
                  (nwords (if (zerop packing) len (ceiling len per-word)))
                  (named-structure
-                   (varray-option options "NAMED-STRUCTURE-SYMBOL")))
-            (when (>= len (ash 1 15))
-              (error "Array of ~D elements needs a long prefix" len))
+                   (varray-option options "NAMED-STRUCTURE-SYMBOL"))
+                 (longp (or (> (length dims) 1) (>= len (ash 1 15))))
+                 (prefix-extra (if longp (+ 3 (* 2 (length dims))) 0)))
             (when (and fill-pointer (zerop leader-length))
               (setf leader-length 1))
             (let* ((total (+ (if (zerop leader-length) 0 (1+ leader-length))
-                             1 nwords))
+                             1 prefix-extra nwords))
                    (base (cold-alloc w area total))
                    (header (if (zerop leader-length)
                                base
@@ -308,6 +382,11 @@ them.  Returns the array HEADER vma."
                 (dotimes (i leader-length)
                   (let ((value (cond ((and (zerop i) fill-pointer) fill-pointer)
                                      ((nth i leader-list) (nth i leader-list))
+                                     ;; MAKE-ARRAY :NAMED-STRUCTURE-SYMBOL
+                                     ;; puts the symbol in leader 1.
+                                     ((and (= i 1) named-structure
+                                           (vsym-p named-structure))
+                                      named-structure)
                                      (t nil))))
                     (multiple-value-bind (vt vd) (cold-ref w value :area area)
                       (cw-set w (- header 1 i) vt vd)))))
@@ -315,50 +394,65 @@ them.  Returns the array HEADER vma."
                       (logior (ash type-code 26)
                               (if named-structure (ash 1 25) 0)
                               (ash leader-length 15)
-                              len))
-              (when named-structure
-                ;; Named-structure symbol lives in leader 1 (or element 0?)
-                ;; -- resolved when struct-cold materialization lands (M3e).
-                nil)
+                              (if longp
+                                  (logior (ash 1 23) (length dims))
+                                  len)))
+              (when longp
+                (let ((fixnum (cold-dtp w "FIXNUM"))
+                      (data-base (+ header 1 prefix-extra)))
+                  (cw-set w (+ header 1) (tag 0 fixnum) len)
+                  (cw-set w (+ header 2) (tag 0 fixnum) 0)  ; index offset
+                  (cw-set w (+ header 3)
+                          (tag 0 (cold-dtp w "LOCATIVE")) data-base)
+                  (loop for d on dims
+                        for i from 0
+                        do (cw-set w (+ header 4 (* 2 i)) (tag 0 fixnum)
+                                   (first d))
+                           (cw-set w (+ header 5 (* 2 i)) (tag 0 fixnum)
+                                   (reduce #'* (rest d))))))
               ;; Data
-              (cond
-                ((varray-words varray)
-                 (let ((words (varray-words varray)))
-                   (dotimes (i nwords)
-                     (let ((low (if (< (* 2 i) (length words))
-                                    (aref words (* 2 i)) 0))
-                           (high (if (< (1+ (* 2 i)) (length words))
-                                     (aref words (1+ (* 2 i))) 0)))
-                       (cw-set w (+ header 1 i)
-                               (tag 0 (cold-dtp w "FIXNUM"))
-                               (logior low (ash high 16)))))))
-                ((varray-contents varray)
-                 (unless (zerop packing)
-                   (error "Boxed contents in a packed array"))
-                 (let ((contents (varray-contents varray)))
-                   (dotimes (i len)
-                     (multiple-value-bind (vt vd)
-                         (cold-ref w (aref contents i) :area area)
-                       (cw-set w (+ header 1 i) vt vd)))))
-                (t
-                 ;; Uninitialized: NIL for object arrays, 0 for packed.
-                 (if (zerop packing)
-                     (multiple-value-bind (ntag ndata) (cold-nil-q w)
-                       (dotimes (i len)
-                         (cw-set w (+ header 1 i) ntag ndata)))
+              (let ((data-base (+ header 1 prefix-extra)))
+                (cond
+                  ((varray-words varray)
+                   (let ((words (varray-words varray)))
                      (dotimes (i nwords)
-                       (cw-set w (+ header 1 i)
-                               (tag 0 (cold-dtp w "FIXNUM")) 0)))))
+                       (let ((low (if (< (* 2 i) (length words))
+                                      (aref words (* 2 i)) 0))
+                             (high (if (< (1+ (* 2 i)) (length words))
+                                       (aref words (1+ (* 2 i))) 0)))
+                         (cw-set w (+ data-base i)
+                                 (tag 0 (cold-dtp w "FIXNUM"))
+                                 (logior low (ash high 16)))))))
+                  ((varray-contents varray)
+                   (unless (zerop packing)
+                     (error "Boxed contents in a packed array"))
+                   (let ((contents (varray-contents varray)))
+                     (dotimes (i len)
+                       (multiple-value-bind (vt vd)
+                           (cold-ref w (aref contents i) :area area)
+                         (cw-set w (+ data-base i) vt vd)))))
+                  (t
+                   ;; Uninitialized: NIL for object arrays, 0 for packed.
+                   (if (zerop packing)
+                       (multiple-value-bind (ntag ndata) (cold-nil-q w)
+                         (dotimes (i len)
+                           (cw-set w (+ data-base i) ntag ndata)))
+                       (dotimes (i nwords)
+                         (cw-set w (+ data-base i)
+                                 (tag 0 (cold-dtp w "FIXNUM")) 0))))))
               header))))))
 
 ;;; ---------------- Function specs and plists ----------------
 
 (defun fspec-key (obj)
-  "EQUAL-hashable key for a function spec tree."
+  "EQUAL-hashable key for a function spec tree.  Symbol keys resolve
+through the home oracle so the same runtime symbol referenced from
+different packages yields one key."
   (typecase obj
     (vsym (let ((p (canonical-package-name (vsym-package obj))))
             (if p
-                (concatenate 'string p ":" (vsym-name obj))
+                (concatenate 'string (cold-resolve-home (vsym-name obj) p)
+                             ":" (vsym-name obj))
                 (list :uninterned (vsym-name obj)))))
     (cons (cons (fspec-key (car obj)) (and (cdr obj) (fspec-key (cdr obj)))))
     (t obj)))

@@ -134,9 +134,22 @@ on the host side by subtracting the QLD alists."
   '("SYS: IO; RDTBL" "SYS: CLCP; READTABLE" "SYS: CLCP; ANSI-READTABLE"
     "SYS: EMBEDDING; RPC; C-READTABLE"))
 
+;;; Cold-load files OUTSIDE the SI subsystem that the original crossing
+;;; missed (found M3d, 2026-07-04, via loaded-files.text records + source
+;;; markers): LISP-DATABASE-COLD is language-tools' cold half (defines
+;;; PROCLAIM, SI:DEFVAR-1, LT::DEFVAR-1-INTERNAL-1 -- "This file is in the
+;;; cold load"); ITRAP-DISPATCH carries the trap handlers, including the
+;;; UNEXPECTED-TRAP-HANDLER catch-all that fills every trap vector the
+;;; cold set doesn't set explicitly (the 26:F8048DBB filler in the
+;;; distribution world's trap page).
+(defparameter *cold-set-late-found-files*
+  '("SYS: SYS; LISP-DATABASE-COLD" "SYS: DEBUGGER; ITRAP-DISPATCH"))
+
 (defun m2-compile-cold-set ()
   "Compile the SI-subsystem cold-load candidates the alist pass missed."
   (dolist (f *cold-set-plain-files*)
+    (m2-compile-one f))
+  (dolist (f *cold-set-late-found-files*)
     (m2-compile-one f))
   (dolist (f *cold-set-readtable-files*)
     (let ((src (m2-source-pathname f)))
