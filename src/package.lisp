@@ -5,4 +5,5 @@
   (:export #:read-world #:write-world #:world-model
            #:dump-world #:export-world #:emit-world #:roundtrip
            #:inspect-world #:world-q #:read-layout #:layout-value
+           #:collect-symbols #:symbols-world
            #:main))

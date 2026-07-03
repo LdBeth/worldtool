@@ -14,12 +14,24 @@
 (defconstant +type-character+        35)
 (defconstant +type-even-pc+          38)
 
+;;; Array headers (emulator/aihead.h).  A header Q's tag carries the header
+;;; type; its data word packs the array attributes.
+(defconstant +type-header-p+          2)
+(defconstant +type-header-i+          3)
+(defconstant +array-element-type-fixnum+    0)  ; data word bits 30..31
+(defconstant +array-element-type-character+ 1)
+;; Byte-packing field (bits 27..29): P => 2^P elements per 32-bit word,
+;; i.e. (32 >> P) bits per element.  Character strings use P=2 (8-bit).
+(defconstant +array-length-bits+     25)        ; data word bits 0..24
+
 ;;; Cdr codes (emulator/aihead.h)
 (defconstant +cdr-next+   0)
 (defconstant +cdr-nil+    1)
 (defconstant +cdr-normal+ 2)
 
 (defun tag (cdr type) (logior (ash cdr 6) type))
+
+(defun tag-type (tag) (logand tag #x3F))
 
 ;;; World file formats (include/world_tools.h)
 (defconstant +ivory-page-size-qs+    256)

@@ -22,6 +22,7 @@
 (defun usage ()
   (format t "usage: worldtool dump FILE [--qs PAGE:COUNT]~%~
              ~7T worldtool inspect FILE LAYOUT.sexp [--vma HEXADDR[:COUNT]]~%~
+             ~7T worldtool symbols FILE [--min N]~%~
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
              ~7T worldtool roundtrip FILE~%")
@@ -45,6 +46,13 @@
                       (and p (parse-vma-arg (nth (1+ p) args))))))
            (unless (and file layout) (return-from main (usage)))
            (inspect-world file layout :vma vma)
+           0))
+        ((string= (first args) "symbols")
+         (let ((file (second args))
+               (min (let ((p (position "--min" args :test #'string=)))
+                      (if p (parse-integer (nth (1+ p) args)) 4))))
+           (unless file (return-from main (usage)))
+           (symbols-world file :min min)
            0))
         ((string= (first args) "export")
          (destructuring-bind (file sexp qs) (rest args)
