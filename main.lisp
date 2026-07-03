@@ -4,7 +4,8 @@
 (let ((here (make-pathname :name nil :type nil :defaults *load-truename*)))
   (dolist (f '("src/package" "src/constants" "src/image" "src/ilod"
                "src/vlod" "src/dump" "src/inspect" "src/symbols" "src/vbin"
-               "src/emit" "src/cli"))
+               "src/emit" "src/cold-model" "src/cold-wired" "src/cold-diff"
+               "src/cli"))
     (load (merge-pathnames (concatenate 'string f ".lisp") here))))
 
 (sb-ext:exit :code (worldtool:main (rest sb-ext:*posix-argv*)))

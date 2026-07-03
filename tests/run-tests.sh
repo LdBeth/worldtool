@@ -53,6 +53,13 @@ mkdir -p "$tmp"
 "$WT" export "$VLMDIR/VLM_debugger" "$tmp/dbg.sexp" "$tmp/dbg.qs" > /dev/null
 "$WT" emit "$tmp/dbg.sexp" "$tmp/dbg.out" > /dev/null
 cmp "$VLMDIR/VLM_debugger" "$tmp/dbg.out" || { echo "FAIL: export/emit not lossless"; fail=1; }
+
+# Cold-load generator stage checks (structural diff against the unpatched
+# ground-truth world when present)
+coldref=""
+[ -f "$VLMDIR/Genera-8-5.vlod" ] && coldref="--reference $VLMDIR/Genera-8-5.vlod"
+"$WT" coldtest "$here/cold-layout.sexp" "$tmp" $coldref || { echo "FAIL: coldtest"; fail=1; }
+"$WT" roundtrip "$tmp/cold-skeleton.ilod" || { echo "FAIL: cold skeleton roundtrip"; fail=1; }
 rm -rf "$tmp"
 
 [ $fail -eq 0 ] && echo "all tests passed" || echo "TESTS FAILED"
