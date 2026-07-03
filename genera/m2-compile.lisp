@@ -161,17 +161,16 @@ on the host side by subtracting the QLD alists."
   "Chaos address (subnet 1, host 1) baked into the patched LMINI.
 Only reachable if a fresh cold load actually MINI-loads over Chaosnet.")
 
-(defparameter *m2-lmini-temp* "SYS: SITE; LMINI"
-  "Where the patched copy of SYS:IO;LMINI is written and compiled.
-Delete the .lisp and .vbin here after copying the .vbin into the tree.")
-
 (defun m2-compile-lmini ()
-  "Compile SYS:IO;LMINI with (REMEMBER-ACCESS-PATH) replaced by literal setqs."
+  "Compile SYS:IO;LMINI with (REMEMBER-ACCESS-PATH) replaced by literal setqs.
+The patched copy is written as a new version of the source file itself (the
+old version stays below it), so the .vbin lands in SYS:IO; and the wildcard
+.vbin copy picks it up.  Rerunning on an already-patched newest version
+reports nothing to do."
   (let ((src (m2-source-pathname "SYS: IO; LMINI"))
-	(tmp (m2-source-pathname *m2-lmini-temp*))
 	(patched nil))
     (with-open-file (in src)
-      (with-open-file (out tmp :direction :output)
+      (with-open-file (out src :direction :output)
 	(loop for line = (read-line in nil nil)
 	      while line
 	      do (cond ((string-equal (string-trim '(#\Space #\Tab) line)
@@ -182,18 +181,17 @@ Delete the .lisp and .vbin here after copying the .vbin into the tree.")
 			(setq patched t))
 		       (t (write-line line out))))))
     (cond ((not patched)
-	   (format t "~&*** (remember-access-path) not found in ~A; nothing compiled" src))
+	   (format t "~&*** (remember-access-path) not found in ~A; nothing compiled~@
+			(already patched?  the newest version has no macro call)" src))
 	  (t
 	   (scl:condition-case (err)
-		(let ((bin (compile-file tmp)))
+		(let ((bin (compile-file src)))
 		  (push src *m2-compiled*)
 		  (setq *m2-failures*
 			(delete src *m2-failures* :key #'car :test #'equalp))
-		  (format t "~&Patched LMINI compiled.~@
-			       Copy ~A into the source tree as io/lmini.vbin,~@
-			       then delete the SYS:SITE; copies." bin))
+		  (format t "~&Patched LMINI compiled to ~A." bin))
 	      (error
-		(format t "~&*** FAILED ~A: ~A" tmp (dbg:report-string err))
+		(format t "~&*** FAILED ~A: ~A" src (dbg:report-string err))
 		(push (cons src (dbg:report-string err)) *m2-failures*)))))))
 
 (defun m2-report ()
