@@ -37,7 +37,11 @@
   (deferred nil)                            ; reversed *COLD-LOAD-DEFERRED-FORMS*
   (fixups nil)                              ; list of (vma . thunk)
   ;; Landmarks stamped by cold-wired:
-  (nil-vma 0) (t-vma 0) (catch-all-pc 0))
+  (nil-vma 0) (t-vma 0) (catch-all-pc 0)
+  ;; MAKE-INSTANCE-COLD marker (cold-load.lisp:404): instances in the cold
+  ;; world are (marker flavor . init-plist) lists until
+  ;; DBG:BOOTSTRAP-FASD-INSTANCES rebuilds them.  Created lazily.
+  (instance-marker 0))
 
 ;;; Layout shorthands
 

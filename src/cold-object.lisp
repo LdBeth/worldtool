@@ -22,14 +22,15 @@ its attribute list.")
 ;;; space until M3e derives the real address-space policy; sizes are ample
 ;;; for the 85-file cold set.  Ground truth puts the heap at #x80000000+.
 (defparameter *cold-heap-regions*
-  '(("SYMBOL-AREA"            #x80100000 #x100000)
-    ("PNAME-AREA"             #x80300000 #x100000)
-    ("PROPERTY-LIST-AREA"     #x80500000 #x100000)
-    ("PERMANENT-STORAGE-AREA" #x80700000 #x400000)
-    ("WORKING-STORAGE-AREA"   #x80C00000 #x100000)
-    ("COMPILED-FUNCTION-AREA" #x81000000 #x800000)
-    ("DEBUG-INFO-AREA"        #x81900000 #x400000)
-    ("CONSTANTS-AREA"         #x81E00000 #x100000)))
+  '(("SYMBOL-AREA"             #x80100000 #x100000)
+    ("PNAME-AREA"              #x80300000 #x100000)
+    ("PROPERTY-LIST-AREA"      #x80500000 #x100000)
+    ("PERMANENT-STORAGE-AREA"  #x80700000 #x400000)
+    ("WORKING-STORAGE-AREA"    #x80C00000 #x100000)
+    ("COMPILED-FUNCTION-AREA"  #x81000000 #x800000)
+    ("DEBUG-INFO-AREA"         #x81900000 #x400000)
+    ("CONSTANTS-AREA"          #x81E00000 #x100000)
+    ("SAFEGUARDED-OBJECTS-AREA" #x82000000 #x200000)))
 
 (defun cold-add-heap-regions (w)
   (loop for (name origin length) in *cold-heap-regions*
@@ -37,6 +38,23 @@ its attribute list.")
 
 ;;; EQ identity for materialized host objects (conses, varrays, vfuns).
 (defvar *cold-object-vmas*)
+
+(defvar *cold-cca-base* nil
+  "CCA address of the function being materialized; vembed constants are
+CCA-relative.")
+
+(defvar *cold-load-time-eval*
+  (lambda (w form)
+    (declare (ignore w))
+    (error "Load-time eval ~S needs the mini-eval (M3d)" form))
+  "Hook: (**EVAL** form) reached as an operand; returns the value's
+(values tag data).  Bound to the mini-eval by the driver.")
+
+;;; The vembed dtp-code -> type name (l-bin/defs.lisp embedded constants).
+(defparameter *cold-embed-types*
+  #("LIST" "LEXICAL-CLOSURE" "DYNAMIC-CLOSURE" "DOUBLE-FLOAT"
+    "BIG-RATIO" "COMPLEX" "COMPILED-FUNCTION" "LOCATIVE"))
+
 
 (defmacro with-cold-materializer ((w) &body body)
   (declare (ignore w))
@@ -92,13 +110,21 @@ its attribute list.")
 
 (defun canonical-package-name (package)
   "Fold a vsym/vpackage package spec to the name string stored in the cold
-symbol's package cell (PKG-FIND-PACKAGE resolves it at first boot)."
+symbol's package cell (PKG-FIND-PACKAGE resolves it at first boot).
+Refname lists fold to their last package string: the INTERNAL marker only
+selects plain interning (l-bin/load.lisp GET-PACKAGE-FROM-REFNAME-LIST);
+dotted (\"syntax\" . \"name\") pairs fold to the name."
   (etypecase package
     ((eql :default) *cold-default-package*)
     ((eql :uninterned) nil)
     (string package)
     (vpackage (canonical-package-name (vpackage-spec package)))
-    (cons (error "Package spec ~S not yet supported" package))))
+    (cons
+     (if (stringp (cdr package))
+         (cdr package)
+         (let ((name nil))
+           (dolist (p package (or name (error "Empty refname list")))
+             (when (stringp p) (setf name p))))))))
 
 (defun cold-symbol (w pname package-name)
   "Intern (PNAME, PACKAGE-NAME); returns the symbol block VMA."
@@ -243,7 +269,8 @@ tails -- terminate the run with a cdr-normal link."
 multi-dimensional and displaced arrays error until the cold set demands
 them.  Returns the array HEADER vma."
   (or (gethash varray *cold-object-vmas*)
-      (let ((dims (varray-dimensions varray)))
+      (let ((dims (let ((d (varray-dimensions varray)))
+                    (if (integerp d) (list d) d))))
         (unless (and (= (length dims) 1) (integerp (first dims)))
           (error "Multi-dimensional array ~S not yet supported" dims))
         (multiple-value-bind (type-code element-type packing)
@@ -324,6 +351,108 @@ them.  Returns the array HEADER vma."
                                (tag 0 (cold-dtp w "FIXNUM")) 0)))))
               header))))))
 
+;;; ---------------- Function specs and plists ----------------
+
+(defun fspec-key (obj)
+  "EQUAL-hashable key for a function spec tree."
+  (typecase obj
+    (vsym (let ((p (canonical-package-name (vsym-package obj))))
+            (if p
+                (concatenate 'string p ":" (vsym-name obj))
+                (list :uninterned (vsym-name obj)))))
+    (cons (cons (fspec-key (car obj)) (and (cdr obj) (fspec-key (cdr obj)))))
+    (t obj)))
+
+(defun cold-prepend-property (w sym-vma ind-tag ind-data val-tag val-data)
+  "Push an (indicator value) pair onto the plist at SYM-VMA+3; returns the
+VMA of the value cell (= PROPERTY-CELL-LOCATION)."
+  (let ((block (cold-alloc w "PROPERTY-LIST-AREA" 3)))
+    (multiple-value-bind (old-tag old-data) (cw-ref w (+ sym-vma 3))
+      (cw-set w block (logior (ash +cdr-next+ 6) (tag-type ind-tag)) ind-data)
+      (cw-set w (+ block 1)
+              (logior (ash +cdr-normal+ 6) (tag-type val-tag)) val-data)
+      (cw-set w (+ block 2) old-tag old-data)
+      (cw-set w (+ sym-vma 3) (tag 0 (cold-dtp w "LIST")) block)
+      (+ block 1))))
+
+(defun property-fspec-p (fspec)
+  (and (consp fspec) (vsym-p (first fspec))
+       (string= (vsym-name (first fspec)) "PROPERTY")
+       (= (length fspec) 3)
+       (vsym-p (second fspec))))
+
+(defun cold-fdefinition-cell (w fspec)
+  "The cell a (function FSPEC) locative or fdefine targets.  Symbols use
+the function cell; (:PROPERTY sym ind) uses a real property cell; other
+list fspecs (flavor methods, internals) get a generator-allocated cell --
+their runtime re-fdefinition location differs, which only matters if they
+are redefined after boot."
+  (let ((key (fspec-key fspec)))
+    (or (gethash key (cold-world-fdefs w))
+        (setf (gethash key (cold-world-fdefs w))
+              (cond
+                ((vsym-p fspec) (+ (cold-vsym w fspec) 2))
+                ((property-fspec-p fspec)
+                 (let ((sym (cold-vsym w (second fspec))))
+                   (multiple-value-bind (it id)
+                       (cold-ref w (third fspec) :area "PROPERTY-LIST-AREA")
+                     (let ((cell (cold-prepend-property
+                                  w sym it id
+                                  (tag 0 (cold-dtp w "NULL")) 0)))
+                       ;; Unbound convention: dtp-null pointing at the cell.
+                       (cw-set w cell (tag 0 (cold-dtp w "NULL")) cell)
+                       cell))))
+                ((consp fspec)
+                 ;; (fspec-list . cell) block; the locative points at the cell.
+                 (multiple-value-bind (ft fd) (cold-ref w fspec)
+                   (let ((block (cold-alloc w "PERMANENT-STORAGE-AREA" 2)))
+                     (cw-set w block
+                             (logior (ash +cdr-normal+ 6) (tag-type ft)) fd)
+                     (cw-set w (1+ block) (tag 0 (cold-dtp w "NULL"))
+                             (1+ block))
+                     (1+ block))))
+                (t (error "Unhandled function spec ~S" fspec)))))))
+
+;;; ---------------- Instances (cold marker lists) ----------------
+
+(defun cold-instance-marker (w)
+  "The unique MAKE-INSTANCE-COLD marker: an uninterned symbol, also stored
+as SI:*COLD-MAKE-INSTANCE-MARKER*'s value so first-boot code recognizes and
+rebuilds the placeholder lists (cold-load.lisp:404, debugger/handlers.lisp
+BOOTSTRAP-FASD-INSTANCES)."
+  (let ((marker (cold-world-instance-marker w)))
+    (if (plusp marker)
+        marker
+        (let ((sym (cold-symbol w "COLD-INSTANCE-MARKER" nil))
+              (var (cold-symbol w "*COLD-MAKE-INSTANCE-MARKER*"
+                                "SYSTEM-INTERNALS")))
+          (cw-set w (1+ var) (tag 0 (cold-dtp w "SYMBOL")) sym)
+          (setf (cold-world-instance-marker w) sym)))))
+
+(defun cold-instance (w vinstance area)
+  "(marker flavor . init-plist) placeholder list; returns its VMA."
+  (or (gethash vinstance *cold-object-vmas*)
+      (let* ((plist (vinstance-plist vinstance))
+             (n (+ 2 (length plist)))
+             (vma (cold-alloc w area n))
+             (dtp-symbol (cold-dtp w "SYMBOL")))
+        (setf (gethash vinstance *cold-object-vmas*) vma)
+        (cw-set w vma (tag +cdr-next+ dtp-symbol) (cold-instance-marker w))
+        (multiple-value-bind (ft fd)
+            (cold-ref w (vinstance-flavor vinstance) :area area)
+          (cw-set w (1+ vma)
+                  (logior (ash (if plist +cdr-next+ +cdr-nil+) 6)
+                          (tag-type ft))
+                  fd))
+        (loop for p on plist
+              for i from 2
+              do (multiple-value-bind (pt pd) (cold-ref w (car p) :area area)
+                   (cw-set w (+ vma i)
+                           (logior (ash (if (cdr p) +cdr-next+ +cdr-nil+) 6)
+                                   (tag-type pt))
+                           pd)))
+        vma)))
+
 ;;; ---------------- The reference dispatcher ----------------
 
 (defun cold-ref (w obj &key (area "PERMANENT-STORAGE-AREA"))
@@ -346,14 +475,17 @@ Returns (values tag data)."
      (values (tag 0 (cold-dtp w "STRING")) (cold-string* w obj area)))
     (cons
      (values (tag 0 (cold-dtp w "LIST")) (cold-list w obj area)))
+    (veval
+     (funcall *cold-load-time-eval* w (veval-form obj)))
     (vsym (cold-symbol-ref w obj))
     (vloc
      (let ((target (vloc-target obj)))
-       (unless (vsym-p target)
-         (error "Locative to ~S not yet supported" target))
        (values (tag 0 (cold-dtp w "LOCATIVE"))
-               (+ (cold-vsym w target)
-                  (ecase (vloc-kind obj) (:value 1) (:function 2))))))
+               (ecase (vloc-kind obj)
+                 (:value (unless (vsym-p target)
+                           (error "Value locative to ~S" target))
+                         (1+ (cold-vsym w target)))
+                 (:function (cold-fdefinition-cell w target))))))
     (vchar
      (when (or (vchar-charset obj) (vchar-style obj))
        (error "Styled character ~S not yet supported" obj))
@@ -372,5 +504,17 @@ Returns (values tag data)."
          (declare (ignore code packing))
          (values (tag 0 (cold-dtp w (if (= et 1) "STRING" "ARRAY")))
                  header))))
+    (vfun
+     (values (tag 0 (cold-dtp w "COMPILED-FUNCTION")) (cold-fun w obj)))
+    (vembed
+     (unless *cold-cca-base*
+       (error "Embedded constant ~S outside a compiled function" obj))
+     (values (tag 0 (cold-dtp w (aref *cold-embed-types*
+                                      (vembed-dtp-code obj))))
+             (+ *cold-cca-base* (vembed-offset obj))))
+    (vnative
+     (values (tag 0 (cold-dtp w "SPARE-IMMEDIATE-1")) (vnative-word obj)))
+    (vinstance
+     (values (tag 0 (cold-dtp w "LIST")) (cold-instance w obj area)))
     (character  ; strings decode to CL chars only via veval forms
      (values (tag 0 (cold-dtp w "CHARACTER")) (char-code obj)))))

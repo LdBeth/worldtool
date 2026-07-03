@@ -266,7 +266,7 @@ self-pointer)."
 functions, eval forms and instances wait for later stages; a list carrying
 one falls back to materializing its leaves individually (test aid only)."
   (typecase value
-    ((or vfun veval vembed vnative vinstance vpackage vcharset null) nil)
+    ((or veval vembed vnative vpackage vcharset null) nil)
     (vop (mapc (lambda (v) (cold-materialize-value w v)) (vop-args value)))
     (cons (handler-case (cold-ref w value)
             (error ()
@@ -296,6 +296,24 @@ the cold world matches a host-side count of distinct (pname, package)."
                                      t))))
                      (vop (mapc #'visit (vop-args v)))
                      (vloc (visit (vloc-target v)))
+                     ;; Mirror cold-fun: operands only; the fspec is interned
+                     ;; by the FDEFINE vop, not by function materialization.
+                     (vfun (map nil (lambda (vw)
+                                      (unless (logbitp 9 (vword-op vw))
+                                        (visit (vword-data vw))))
+                                (vfun-words v)))
+                     (veval nil)
+                     (vinstance
+                      ;; Materialization interns the marker + its variable.
+                      (setf (gethash (cons "COLD-INSTANCE-MARKER" nil)
+                                     host-symbols)
+                            t
+                            (gethash (cons "*COLD-MAKE-INSTANCE-MARKER*"
+                                           "SYSTEM-INTERNALS")
+                                     host-symbols)
+                            t)
+                      (visit (vinstance-flavor v))
+                      (visit (vinstance-plist v)))
                      (cons (loop for c = v then (cdr c)
                                  while (consp c)
                                  do (visit (car c))
@@ -303,25 +321,160 @@ the cold world matches a host-side count of distinct (pname, package)."
                      (varray (when (varray-contents v)
                                (map nil #'visit (varray-contents v)))))))
           (loop for (op . value) in (vbin-file-events vbin)
-                do (case op
-                     ((:eval) nil)
-                     (t (visit value)))))
+                do (visit value)))
         (with-cold-materializer (w)
-          (loop for (op . value) in (vbin-file-events vbin)
-                do (case op
-                     ((:eval) nil)
-                     (t (handler-case (cold-materialize-value w value)
-                          (error (e)
-                            (incf errors)
-                            (when (<= errors 3)
-                              (cold-check nil "materialize ~S: ~A"
-                                          (type-of value) e))))))))
+          (let ((*cold-load-time-eval*
+                  ;; Census parity: host-side visit skips veval forms too.
+                  (lambda (w form)
+                    (declare (ignore form))
+                    (cold-nil-q w))))
+            (loop for (op . value) in (vbin-file-events vbin)
+                  do (handler-case (cold-materialize-value w value)
+                       (error (e)
+                         (incf errors)
+                         (when (<= errors 3)
+                           (cold-check nil "materialize ~S: ~A"
+                                       (type-of value) e)))))))
         (cold-check (zerop errors) "~D materialization errors" errors)
         (cold-check (= (hash-table-count (cold-world-symbols w))
                        (hash-table-count host-symbols))
                     "symbol census: cold ~D vs host ~D"
                     (hash-table-count (cold-world-symbols w))
                     (hash-table-count host-symbols))))))
+
+;;; M3c: compiled functions
+
+(defun walk-vfuns (value fn &optional (seen (make-hash-table :test #'eq)))
+  "Call FN on every vfun reachable inside VALUE (events, vops, lists,
+arrays, nested vword operands)."
+  (labels ((visit (v)
+             (typecase v
+               (vfun (unless (gethash v seen)
+                       (setf (gethash v seen) t)
+                       (funcall fn v)
+                       (map nil (lambda (vw) (visit (vword-data vw)))
+                            (vfun-words v))))
+               (vop (mapc #'visit (vop-args v)))
+               (cons (loop for c = v then (cdr c)
+                           while (consp c)
+                           do (visit (car c))
+                           finally (when c (visit c))))
+               (varray (when (varray-contents v)
+                         (map nil #'visit (varray-contents v)))))))
+    (visit value)))
+
+(defun check-cold-set-vfuns (w sysdir)
+  "M3c gate: every compiled function in the whole cold set materializes."
+  (declare (ignore sysdir))
+  (with-cold-checks ("cold vfuns (full cold set)")
+    (let ((files 0) (fns 0) (errors 0) (evals 0) (first-errors nil))
+      (with-cold-materializer (w)
+        (let ((*cold-load-time-eval*
+                ;; Eval-at-load-time operands are M3d's gate; count them and
+                ;; substitute NIL so the sweep can cover every function.
+                (lambda (w form)
+                  (declare (ignore form))
+                  (incf evals)
+                  (cold-nil-q w))))
+          (dolist (spec *cold-load-order*)
+            (let ((vbin (read-vbin (sys-pathname spec))))
+              (incf files)
+              (dolist (event (vbin-file-events vbin))
+                (walk-vfuns (cdr event)
+                            (lambda (vf)
+                              (incf fns)
+                              (handler-case (cold-fun w vf)
+                                (error (e)
+                                  (incf errors)
+                                  (when (< (length first-errors) 5)
+                                    (push (format nil "~A: ~S: ~A" spec
+                                                  (first (vfun-name-and-storage vf))
+                                                  e)
+                                          first-errors)))))))))))
+      (dolist (msg (reverse first-errors)) (cold-check nil "~A" msg))
+      (cold-check (zerop errors) "~D of ~D vfuns failed (~D files)"
+                  errors fns files)
+      (when (zerop errors)
+        (format t "  ~D files, ~D compiled functions, ~D eval-operands deferred~%"
+                files fns evals)))))
+
+(defun find-fdefine-vfun (vbin fspec-name)
+  "The vfun whose fspec is the symbol named FSPEC-NAME in VBIN's events
+(fdefines may hide inside LOAD-MULTIPLE-DEFINITION eval forms, so match on
+the vfun's own name-and-storage)."
+  (loop for (op . value) in (vbin-file-events vbin)
+        do (let ((found nil))
+             (declare (ignorable op))
+             (walk-vfuns value
+                         (lambda (vf)
+                           (let ((fspec (first (vfun-name-and-storage vf))))
+                             (when (and (vsym-p fspec)
+                                        (string= (vsym-name fspec) fspec-name))
+                               (setf found vf)))))
+             (when found (return found)))))
+
+(defun check-system-startup-oracle (w reference)
+  "M3c oracle: materialize SYSTEM-STARTUP from wired.vbin and compare it
+Q-for-Q with the distribution world's copy at the address SYSCOM slot 2
+points to (1C:F8046C44 in genera-8-5-wired.txt)."
+  (with-cold-checks ("cold SYSTEM-STARTUP oracle")
+    (let* ((vbin (read-vbin (sys-pathname "SYS: SYS; WIRED")))
+           (vf (find-fdefine-vfun vbin "SYSTEM-STARTUP")))
+      (cold-check vf "SYSTEM-STARTUP fdefine found in wired.vbin")
+      (when vf
+        (multiple-value-bind (sstag ssdata)
+            (world-q reference #xF8041102)      ; SYSCOM systemStartup slot
+          (cold-check (and sstag (= (tag-type sstag)
+                                    (cold-dtp w "COMPILED-FUNCTION")))
+                      "reference systemStartup slot is a compiled function")
+          (let* ((ref-fn ssdata)
+                 (fn (with-cold-materializer (w) (cold-fun w vf)))
+                 (total (vfun-total-size vf))
+                 (suffix (vfun-suffix-size vf))
+                 (n-instr (- total suffix 2))
+                 (mismatches 0))
+            ;; CCA header of the reference copy
+            (multiple-value-bind (htag hdata) (world-q reference (- ref-fn 2))
+              (cold-check (and htag
+                               (= hdata (logior (ash suffix 18) total)))
+                          "reference CCA header ~8,'0X vs total/suffix ~D/~D"
+                          hdata total suffix))
+            ;; Instruction Qs: tags identical; immediates identical;
+            ;; relative operands identical modulo base.
+            (dotimes (i n-instr)
+              (let* ((vw (aref (vfun-words vf) i))
+                     (op (vword-op vw))
+                     (imm (logbitp 9 op))
+                     (rel (logbitp 10 op))
+                     ;; Word 0's CURRENT-DEFINITION-P (bit 28) is set by
+                     ;; FDEFINE, not by function loading; the generator's
+                     ;; fdefine handling supplies it (M3d).
+                     (mask (if (zerop i) #xEFFFFFFF #xFFFFFFFF)))
+                (multiple-value-bind (gtag gdata) (cw-ref w (+ fn i))
+                  (multiple-value-bind (rtag rdata)
+                      (world-q reference (+ ref-fn i))
+                    (unless (and rtag
+                                 (= gtag rtag)
+                                 (cond (rel (= (- gdata fn) (- rdata ref-fn)))
+                                       (imm (= (logand gdata mask)
+                                               (logand rdata mask)))
+                                       (t t)))
+                      (incf mismatches)
+                      (when (<= mismatches 3)
+                        (cold-check nil
+                                    "instr ~D: ours ~2,'0X:~8,'0X ref ~A:~A"
+                                    i gtag gdata
+                                    (and rtag (format nil "~2,'0X" rtag))
+                                    (and rtag (format nil "~8,'0X" rdata)))))))))
+            (cold-check (zerop mismatches)
+                        "~D instruction mismatches (of ~D)" mismatches n-instr)
+            ;; Entry-PC formula on both copies gives the same offset.
+            (let ((ours (- (cold-fun-entry-pc w fn) fn)))
+              (multiple-value-bind (rt rd) (world-q reference ref-fn)
+                (declare (ignore rt))
+                (cold-check (= ours (1+ (- (ldb (byte 8 18) rd)
+                                           (ldb (byte 8 0) rd))))
+                            "entry-pc offset ~D matches reference" ours)))))))))
 
 ;;; Stage-test driver (CLI: worldtool coldtest TMPDIR [REFERENCE-WORLD])
 
@@ -350,5 +503,16 @@ number of failed stages (0 = success)."
         (let ((w3 (make-skeleton-world layout)))
           (cold-add-heap-regions w3)
           (unless (check-vbin-census w3 (sys-pathname "SYS: IO; RDDEFS"))
-            (incf failures)))))
+            (incf failures)))
+        ;; M3c: every compiled function in the cold set, then the
+        ;; SYSTEM-STARTUP oracle against the reference world.
+        (let ((w4 (make-skeleton-world layout)))
+          (cold-add-heap-regions w4)
+          (unless (check-cold-set-vfuns w4 sysdir)
+            (incf failures)))
+        (when reference-model
+          (let ((w5 (make-skeleton-world layout)))
+            (cold-add-heap-regions w5)
+            (unless (check-system-startup-oracle w5 reference-model)
+              (incf failures))))))
     failures))
