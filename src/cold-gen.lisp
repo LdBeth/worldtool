@@ -8,13 +8,11 @@
 ;;; between RTC and LDATA, matching sysdcl's module order.  SYS:SYS;PKGDCL
 ;;; is :lisp-read-only -- the generator reads it as source (M3f).
 ;;;
-;;; PENDING (M3d finding): the distribution cold load also contained
-;;; SYS:SYS;LISP-DATABASE-COLD (defines PROCLAIM and the DEFVAR-1 boot
-;;; bookkeeping; load it after "SYS: SYS; EVAL") and
-;;; SYS:DEBUGGER;ITRAP-DISPATCH (the trap handlers, incl. the trap-page
-;;; catch-all; late, near WIRED).  Their .vbins do not exist yet -- run
-;;; M2-COMPILE-COLD-SET in the OG2 Genera world (m2-compile.lisp
-;;; *cold-set-late-found-files*), then add them here.
+;;; Two files the SI-subsystem crossing missed (M3d finding), compiled via
+;;; m2-compile.lisp *cold-set-late-found-files*: SYS:SYS;LISP-DATABASE-COLD
+;;; (PROCLAIM and the DEFVAR-1 boot bookkeeping; after "SYS: SYS; EVAL")
+;;; and SYS:DEBUGGER;ITRAP-DISPATCH (the trap handlers, incl. the entry-T
+;;; catch-all that fills the trap page; after "SYS: SYS; WIRED").
 
 (in-package #:worldtool)
 
@@ -25,7 +23,8 @@
     "SYS: METERING; METERING-COLD" "SYS: METERING; METERING-MACROS"
     "SYS: I-SYS; BLOCK-FUNCTIONS" "SYS: SYS; AARRAY" "SYS: SYS2; ADVISE"
     "SYS: SYS; COLD-LOAD" "SYS: SYS; COMMAND-LOOP" "SYS: SYS; EXPAND-DO"
-    "SYS: IO; DRIBBL" "SYS: SYS2; ENCAPS" "SYS: SYS; EVAL" "SYS: SYS; FSPEC"
+    "SYS: IO; DRIBBL" "SYS: SYS2; ENCAPS" "SYS: SYS; EVAL"
+    "SYS: SYS; LISP-DATABASE-COLD" "SYS: SYS; FSPEC"
     "SYS: SYS2; HASH" "SYS: SYS2; HEAP" "SYS: IO; INTERACTIVE-STREAM"
     "SYS: IO; INPUT-EDITOR" "SYS: IO; ITERATORS" "SYS: SYS2; LET"
     "SYS: SYS; LISPFN" "SYS: SYS; LTOP" "SYS: SYS2; MACLSP"
@@ -44,7 +43,8 @@
     "SYS: SYS; ALLOCATE-COMMON" "SYS: SYS; ICONS" "SYS: SYS; OBJECTS"
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
     "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH" "SYS: SYS2; DOUBLE"
-    "SYS: SYS2; COMPLEX" "SYS: SYS; WIRED" "SYS: I-SYS; WIRED-CONSOLE"
+    "SYS: SYS2; COMPLEX" "SYS: SYS; WIRED" "SYS: DEBUGGER; ITRAP-DISPATCH"
+    "SYS: I-SYS; WIRED-CONSOLE"
     "SYS: I-SYS; WIRED-SCREEN" "SYS: STORAGE; STORAGE" "SYS: STORAGE; USER-STORAGE"
     "SYS: STORAGE; STACK-WIRING" "SYS: STORAGE; DISK-DRIVER"
     "SYS: STORAGE; USER-DISK-DRIVER" "SYS: STORAGE; EMBEDDED-DISK-DRIVER"

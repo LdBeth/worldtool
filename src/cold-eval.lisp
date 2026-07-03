@@ -437,25 +437,42 @@ sub-forms) -- a source form such as (FUNCTION other) or (QUOTE (SPECIAL x))."
   (cold-address w "%TRAP-VECTOR-BASE"))
 
 (defun cold-do-stve (w entry mode fspec pc-to-entry-p)
-  "sys/iprim.lisp:61: store an even-pc Q whose CDR BITS are the trap mode."
+  "sys/iprim.lisp:61: store an even-pc Q whose CDR BITS are the trap mode.
+ENTRY :CATCH-ALL (source entry T, legal only in the cold load) replaces
+every slot still holding the skeleton's synthesized halt filler with the
+real handler PC -- the 26:F8048DBB fill in the distribution trap page.
+Comparing against the old filler instead of tracking explicit entries
+makes the sweep order-independent: explicit vectors stored before it hold
+real PCs and are skipped; ones deferred to fixups overwrite it later."
   (cold-note "set-trap-vector-entry")
-  (unless (and (integerp entry) (integerp mode))
+  (unless (and (or (integerp entry) (eq entry :catch-all)) (integerp mode))
     (error "SET-TRAP-VECTOR-ENTRY with non-constant entry/mode: ~S ~S"
            entry mode))
   (let ((cell (cold-follow-cell w (cold-fdefinition-cell w fspec))))
     (flet ((attempt ()
              (multiple-value-bind (tag data) (cw-ref w cell)
                (when (= (tag-type tag) (cold-dtp w "COMPILED-FUNCTION"))
-                 (cw-set w (+ (cold-trap-base w) entry)
-                         (logior (ash mode 6) (cold-dtp w "EVEN-PC"))
-                         (cold-fun-entry-pc w data
-                                            :pc-to-entry-p pc-to-entry-p))
+                 (let ((q-tag (logior (ash mode 6) (cold-dtp w "EVEN-PC")))
+                       (pc (cold-fun-entry-pc w data
+                                              :pc-to-entry-p pc-to-entry-p)))
+                   (if (eq entry :catch-all)
+                       (let ((base (cold-trap-base w))
+                             (old-tag (tag 0 (cold-dtp w "EVEN-PC")))
+                             (old-pc (cold-world-catch-all-pc w)))
+                         (cold-note "trap catch-all fill")
+                         (dotimes (i (layout-value (cold-world-layout w)
+                                                   "%TRAP-VECTOR-LENGTH"))
+                           (multiple-value-bind (st sd) (cw-ref w (+ base i))
+                             (when (and (= st old-tag) (= sd old-pc))
+                               (cw-set w (+ base i) q-tag pc))))
+                         (setf (cold-world-catch-all-pc w) pc))
+                       (cw-set w (+ (cold-trap-base w) entry) q-tag pc)))
                  t))))
       (unless (attempt)
         (cold-note "stve fixups")
         (push (lambda ()
                 (unless (attempt)
-                  (error "Trap vector ~O: ~S never became a compiled function"
+                  (error "Trap vector ~S: ~S never became a compiled function"
                          entry fspec)))
               (cold-world-fixups w))))))
 
@@ -675,7 +692,10 @@ compiler-side and have no cold definition or boot effect.")
        (cold-do-defvar w :defconstant (first args) (second args) t
                        (third args) nil :value-kind :form))
       ((string= head "SET-TRAP-VECTOR-ENTRY")
-       (let ((entry (first args)) (mode (second args))
+       (let ((entry (if (vsym-named-p (first args) "T")
+                        :catch-all
+                        (first args)))
+             (mode (second args))
              (fspec (quoted (third args)))
              (pc-to-entry (and (fourth args)
                                (not (vsym-named-p (fourth args) "NIL")))))

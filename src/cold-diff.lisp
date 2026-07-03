@@ -502,11 +502,10 @@ points to (1C:F8046C44 in genera-8-5-wired.txt)."
   "Stubbed by *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131).")
 
 (defparameter *cold-known-pending-functions*
-  '("PROCLAIM")
-  "Defined in SYS:SYS;LISP-DATABASE-COLD, which the distribution cold load
-contained but the M2 file list missed; its .vbin must be compiled in the
-M2 Genera environment before M3f.  Accepted by the audit so the gate
-tracks only NEW problems.")
+  '()
+  "Heads accepted by the audit despite having no cold definition or stub,
+so the gate tracks only NEW problems.  Empty since the two late-found
+cold files (LISP-DATABASE-COLD, ITRAP-DISPATCH) joined the load order.")
 
 (defparameter *cold-interpreter-special-forms*
   '("IF" "PROGN" "QUOTE" "SETQ" "LET" "LET*" "COND" "AND" "OR" "BLOCK"
@@ -567,20 +566,25 @@ stub-backed, FBOUNDP-guarded, nor interpreter special forms."
                   "deferred forms call undefined-at-boot: ~{~A~^ ~}" names))))
 
 (defun check-cold-eval (w reference)
-  "M3d gate: full 85-file load with zero unhandled forms and zero
+  "M3d gate: full 87-file load with zero unhandled forms and zero
 unresolved fixups; register-map ASETs took; the trap page carries real
-vectors; SYSTEM-STARTUP is Q-for-Q EXACT against the reference
+vectors and ITRAP-DISPATCH's entry-T catch-all displaced the synthesized
+filler; SYSTEM-STARTUP is Q-for-Q EXACT against the reference
 (CURRENT-DEFINITION-P included, courtesy of the fdefine handler)."
   (with-cold-checks ("cold eval (full cold set)")
     (let ((*cold-eval-stats* (make-hash-table :test #'equal))
           (failures nil)
-          (fixup-failures 0))
+          (fixup-failures 0)
+          (skeleton-catch-all (cold-world-catch-all-pc w)))
       (handler-case
           (setf fixup-failures (cold-load-cold-set w))
         (error (e) (push (format nil "~A" e) failures)))
       (dolist (msg failures) (cold-check nil "load error: ~A" msg))
       (cold-check (zerop fixup-failures)
                   "~D unresolved fixups" fixup-failures)
+      (cold-check (/= (cold-world-catch-all-pc w) skeleton-catch-all)
+                  "trap catch-all still the synthesized filler (entry-T ~
+SET-TRAP-VECTOR-ENTRY from ITRAP-DISPATCH never ran)")
       (format t "  mini-eval actions:~%")
       (cold-eval-stats-report)
       (format t "  deferred forms: ~D, patches: ~D, magic blocks: ~D~%"
