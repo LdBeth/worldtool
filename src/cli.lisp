@@ -23,6 +23,7 @@
   (format t "usage: worldtool dump FILE [--qs PAGE:COUNT]~%~
              ~7T worldtool inspect FILE LAYOUT.sexp [--vma HEXADDR[:COUNT]]~%~
              ~7T worldtool symbols FILE [--min N]~%~
+             ~7T worldtool vbin FILE... [--trace]~%~
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
              ~7T worldtool roundtrip FILE~%")
@@ -54,6 +55,12 @@
            (unless file (return-from main (usage)))
            (symbols-world file :min min)
            0))
+        ((string= (first args) "vbin")
+         (let* ((rest (rest args))
+                (trace (member "--trace" rest :test #'string=))
+                (files (remove "--trace" rest :test #'string=)))
+           (unless files (return-from main (usage)))
+           (if (vbin-world files :trace (and trace t)) 0 1)))
         ((string= (first args) "export")
          (destructuring-bind (file sexp qs) (rest args)
            (export-world file sexp qs)

@@ -6,4 +6,5 @@
            #:dump-world #:export-world #:emit-world #:roundtrip
            #:inspect-world #:world-q #:read-layout #:layout-value
            #:collect-symbols #:symbols-world
+           #:read-vbin #:vbin-world #:setup-sys-host #:sys-pathname
            #:main))

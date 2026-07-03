@@ -34,6 +34,19 @@ done
 echo "$syms" | grep -q "COMPRESSED-PNAME-ARRAY" \
     || { echo "FAIL: symbols missing packed debug-info pname"; fail=1; }
 
+# vbin: decode Genera compiler output (skipped when the source tree is absent)
+SYSDIR="${SYSDIR:-/Users/ldbeth/Public/symbolics/rel-8-5/sys}"
+if [ -f "$SYSDIR/io/lmini.vbin" ]; then
+    vb=$("$WT" vbin "$SYSDIR/io/lmini.vbin" "$SYSDIR/sys/ltop.vbin" --trace)
+    echo "$vb" | grep -q "lmini.vbin: BIN version 5, 3989 words (0 padding), 913 table slots" \
+        || { echo "FAIL: lmini vbin decode"; fail=1; }
+    echo "$vb" | grep -q "SETQ MINI-DESTINATION-ADDRESS 257" \
+        || { echo "FAIL: lmini patched setq missing"; fail=1; }
+    echo "$vb" | grep -q "2 files, 0 failures" || { echo "FAIL: vbin decode failures"; fail=1; }
+else
+    echo "skip: $SYSDIR .vbins not found"
+fi
+
 # Export -> emit -> compare must also be lossless (exercises the sexp path)
 tmp="${TMPDIR:-/tmp}/worldtool-test.$$"
 mkdir -p "$tmp"
