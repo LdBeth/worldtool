@@ -11,8 +11,17 @@
               (parse-integer s :start (1+ colon)))
         (cons (parse-integer s) 1))))
 
+(defun parse-vma-arg (s)
+  "Parse HEXADDR[:COUNT]."
+  (let ((colon (position #\: s)))
+    (if colon
+        (cons (parse-integer s :end colon :radix 16)
+              (parse-integer s :start (1+ colon)))
+        (cons (parse-integer s :radix 16) 1))))
+
 (defun usage ()
   (format t "usage: worldtool dump FILE [--qs PAGE:COUNT]~%~
+             ~7T worldtool inspect FILE LAYOUT.sexp [--vma HEXADDR[:COUNT]]~%~
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
              ~7T worldtool roundtrip FILE~%")
@@ -28,6 +37,14 @@
                      (and p (parse-qs-arg (nth (1+ p) args))))))
            (unless file (return-from main (usage)))
            (dump-world file :qs qs)
+           0))
+        ((string= (first args) "inspect")
+         (let ((file (second args))
+               (layout (third args))
+               (vma (let ((p (position "--vma" args :test #'string=)))
+                      (and p (parse-vma-arg (nth (1+ p) args))))))
+           (unless (and file layout) (return-from main (usage)))
+           (inspect-world file layout :vma vma)
            0))
         ((string= (first args) "export")
          (destructuring-bind (file sexp qs) (rest args)
