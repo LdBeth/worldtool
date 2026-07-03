@@ -58,7 +58,9 @@ cmp "$VLMDIR/VLM_debugger" "$tmp/dbg.out" || { echo "FAIL: export/emit not lossl
 # ground-truth world when present)
 coldref=""
 [ -f "$VLMDIR/Genera-8-5.vlod" ] && coldref="--reference $VLMDIR/Genera-8-5.vlod"
-"$WT" coldtest "$here/cold-layout.sexp" "$tmp" $coldref || { echo "FAIL: coldtest"; fail=1; }
+coldsys=""
+[ -d "$SYSDIR" ] && coldsys="--sys $SYSDIR"
+"$WT" coldtest "$here/cold-layout.sexp" "$tmp" $coldref $coldsys || { echo "FAIL: coldtest"; fail=1; }
 "$WT" roundtrip "$tmp/cold-skeleton.ilod" || { echo "FAIL: cold skeleton roundtrip"; fail=1; }
 rm -rf "$tmp"
 
