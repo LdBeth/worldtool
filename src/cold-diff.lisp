@@ -963,14 +963,18 @@ when the pname appears in more than one package."
 (defun check-wired-arrays (w reference)
   "M3h gate: every generator-owned wired array is bound to a
 WIRED-CONTROL-TABLES array whose header Q equals the reference's (same
-type/leader/length), fill pointers start 0, and the fresh contents are
-NIL (boxed) / zero (packed)."
+type/leader/length/dims), leaders match the spec, and the data is
+exactly what the spec bakes (NIL / fixnum fill / verbatim words)."
   (let ((array (cold-dtp w "ARRAY"))
         (header-i (cold-dtp w "HEADER-I"))
         (fixnum (cold-dtp w "FIXNUM")))
     (multiple-value-bind (ntag ndata) (cold-nil-q w)
       (dolist (spec *cold-wired-arrays*)
-        (destructuring-bind (package name type length fill-pointer) spec
+        (destructuring-bind (package name type dims
+                             &key fill-pointer leader-length leader-list
+                                  contents words fill-fixnum last-cdr-nil)
+            spec
+          (declare (ignore leader-length))
           (multiple-value-bind (tag data boundp)
               (cold-symbol-value-q w (make-vsym package name))
             (cold-check (and boundp (= (tag-type tag) array)
@@ -996,18 +1000,54 @@ NIL (boxed) / zero (packed)."
                                    (= fd fill-pointer))
                               "~A fill pointer ~2,'0X:~8,'0X, expected ~D"
                               name ft fd fill-pointer)))
-              ;; Fresh contents.
-              (if (string= type "ART-Q")
-                  (cold-check
-                   (loop for i from 1 to length
-                         always (multiple-value-bind (et ed)
-                                    (cw-ref w (+ data i))
-                                  (and (= et ntag) (= ed ndata))))
-                   "~A elements all start NIL" name)
-                  (cold-check
-                   (loop for i from 1 to (ceiling length 32)
-                         always (zerop (nth-value 1 (cw-ref w (+ data i)))))
-                   "~A bits all start 0" name)))))))))
+              (loop for lv in leader-list
+                    for i from 0
+                    when lv
+                      do (multiple-value-bind (lt ld) (cw-ref w (- data 1 i))
+                           (cold-check (and (= (tag-type lt) fixnum)
+                                            (= ld lv))
+                                       "~A leader ~D = ~2,'0X:~8,'0X, ~
+expected ~D" name i lt ld lv)))
+              ;; Data: spec-exact.
+              (let* ((code (cold-array-type-code w type))
+                     (packing (ldb (byte 3 1) code))
+                     (len (if (listp dims) (reduce #'* dims) dims))
+                     (ndims (if (listp dims) (length dims) 1))
+                     (longp (or (> ndims 1) (>= len (ash 1 15))))
+                     (base (+ data 1 (if longp (+ 3 (* 2 ndims)) 0)))
+                     (nwords (if (zerop packing)
+                                 len
+                                 (ceiling len (ash 1 packing)))))
+                (cold-check
+                 (cond
+                   (words
+                    (loop for word in words
+                          for vma from base
+                          always (= word (nth-value 1 (cw-ref w vma)))))
+                   (contents
+                    (loop for c in contents
+                          for vma from base
+                          always (multiple-value-bind (et ed) (cw-ref w vma)
+                                   (and (= (tag-type et) fixnum) (= ed c)))))
+                   (fill-fixnum
+                    (loop for i below len
+                          always (multiple-value-bind (et ed)
+                                     (cw-ref w (+ base i))
+                                   (and (= (tag-type et) fixnum)
+                                        (= ed fill-fixnum)))))
+                   ((zerop packing)
+                    (loop for i below len
+                          for expect-tag = (if (and last-cdr-nil
+                                                    (= i (1- len)))
+                                               (logior #x40 ntag)
+                                               ntag)
+                          always (multiple-value-bind (et ed)
+                                     (cw-ref w (+ base i))
+                                   (and (= et expect-tag) (= ed ndata)))))
+                   (t
+                    (loop for i below nwords
+                          always (zerop (nth-value 1 (cw-ref w (+ base i)))))))
+                 "~A data matches its spec" name)))))))))
 
 (defun check-disk-events (w reference)
   "M3h gate: the five system disk-event variables reference four all-NIL

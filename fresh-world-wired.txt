@@ -1,5 +1,5 @@
 fresh.ilod: annotated wired dump (layout: cold-layout.sexp)
-wired map: 4 entries, 53,248 Qs
+wired map: 4 entries, 53,760 Qs
 
 Trap vectors  #xF8040000..#xF8040FFF (zero Qs omitted):
   #xF8040000 26:F80431FC x3  %ARITHMETIC-INSTRUCTION-EXCEPTION-VECTOR
@@ -824,9 +824,9 @@ T structure at #xF8041208:
   #xF804120C 00:00000000
   #xF804120D 43:C0000400
   #xF804120E 08:00040000
-  #xF804120F 08:00005D14
+  #xF804120F 08:00005FA3
 
-Architectural map entry #xF8040000 count #x5E00: nonzero Qs per Ivory page:
+Architectural map entry #xF8040000 count #x6000: nonzero Qs per Ivory page:
   page #xF8040000: 256
   page #xF8040100: 256
   page #xF8040200: 256
@@ -920,4 +920,6 @@ Architectural map entry #xF8040000 count #x5E00: nonzero Qs per Ivory page:
   page #xF8045A00: 256
   page #xF8045B00: 256
   page #xF8045C00: 256
-  page #xF8045D00: 20
+  page #xF8045D00: 256
+  page #xF8045E00: 256
+  page #xF8045F00: 163

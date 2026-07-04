@@ -546,30 +546,102 @@ wired-table forwards, so they land in the comm slots or wired cells."
 ;;; truth (headers C0000A30 / C0000100 / C0000020 x3 / C000800A /
 ;;; A8000800 / C0008020).  *SLB-CONSOLE-BUFFER* also says "set up by
 ;;; cold-load generator" but is unbound even in the distribution.
+;;; Spec: (package name type dims . options).  DIMS is a length or a
+;;; dimension list (2-D arrays get the long-prefix format).  Options:
+;;; :FILL-POINTER n / :LEADER-LENGTH n / :LEADER-LIST (..) shape the
+;;; leader; :CONTENTS (..) bakes boxed elements (fixnums); :WORDS (..)
+;;; bakes packed data words verbatim; :FILL-FIXNUM n fills boxed
+;;; elements with a fixnum instead of NIL; :LAST-CDR-NIL sets the last
+;;; element's cdr code (ART-Q-LIST list discipline).
 (defparameter *cold-wired-arrays*
-  ;; (package name type length fill-pointer)
-  '(("COMMON-LISP-INTERNALS" "*EMB-HANDLE-ARRAY*"       "ART-Q" 2608 nil)
-    ("COMMON-LISP-INTERNALS" "*INTERRUPT-TASK-STORAGE*" "ART-Q"  256 nil)
-    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-HANDLER*"     "ART-Q"   32 nil)
-    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-ARGUMENT*"    "ART-Q"   32 nil)
-    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-PRIORITY*"    "ART-Q"   32 nil)
-    ("SYSTEM-INTERNALS"      "*QUEUED-WAKEUPS*"         "ART-Q"   10 0)
-    ("SYSTEM-INTERNALS"      "*OLDSPACE-MAP*"     "ART-BOOLEAN" 2048 nil)
-    ("SYSTEM-INTERNALS"      "*SLB-WIRED-CONSOLES*"     "ART-Q"   32 0)))
+  '(("COMMON-LISP-INTERNALS" "*EMB-HANDLE-ARRAY*"       "ART-Q" 2608)
+    ("COMMON-LISP-INTERNALS" "*INTERRUPT-TASK-STORAGE*" "ART-Q"  256)
+    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-HANDLER*"     "ART-Q"   32)
+    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-ARGUMENT*"    "ART-Q"   32)
+    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-PRIORITY*"    "ART-Q"   32)
+    ("SYSTEM-INTERNALS"      "*QUEUED-WAKEUPS*"         "ART-Q"   10
+     :fill-pointer 0)
+    ("SYSTEM-INTERNALS"      "*OLDSPACE-MAP*"     "ART-BOOLEAN" 2048)
+    ("SYSTEM-INTERNALS"      "*SLB-WIRED-CONSOLES*"     "ART-Q"   32
+     :fill-pointer 0)
+    ;; The M3h boot-4 batch: dist-array-valued wired variables with NO
+    ;; allocation site in any source -- only the original generator can
+    ;; have made them (found by sweeping every unbound fresh wired cell
+    ;; against the distribution after boot 4 trapped on the unbound
+    ;; *PENDING-INDICES* AREF in reinitialize-storage, pre-banner and
+    ;; pre-ENABLE-TRAPPING, so it surfaced as AUX-HALT).
+    ;; Demilevel 0 is level 1, all others -1 -- distribution verbatim.
+    ("SYSTEM-INTERNALS" "*DEMILEVEL-LEVEL*"        "ART-8B"      64
+     :words (#xFFFFFF01 #xFFFFFFFF #xFFFFFFFF #xFFFFFFFF
+             #xFFFFFFFF #xFFFFFFFF #xFFFFFFFF #xFFFFFFFF
+             #xFFFFFFFF #xFFFFFFFF #xFFFFFFFF #xFFFFFFFF
+             #xFFFFFFFF #xFFFFFFFF #xFFFFFFFF #xFFFFFFFF))
+    ;; WIRED-FERROR fills this and treats it as a list (g-l-p).
+    ("SYSTEM-INTERNALS" "WIRED-FERROR-ARGS-ARRAY"  "ART-Q-LIST"  10
+     :fill-pointer 0 :last-cdr-nil t)
+    ;; Mouse tracking state (wired-console.lisp:137-144,405): the scale
+    ;; arrays are static acceleration tables -- distribution verbatim.
+    ("TV" "MOUSE-CURSOR-PATTERN"                   "ART-1B"  (32 32))
+    ("TV" "MOUSE-X-SCALE-ARRAY"                    "ART-FIXNUM"  16
+     :contents (#x50 #x2AA #x7FFFFFFF #x555 #x7D0 #x7D0 #x7D0 #x7D0
+                #x7D0 #x7D0 #x7D0 #x7D0 #x7D0 #x7D0 #x7D0 #x7D0))
+    ("TV" "MOUSE-Y-SCALE-ARRAY"                    "ART-FIXNUM"  16
+     :contents (#x50 #x266 #x7FFFFFFF #x4CC #x7D0 #x7D0 #x7D0 #x7D0
+                #x7D0 #x7D0 #x7D0 #x7D0 #x7D0 #x7D0 #x7D0 #x7D0))
+    ("TV" "MOUSE-BUTTONS-BUFFER"                   "ART-Q"       32)
+    ("SYSTEM-INTERNALS" "*MOUSE-TIME-KBD-IN-POINTERS*" "ART-Q"   20
+     :fill-pointer 20 :leader-length 2 :leader-list (nil 0))
+    ;; Pager / storage wired state (storage.lisp:93,180-257):
+    ;; reinitialize-storage AREFs *PENDING-INDICES* (boot-4 trap) and
+    ;; *ZONE-COUNT-WIRED-PAGES* unconditionally.
+    ("STORAGE" "*ECC-ERROR-LOG*"                   "ART-FIXNUM" 200
+     :fill-fixnum 0)
+    ("STORAGE" "*PREFETCH-FRAMES*"                 "ART-Q"       64)
+    ("STORAGE" "*PENDING-VPN*"                     "ART-Q"       83)
+    ("STORAGE" "*PENDING-INDICES*"                 "ART-Q"       83)
+    ("STORAGE" "*READ-ONLY-WRITTEN-PAGES*"         "ART-Q"        8)
+    ("STORAGE" "*ZONE-COUNT-WIRED-PAGES*"          "ART-Q"       32
+     :fill-fixnum 0)
+    ("STORAGE" "*PAGE-WAITER-VPN*"                 "ART-Q"        8)
+    ("STORAGE" "*PAGE-WAITER-PROCESS*"             "ART-Q"        8)))
 
 (defun cold-build-wired-arrays (w)
   (dolist (spec *cold-wired-arrays*)
-    (destructuring-bind (package name type length fill-pointer) spec
-      (let ((arr (make-varray
-                  (list length)
-                  (append (list (make-vsym "KEYWORD" "TYPE")
-                                (make-vsym "SYSTEM" type))
-                          (when fill-pointer
-                            (list (make-vsym "KEYWORD" "FILL-POINTER")
-                                  fill-pointer))))))
-        (cold-set-symbol-value w (make-vsym package name)
-                               (tag 0 (cold-dtp w "ARRAY"))
-                               (cold-array w arr "WIRED-CONTROL-TABLES"))))))
+    (destructuring-bind (package name type dims
+                         &key fill-pointer leader-length leader-list
+                              contents words fill-fixnum last-cdr-nil)
+        spec
+      (let* ((len (if (listp dims) (reduce #'* dims) dims))
+             (arr (make-varray
+                   (if (listp dims) dims (list dims))
+                   (append
+                    (list (make-vsym "KEYWORD" "TYPE")
+                          (make-vsym "SYSTEM" type))
+                    (when fill-pointer
+                      (list (make-vsym "KEYWORD" "FILL-POINTER")
+                            fill-pointer))
+                    (when leader-length
+                      (list (make-vsym "KEYWORD" "LEADER-LENGTH")
+                            leader-length))
+                    (when leader-list
+                      (list (make-vsym "KEYWORD" "LEADER-LIST")
+                            leader-list))))))
+        (when contents
+          (setf (varray-contents arr) (coerce contents 'vector)))
+        (let* ((hdr (cold-array w arr "WIRED-CONTROL-TABLES"))
+               (fixnum (cold-dtp w "FIXNUM")))
+          (when words
+            (loop for word in words
+                  for vma from (+ hdr 1)
+                  do (cw-set w vma (tag 0 fixnum) word)))
+          (when fill-fixnum
+            (dotimes (i len)
+              (cw-set w (+ hdr 1 i) (tag 0 fixnum) fill-fixnum)))
+          (when last-cdr-nil
+            (multiple-value-bind (tag data) (cw-ref w (+ hdr len))
+              (cw-set w (+ hdr len) (logior #x40 tag) data)))
+          (cold-set-symbol-value w (make-vsym package name)
+                                 (tag 0 (cold-dtp w "ARRAY")) hdr))))))
 
 ;;; ---------------- System disk events ----------------
 
