@@ -3,14 +3,45 @@
 
 (in-package #:worldtool)
 
+;; "VLMP" of the "VLMPMD1\n" magic the emulator writes at the head of a
+;; halt dump (src/main.c MaybeDumpMemoryOnHalt, GENERA_HALT_DUMP).
+(defconstant +pmdump-cookie+ #x504D4C56)
+
 (defun read-world (path)
   (let* ((buf (read-file-bytes path))
          (cookie (le32 buf 0)))
     (cond ((= cookie +ivory-cookie+) (read-ilod buf))
           ((= cookie +vlm-cookie+) (read-vlod buf))
+          ((= cookie +pmdump-cookie+) (read-pmdump buf))
           ((= cookie +vlm-cookie-swapped+)
            (error "~A is a byte-swapped VLM world; not supported" path))
           (t (error "~A: unrecognized world file cookie #x~8,'0X" path cookie)))))
+
+(defun read-pmdump (buf)
+  "Post-mortem halt dump: 8-byte magic, u32 page size in Qs, then one
+record per resident page -- u32 vma, PAGE-QS tag bytes, PAGE-QS LE32
+data words.  Modeled as one :data-pages map entry per page so world-q
+and the inspect tooling work unchanged.  Read-only (no writer)."
+  (let ((page-qs (le32 buf 8))
+        (pos 12)
+        (entries nil))
+    (loop while (< pos (length buf))
+          do (let ((vma (le32 buf pos))
+                   (qv (make-qvec page-qs)))
+               (incf pos 4)
+               (dotimes (i page-qs)
+                 (setf (qref-tag qv i) (aref buf (+ pos i))))
+               (incf pos page-qs)
+               (dotimes (i page-qs)
+                 (setf (qref-data qv i) (le32 buf (+ pos (* 4 i)))))
+               (incf pos (* 4 page-qs))
+               (push (make-map-entry :address vma :opcode +op-data-pages+
+                                     :count page-qs :payload qv)
+                     entries)))
+    (make-world-model :format :pmdump
+                      :header-bytes (subseq buf 0 12)
+                      :wired-map (nreverse entries)
+                      :file-size (length buf))))
 
 (defun write-world (model)
   (let ((buf (ecase (world-model-format model)

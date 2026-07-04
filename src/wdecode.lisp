@@ -131,10 +131,13 @@ numbers decode structurally; everything else comes back as (:Q tag data)."
 
 (defun world-find-symbols (model pname)
   "All symbol-block VMAs in MODEL whose pname is PNAME (case-sensitive).
-Scans every data-pages entry for the 5-Q symbol shape."
+Scans every data-pages entry -- wired and unwired; fresh.ilod keeps its
+heap in the unwired map -- for the 5-Q symbol shape."
   (let ((hits nil)
         (len (length pname)))
-    (dolist (e (world-model-wired-map model) (nreverse hits))
+    (dolist (e (append (world-model-wired-map model)
+                       (world-model-unwired-map model))
+               (nreverse hits))
       (when (= (map-entry-opcode e) +op-data-pages+)
         (let ((qv (map-entry-payload e))
               (base (map-entry-address e)))

@@ -23,6 +23,7 @@
   (format t "usage: worldtool dump FILE [--qs PAGE:COUNT]~%~
              ~7T worldtool inspect FILE LAYOUT.sexp [--vma HEXADDR[:COUNT]]~%~
              ~7T worldtool symbols FILE [--min N]~%~
+             ~7T worldtool symval FILE PNAME~%~
              ~7T worldtool vbin FILE... [--trace]~%~
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
@@ -57,6 +58,16 @@
                       (if p (parse-integer (nth (1+ p) args)) 4))))
            (unless file (return-from main (usage)))
            (symbols-world file :min min)
+           0))
+        ((string= (first args) "symval")
+         (let ((file (second args))
+               (pname (third args)))
+           (unless (and file pname) (return-from main (usage)))
+           (let ((model (read-world file)))
+             (multiple-value-bind (value vma n)
+                 (world-symbol-value model pname)
+               (format t "~&~A (symbol #x~8,'0X~@[, ~D candidates~]): ~S~%"
+                       pname vma (and (> n 1) n) value)))
            0))
         ((string= (first args) "vbin")
          (let* ((rest (rest args))
