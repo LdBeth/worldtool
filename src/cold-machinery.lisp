@@ -30,6 +30,12 @@
 ;;;    are constant Qs whose targets are unmapped even in the distribution
 ;;;    world.  Copied from the reference world, which is already a required
 ;;;    coldgen input (symbol-home oracle).
+;;;
+;;; 5. Verbatim IFEP FEPComm function slots (M3g): the 19 debugger-kernel
+;;;    entry points FEP-COMMAND-STRING .. FEP-SEQUENCE-BREAK (FEPComm
+;;;    slots #x1F-#x31).  No cold file defines them; the slots are
+;;;    magic-forwarded function cells, so copying the reference Q
+;;;    (1C:F801xxxx) IS the fdefine.
 
 (in-package #:worldtool)
 
@@ -458,16 +464,78 @@ wired-table forwards, so they land in the comm slots or wired cells."
           (error "Reference trap slot ~D unmapped" slot))
         (cw-set w (+ base slot) tag data)))))
 
+;;; ---------------- Verbatim IFEP FEPComm function slots ----------------
+
+;;; FEPComm slots #x1F-#x31: IFEP debugger-kernel entry points the wired
+;;; console path calls through (COLD-LOAD-STREAM-* etc.).  Their function
+;;; cells are magic-forwarded into the block by sysdf1's
+;;; DEFINE-MAGIC-LOCATIONS-1, and no cold file fdefines them -- the
+;;; distribution generator grafted the kernel entries the same way.
+;;; fepStartup (slot 2) deliberately stays non-1C so the emulator falls
+;;; through to SYSCOM systemStartup (interfac.c:775).
+(defconstant +cold-fepcomm-graft-start+ #x1F)
+(defparameter *cold-fepcomm-graft-names*
+  '("FEP-COMMAND-STRING" "FEP-CRASH-DATA-REQUEST"
+    "COLD-LOAD-STREAM-READ-CHARACTER" "COLD-LOAD-STREAM-LISTEN"
+    "COLD-LOAD-STREAM-READ-HARDWARE-CHARACTER"
+    "COLD-LOAD-STREAM-DRAW-CHARACTER"
+    "COLD-LOAD-STREAM-DISPLAY-LOZENGED-STRING" "COLD-LOAD-STREAM-SELECT"
+    "COLD-LOAD-STREAM-BEEP" "COLD-LOAD-STREAM-FINISH"
+    "COLD-LOAD-STREAM-INSIDE-SIZE" "COLD-LOAD-STREAM-SET-CURSORPOS"
+    "COLD-LOAD-STREAM-READ-CURSORPOS" "COLD-LOAD-STREAM-COMPUTE-MOTION"
+    "COLD-LOAD-STREAM-CLEAR-BETWEEN-CURSORPOSES"
+    "COLD-LOAD-STREAM-SET-EDGES" "MAIN-SCREEN-PARAMETERS" "WIRED-FORMAT"
+    "FEP-SEQUENCE-BREAK"))
+
+(defun cold-fepcomm-block (w)
+  "The FEP-COMMUNICATION-AREA layout block (name start end ventries)."
+  (or (find-if (lambda (b)
+                 (string= (strip-package (first b)) "FEP-COMMUNICATION-AREA"))
+               (layout-section (cold-world-layout w) :magic-locations))
+      (error "No FEP-COMMUNICATION-AREA in the layout")))
+
+(defun cold-graft-fepcomm-functions (w reference)
+  (destructuring-bind (name base end ventries) (cold-fepcomm-block w)
+    (declare (ignore name end))
+    (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
+          (dtp-null (cold-dtp w "NULL")))
+      (loop for fname in *cold-fepcomm-graft-names*
+            for slot from +cold-fepcomm-graft-start+
+            for ventry = (nth slot ventries)
+            do (destructuring-bind (vtype vval) ventry
+                 ;; The slot must be the layout's function cell for FNAME.
+                 (unless (and (eq vtype :function)
+                              (string= (strip-package (second vval)) fname))
+                   (error "FEPComm slot #x~X is ~S, expected FUNCTION ~A"
+                          slot ventry fname)))
+               ;; The load left the slot an unbound forwarded cell; a 1C
+               ;; here would mean a cold file now defines it and the graft
+               ;; would clobber that definition.
+               (multiple-value-bind (tag data) (cw-ref w (+ base slot))
+                 (declare (ignore data))
+                 (unless (= (tag-type tag) dtp-null)
+                   (error "FEPComm slot ~A already bound (~2,'0X)"
+                          fname tag)))
+               (multiple-value-bind (tag data)
+                   (world-q reference (+ base slot))
+                 (unless (and tag (= (tag-type tag) dtp-cf)
+                              (<= #xF8010000 data #xF801FFFF))
+                   (error "Reference FEPComm slot ~A is ~
+~:[unmapped~;~:*~2,'0X:~8,'0X~], expected 1C:F801xxxx" fname tag data))
+                 (cw-set w (+ base slot) tag data))))))
+
 ;;; ---------------- Driver ----------------
 
 (defun cold-build-wired-machinery (w &key reference)
   "M3e pass, after the cold set has loaded (the magic-location forwarding
 already ran during the load).  Builds the initial stack group, stamps the
 generator-owned wired values, fills the storage tables from the final
-region state, and grafts the IFEP trap vectors from the reference world."
+region state, and grafts the IFEP trap vectors and FEPComm function
+slots from the reference world."
   (cold-build-initial-stack-group w)
   (cold-stamp-storage-values w)
   (cold-fill-storage-tables w)
   (when reference
-    (cold-graft-ifep-vectors w reference))
+    (cold-graft-ifep-vectors w reference)
+    (cold-graft-fepcomm-functions w reference))
   w)

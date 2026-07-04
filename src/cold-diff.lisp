@@ -901,13 +901,33 @@ by construction)."
                  (cold-check (and rt (= gt rt) (= gd rd))
                              "SYSCOM+~D table slot ~2,'0X:~8,'0X vs ref ~
 ~2,'0X:~8,'0X (~S)" index gt gd rt rd value))))
-  ;; And the FEPCOM function slots stay unbound until the M3g grafts; in
-  ;; particular fepStartup must NOT read as a compiled function, so the
-  ;; emulator falls through to systemStartup (interfac.c:775).
+  ;; fepStartup must NOT read as a compiled function, so the emulator
+  ;; falls through to systemStartup (interfac.c:775); the M3g FEPComm
+  ;; grafts (checked below) must never grow to cover slot 2.
   (multiple-value-bind (tag data) (cw-ref w (+ #xF8041000 2))
     (declare (ignore data))
     (cold-check (/= (tag-type tag) (cold-dtp w "COMPILED-FUNCTION"))
-                "FEPCOM fepStartup must not be a compiled function yet")))
+                "FEPCOM fepStartup must not be a compiled function")))
+
+(defun check-fepcomm-grafts (w reference)
+  "M3g gate: the 19 grafted FEPComm function slots (FEP-COMMAND-STRING ..
+FEP-SEQUENCE-BREAK, slots #x1F-#x31) are Q-for-Q the reference and carry
+IFEP debugger-kernel entries (1C:F801xxxx)."
+  (destructuring-bind (name base end ventries) (cold-fepcomm-block w)
+    (declare (ignore name end ventries))
+    (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION")))
+      (loop for fname in *cold-fepcomm-graft-names*
+            for slot from +cold-fepcomm-graft-start+
+            do (multiple-value-bind (gt gd) (cw-ref w (+ base slot))
+                 (multiple-value-bind (rt rd)
+                     (world-q reference (+ base slot))
+                   (cold-check (and rt (= gt rt) (= gd rd))
+                               "FEPComm ~A: ~2,'0X:~8,'0X vs ref ~
+~:[unmapped~;~:*~2,'0X:~8,'0X~]" fname gt gd rt rd)
+                   (cold-check (and (= (tag-type gt) dtp-cf)
+                                    (<= #xF8010000 gd #xF801FFFF))
+                               "FEPComm ~A: ~2,'0X:~8,'0X not an IFEP ~
+kernel entry" fname gt gd)))))))
 
 (defun check-wired-machinery (w reference)
   "M3e gate: magic-location forwarding for all three comm blocks, the
@@ -955,7 +975,8 @@ page fully reconciled against the reference."
                       collisions)))
       (when reference
         (check-trap-page-against-reference w reference)
-        (check-magic-table-vs-reference w reference #xF8041100)))))
+        (check-magic-table-vs-reference w reference #xF8041100)
+        (check-fepcomm-grafts w reference)))))
 
 ;;; M3f gate: finalize, emit, re-read, audit.
 
