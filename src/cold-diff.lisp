@@ -647,6 +647,320 @@ SET-TRAP-VECTOR-ENTRY from ITRAP-DISPATCH never ran)")
                                   "entry instruction exact: ~2,'0X:~8,'0X vs ~2,'0X:~8,'0X"
                                   gt gd rt2 rd))))))))))))
 
+;;; M3e: wired machinery
+
+;;; Ground-truth addresses of the generator's first allocations (probe of
+;;; Genera-8-5.vlod, 2026-07-04).  Deterministic because both generators
+;;; reserve them first in their regions.
+(defparameter *cold-machinery-table-addresses*
+  '((:region-free-pointer             #xF804120D)
+    (:region-gc-pointer               #xF804160E)
+    (:region-quantum-origin           #xF8041A0F)
+    (:region-quantum-length           #xF8041E10)
+    (:region-bits                     #xF8042211)
+    (:area-name                       #xF0000002)
+    (:area-maximum-quantum-size       #xF0000085)
+    (:area-region-quantum-size        #xF0000108)
+    (:area-region-list                #xF000018B)
+    (:area-region-bits                #xF00001CE)
+    (:region-free-pointer-before-flip #xF000024F)
+    (:region-list-thread              #xF0000650)
+    (:region-created-pages            #xF0000851)
+    (:region-area                     #xF0000C52)
+    (:oblast-free-size                #xF0000E53)))
+
+;;; Per-slot expectations for the SYSCOM block in a COLD world.  Slots the
+;;; FEP or first boot owns (address-space map, PHT windows, sysout, package
+;;; table) are only required to be unbound/NIL/loose; generator-owned slots
+;;; are exact.  :TABLE slots must hold the machinery array -- which is also
+;;; Q-for-Q the reference value, since the addresses match.
+(defparameter *cold-syscom-slot-spec*
+  '((0 :fixnum= 452) (1 :fixnum= 22) (2 :tag "COMPILED-FUNCTION")
+    (3 :unset) (4 :table :oblast-free-size) (5 :table :area-name)
+    (6 :table :area-maximum-quantum-size)
+    (7 :table :area-region-quantum-size) (8 :table :area-region-list)
+    (9 :table :area-region-bits) (10 :table :region-quantum-origin)
+    (11 :table :region-quantum-length) (12 :table :region-free-pointer)
+    (13 :table :region-gc-pointer) (14 :table :region-bits)
+    (15 :table :region-list-thread) (16 :table :region-area)
+    (17 :table :region-created-pages)
+    (18 :table :region-free-pointer-before-flip)
+    (19 :fixnum= 0) (20 :fixnum= 0) (21 :unset) (22 :unset)
+    (23 :fixnum= 8)
+    (24 :unset) (25 :unset) (26 :unset) (27 :unset) (28 :unset) (29 :unset)
+    (30 :unset) (31 :unset) (32 :unset) (33 :unset) (34 :unset) (35 :unset)
+    (36 :t) (37 :unset) (38 :unset) (39 :unset)
+    (40 :fixnum= #x4A600) (41 :fixnum= #xF804A600)
+    (42 :unset) (43 :loose) (44 :loose) (45 :loose) (46 :loose) (47 :loose)
+    (48 :initial-sg) (49 :unset) (50 :unset) (51 :fixnum= #x240) (52 :t)
+    (53 :locative= #xF6000000) (54 :loose) (55 :fixnum) (56 :fixnum= 0)
+    (57 :unset) (58 :tag "STRING") (59 :unset)))
+
+(defun cold-magic-block (w suffix)
+  (or (find-if (lambda (m) (string= (vsym-name (first m)) suffix))
+               (cold-world-magic w))
+      (error "No magic block ~A was stashed" suffix)))
+
+(defun check-magic-forwarding (w layout-block stash)
+  "Every variable of a comm block: stash matches the layout ventries and
+the symbol's cell is a one-q-forward to its slot."
+  (destructuring-bind (block-name start end ventries) layout-block
+    (declare (ignore end))
+    (let ((vars (third stash))
+          (fwd (cold-dtp w "ONE-Q-FORWARD")))
+      (cold-check (= (length vars) (length ventries))
+                  "~A: stash has ~D vars, layout ~D"
+                  block-name (length vars) (length ventries))
+      (loop for var in vars
+            for (vtype vval) in ventries
+            for slot from start
+            do (multiple-value-bind (cell kind) (cold-magic-var-cell w var)
+                 (cold-check (eq kind (if (eq vtype :function) :function :value))
+                             "~A slot #x~8,'0X: stash kind ~S vs layout ~S"
+                             block-name slot kind vtype)
+                 (let ((lname (strip-package (second vval)))
+                       (sname (vsym-name (if (consp var) (second var) var))))
+                   (cold-check (string= lname sname)
+                               "~A slot #x~8,'0X: stash ~A vs layout ~A"
+                               block-name slot sname lname))
+                 (multiple-value-bind (tag data) (cw-ref w cell)
+                   (cold-check (and (= (tag-type tag) fwd) (= data slot))
+                               "~A ~A: cell #x~8,'0X is ~2,'0X:~8,'0X, not a ~
+forward to #x~8,'0X"
+                               block-name
+                               (vsym-name (if (consp var) (second var) var))
+                               cell tag data slot)))))))
+
+(defun check-syscom-slots (w start)
+  (let ((dtp-null (cold-dtp w "NULL"))
+        (dtp-nil (cold-dtp w "NIL"))
+        (fixnum (cold-dtp w "FIXNUM")))
+    (loop for (index kind value) in *cold-syscom-slot-spec*
+          for slot = (+ start index)
+          do (multiple-value-bind (tag data) (cw-ref w slot)
+               (let ((type (tag-type tag)))
+                 (flet ((fail (want)
+                          (cold-check nil "SYSCOM+~D: ~A expected, got ~
+~2,'0X:~8,'0X" index want tag data)))
+                   (ecase kind
+                     (:fixnum= (unless (and (= type fixnum) (= data value))
+                                 (fail (format nil "fixnum ~D" value))))
+                     (:fixnum (unless (= type fixnum) (fail "a fixnum")))
+                     (:locative= (unless (and (= type (cold-dtp w "LOCATIVE"))
+                                              (= data value))
+                                   (fail (format nil "locative #x~X" value))))
+                     (:tag (unless (= type (cold-dtp w value))
+                             (fail (format nil "tag DTP-~A" value))))
+                     (:t (unless (and (= type (cold-dtp w "SYMBOL"))
+                                      (= data (cold-world-t-vma w)))
+                           (fail "T")))
+                     (:unset (unless (or (= type dtp-null) (= type dtp-nil))
+                               (fail "unbound or NIL")))
+                     (:loose (unless (or (= type dtp-null) (= type dtp-nil)
+                                         (= type fixnum))
+                               (fail "unbound, NIL or fixnum")))
+                     (:table (unless (and (= type (cold-dtp w "ARRAY"))
+                                          (= data (cold-machinery w value)))
+                               (fail (format nil "machinery table ~S" value))))
+                     (:initial-sg
+                      (unless (and (= type (cold-dtp w "ARRAY"))
+                                   (= data (cold-machinery
+                                            w :initial-stack-group)))
+                        (fail "the initial stack group"))))))))))
+
+(defun check-machinery-region-tables (w)
+  "The emitted tables describe this world's regions, verified by
+independent reconstruction."
+  (let ((regions (cold-world-regions w))
+        (org-tbl (cold-machinery w :region-quantum-origin))
+        (len-tbl (cold-machinery w :region-quantum-length))
+        (fp-tbl (cold-machinery w :region-free-pointer))
+        (thread-tbl (cold-machinery w :region-list-thread))
+        (area-tbl (cold-machinery w :region-area))
+        (rlist-tbl (cold-machinery w :area-region-list)))
+    (loop for region across regions
+          for r = (cold-region-number region)
+          do (multiple-value-bind (tag data) (cw-ref w (+ org-tbl 1 r))
+               (declare (ignore tag))
+               (cold-check (= data (ash (cold-region-origin region) -16))
+                           "region ~D origin quantum ~X vs table ~X"
+                           r (ash (cold-region-origin region) -16) data))
+             (multiple-value-bind (tag data) (cw-ref w (+ len-tbl 1 r))
+               (declare (ignore tag))
+               (cold-check (= data (ceiling (cold-region-length region)
+                                            #x10000))
+                           "region ~D quantum length" r))
+             (multiple-value-bind (tag data) (cw-ref w (+ fp-tbl 1 r))
+               (declare (ignore tag))
+               (cold-check (= data (- (cold-region-free region)
+                                      (cold-region-origin region)))
+                           "region ~D free pointer" r))
+             (cold-check (= (cold-table-ref16 w area-tbl r)
+                            (cold-region-area region))
+                         "region ~D area" r))
+    ;; Area chains: rlist -> thread ... -1 reproduces cold-area-regions.
+    (loop for area across (cold-world-areas w)
+          when area
+            do (let ((chain nil)
+                     (r (cold-table-ref16 w rlist-tbl (cold-area-number area))))
+                 (loop for guard from 0 below 64
+                       until (= r #xFFFF)
+                       do (push r chain)
+                          (setf r (cold-table-ref16 w thread-tbl r)))
+                 (cold-check (equal (reverse chain) (cold-area-regions area))
+                             "area ~D chain ~S vs regions ~S"
+                             (cold-area-number area) (reverse chain)
+                             (cold-area-regions area))))
+    ;; The wired region stayed inside the architectural limit.
+    (let ((wired (aref regions 1)))
+      (cold-check (<= (cold-region-free wired) +wired-zone-limit+)
+                  "wired region free #x~8,'0X exceeds #x~8,'0X"
+                  (cold-region-free wired) +wired-zone-limit+))))
+
+(defun check-initial-stack-group (w)
+  (let* ((layout (cold-world-layout w))
+         (sg (cold-machinery w :initial-stack-group))
+         (locative (cold-dtp w "LOCATIVE")))
+    (flet ((field (name)
+             (multiple-value-bind (tag data)
+                 (cw-ref w (+ sg (cold-sg-field-word layout name)))
+               (values (tag-type tag) data))))
+      (multiple-value-bind (tag data) (cw-ref w sg)
+        (cold-check (and (= (tag-type tag) (cold-dtp w "HEADER-I"))
+                         (logbitp 25 data)
+                         (= (ldb (byte 15 0) data) 63))
+                    "SG header named-structure ART-Q 63, got ~2,'0X:~8,'0X"
+                    tag data))
+      (multiple-value-bind (tag data) (cw-ref w (+ sg 1))
+        (declare (ignore data))
+        (cold-check (= (tag-type tag) (cold-dtp w "SYMBOL"))
+                    "SG element 0 holds the STACK-GROUP symbol"))
+      (multiple-value-bind (type data) (field "SG-STATUS-BITS")
+        (declare (ignore type))
+        (cold-check (= data +cold-sg-status+)
+                    "SG status #x~X (uninitialized+safe = #x~X)"
+                    data +cold-sg-status+))
+      (multiple-value-bind (type data) (field "SG-CONTROL-STACK-LOW")
+        (cold-check (and (= type locative) (= data #xF6000000))
+                    "SG control-stack-low"))
+      (multiple-value-bind (type data) (field "SG-CONTROL-STACK-LIMIT")
+        (cold-check
+         (and (= type locative)
+              (= data (- (+ #xF6000000 +cold-control-stack-size+)
+                         (layout-value layout "CONTROL-STACK-OVERFLOW-MARGIN")
+                         (layout-value layout "CONTROL-STACK-MAX-FRAME-SIZE"))))
+         "SG control-stack-limit #x~8,'0X" data))
+      (multiple-value-bind (type data) (field "SG-BINDING-STACK-POINTER")
+        (cold-check (and (= type locative) (= data #xF2000001))
+                    "SG binding-stack-pointer"))
+      (multiple-value-bind (type data) (field "SG-BINDING-STACK-LIMIT")
+        (cold-check (and (= type locative)
+                         (= data (+ #xF2000000 +cold-binding-stack-size+ -1)))
+                    "SG binding-stack-limit"))
+      (multiple-value-bind (type data) (field "SG-DATA-STACK-LOW")
+        (declare (ignore data))
+        (cold-check (= type (cold-dtp w "NIL"))
+                    "SG data stack unallocated (GROW-DATA-STACK owns it)"))
+      ;; Stack pages exist.
+      (cold-check (nth-value 2 (cw-ref w #xF6000000)) "control stack pages")
+      (cold-check (nth-value 2 (cw-ref w #xF2000000)) "binding stack pages"))))
+
+(defun check-trap-page-against-reference (w reference)
+  "After the grafts, tags may differ from the reference only in the
+generic-dispatch block (warm-installed) and the transport vector (pending
+igc-cold, cold file #88)."
+  (multiple-value-bind (labels base len) (trap-vector-labels
+                                          (cold-world-layout w))
+    (declare (ignore labels))
+    (let ((unexpected nil) (transport-missing nil))
+      (dotimes (i len)
+        (multiple-value-bind (gt gd) (cw-ref w (+ base i))
+          (declare (ignore gd))
+          (multiple-value-bind (rt rd) (world-q reference (+ base i))
+            (declare (ignore rd))
+            (when (and rt (/= gt rt))
+              (cond ((<= 2560 i 2623))           ; generic dispatch, warm
+                    ((= i 2630) (setf transport-missing t))
+                    (t (push i unexpected)))))))
+      (cold-check (null unexpected)
+                  "trap page: unexpected tag mismatches at ~S" unexpected)
+      (when transport-missing
+        (format t "  note: trap 2630 (%TRANSPORT-TRAP-VECTOR) still ~
+catch-all -- igc-cold (cold file #88) not yet in the set~%"))
+      ;; Grafted slots are Q-for-Q the reference.
+      (dolist (slot *cold-ifep-vector-slots*)
+        (multiple-value-bind (gt gd) (cw-ref w (+ base slot))
+          (multiple-value-bind (rt rd) (world-q reference (+ base slot))
+            (cold-check (and (= gt rt) (= gd rd))
+                        "graft slot ~D: ~2,'0X:~8,'0X vs ref ~2,'0X:~8,'0X"
+                        slot gt gd rt rd)))))))
+
+(defun check-magic-table-vs-reference (w reference start)
+  "The table-valued SYSCOM slots are Q-for-Q the reference (same addresses
+by construction)."
+  (loop for (index kind value) in *cold-syscom-slot-spec*
+        when (eq kind :table)
+          do (multiple-value-bind (gt gd) (cw-ref w (+ start index))
+               (multiple-value-bind (rt rd) (world-q reference (+ start index))
+                 (cold-check (and rt (= gt rt) (= gd rd))
+                             "SYSCOM+~D table slot ~2,'0X:~8,'0X vs ref ~
+~2,'0X:~8,'0X (~S)" index gt gd rt rd value))))
+  ;; And the FEPCOM function slots stay unbound until the M3g grafts; in
+  ;; particular fepStartup must NOT read as a compiled function, so the
+  ;; emulator falls through to systemStartup (interfac.c:775).
+  (multiple-value-bind (tag data) (cw-ref w (+ #xF8041000 2))
+    (declare (ignore data))
+    (cold-check (/= (tag-type tag) (cold-dtp w "COMPILED-FUNCTION"))
+                "FEPCOM fepStartup must not be a compiled function yet")))
+
+(defun check-wired-machinery (w reference)
+  "M3e gate: magic-location forwarding for all three comm blocks, the
+storage tables at ground-truth addresses describing this world's regions,
+the initial stack group per MAKE-STACK-GROUP's invariants, and the trap
+page fully reconciled against the reference."
+  (with-cold-checks ("wired machinery")
+    (let ((layout (cold-world-layout w)))
+      ;; Reserved tables landed at the distribution addresses.
+      (loop for (key address) in *cold-machinery-table-addresses*
+            do (cold-check (= (cold-machinery w key) address)
+                           "~S at #x~8,'0X, ground truth #x~8,'0X"
+                           key (cold-machinery w key) address))
+      ;; Three blocks, forwarding + stash/layout agreement.
+      (cold-check (= (length (cold-world-magic w)) 3)
+                  "~D magic blocks stashed" (length (cold-world-magic w)))
+      (dolist (block (layout-section layout :magic-locations))
+        (let* ((suffix (strip-package (first block)))
+               ;; Layout: SYSTEM-COMMUNICATION-AREA etc; stash names match.
+               (stash (cold-magic-block w suffix)))
+          (check-magic-forwarding w block stash)))
+      ;; BOOT-COMM pages must not exist in the world file.
+      (cold-check (not (nth-value 2 (cw-ref w #xFFFE0000)))
+                  "BOOT-COMM page #xFFFE0000 must stay host-owned")
+      (check-syscom-slots w #xF8041100)
+      (check-machinery-region-tables w)
+      (check-initial-stack-group w)
+      ;; No magic symbol may also sit in the wired symbol-cell table: its
+      ;; boot-time re-forwarding would undo the comm-slot forward.
+      (let ((magic-cells (make-hash-table)))
+        (dolist (stash (cold-world-magic w))
+          (dolist (var (third stash))
+            (setf (gethash (cold-magic-var-cell w var) magic-cells) t)))
+        (let* ((tbl (cold-world-wired-cell-table w))
+               (back (nth-value 1 (cw-ref w (- tbl 3))))
+               (collisions 0))
+          (dotimes (i (cold-world-wired-cell-fill w))
+            (multiple-value-bind (tag data) (cw-ref w (+ back 1 i))
+              (declare (ignore tag))
+              (when (or (gethash (+ data 1) magic-cells)
+                        (gethash (+ data 2) magic-cells))
+                (incf collisions))))
+          (cold-check (zerop collisions)
+                      "~D magic symbols also in the wired cell table"
+                      collisions)))
+      (when reference
+        (check-trap-page-against-reference w reference)
+        (check-magic-table-vs-reference w reference #xF8041100)))))
+
 ;;; Stage-test driver (CLI: worldtool coldtest TMPDIR [REFERENCE-WORLD])
 
 (defun cold-test (tmpdir &key reference layout-path sysdir)
@@ -697,8 +1011,18 @@ number of failed stages (0 = success)."
             (unless (check-system-startup-oracle w5 reference-model)
               (incf failures))))
         ;; M3d: the vop dispatcher + mini-eval over the whole cold set.
+        ;; M3e: the wired machinery pass on the same loaded world.
         (let ((w6 (make-skeleton-world layout)))
           (cold-add-heap-regions w6)
           (unless (check-cold-eval w6 reference-model)
-            (incf failures)))))
+            (incf failures))
+          (when reference-model
+            (handler-case
+                (progn
+                  (cold-build-wired-machinery w6 :reference reference-model)
+                  (unless (check-wired-machinery w6 reference-model)
+                    (incf failures)))
+              (error (e)
+                (format t "~&wired machinery: ERROR ~A~%" e)
+                (incf failures)))))))
     failures))

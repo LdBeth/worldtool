@@ -6,7 +6,8 @@
                "src/vlod" "src/dump" "src/inspect" "src/symbols" "src/vbin"
                "src/emit" "src/wdecode"
                "src/cold-model" "src/cold-wired" "src/cold-object"
-               "src/cold-fun" "src/cold-gen" "src/cold-eval" "src/cold-diff"
+               "src/cold-fun" "src/cold-gen" "src/cold-eval"
+               "src/cold-machinery" "src/cold-diff"
                "src/cli"))
     (load (merge-pathnames (concatenate 'string f ".lisp") here))))
 

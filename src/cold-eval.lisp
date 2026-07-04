@@ -755,8 +755,14 @@ compiler-side and have no cold definition or boot effect.")
          (dolist (sub body)
            (cold-eval-toplevel w sub))))
       ((string= head "DEFINE-MAGIC-LOCATIONS-1")
+       ;; Forwards the variables' value/function cells into the comm block
+       ;; NOW (sysdf1 load time), like the original generator: later SETQs
+       ;; and FDEFINEs write through the forwards, and later DSCL :WIRED
+       ;; declarations see the cell already forwarded and skip it.
        (cold-note "define-magic-locations-1")
-       (push (mapcar #'quoted args) (cold-world-magic w)))
+       (let ((parsed (mapcar #'quoted args)))
+         (push parsed (cold-world-magic w))
+         (cold-do-define-magic-locations w parsed)))
       ((string= head "INITIALIZE-POINTER-TYPE-P-ARRAY")
        (cold-do-initialize-pointer-type-p-array w))
       ((member head *cold-noop-heads* :test #'string=)

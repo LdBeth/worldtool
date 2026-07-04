@@ -3,21 +3,54 @@
 ;;;
 ;;; M3a scope: trap-vector page (every slot filled with a catch-all even-pc
 ;;; -- the emulator halts with IllegalTrapVector on anything else), zeroed
-;;; FEP/SYSCOM communication pages, and the hand-built NIL/T page.  The
-;;; original generator's first wired allocation starts immediately after T
-;;; (ground truth: *REGION-FREE-POINTER*'s header at NIL+#xD), so the wired
-;;; region here does the same.
+;;; FEP/SYSCOM communication pages, and the hand-built NIL/T page.
 ;;;
-;;; Later stages replace the placeholder cells: NIL/T value cells become
-;;; one-q-forwards into the wired symbol-cell tables (M3e), pname/plist/
-;;; package cells point at real objects once materializers exist (M3b).
+;;; M3e adds the architectural region set (numbered exactly like the
+;;; distribution world: FEP / wired / safeguarded / control-stack /
+;;; binding-stack / stack) and reserves the wired region tables and the
+;;; SAFEGUARDED storage tables at their ground-truth addresses -- both
+;;; blocks are the generator's first allocations in their regions, so the
+;;; addresses are deterministic:
+;;;   #xF804120D  *REGION-FREE-POINTER*        1024 ART-Q
+;;;   #xF804160E  *REGION-GC-POINTER*          1024 ART-Q
+;;;   #xF8041A0F  *REGION-QUANTUM-ORIGIN*      1024 ART-Q
+;;;   #xF8041E10  *REGION-QUANTUM-LENGTH*      1024 ART-Q
+;;;   #xF8042211  *REGION-BITS*                1024 ART-Q
+;;;   #xF0000002  *AREA-NAME*                   128 ART-Q-LIST, fp leader
+;;;   #xF0000085  *AREA-MAXIMUM-QUANTUM-SIZE*   128 ART-Q-LIST, fp leader
+;;;   #xF0000108  *AREA-REGION-QUANTUM-SIZE*    128 ART-Q-LIST, fp leader
+;;;   #xF000018B  *AREA-REGION-LIST*            128 ART-16B,    fp leader
+;;;   #xF00001CE  *AREA-REGION-BITS*            128 ART-Q-LIST, fp leader
+;;;   #xF000024F  *REGION-FREE-POINTER-BEFORE-FLIP*  1024 ART-Q
+;;;   #xF0000650  *REGION-LIST-THREAD*         1024 ART-16B
+;;;   #xF0000851  *REGION-CREATED-PAGES*       1024 ART-Q
+;;;   #xF0000C52  *REGION-AREA*                1024 ART-16B
+;;;   #xF0000E53  *OBLAST-FREE-SIZE*           2048 ART-8B  (ends #xF0001054)
+;;; Contents are filled after the cold load by cold-machinery.lisp.
 
 (in-package #:worldtool)
 
 ;;; End of the wired VMA=PMA zone we may allocate into.  Ground truth ends
 ;;; at #xF804A600 (SYSCOM %WIRED-VIRTUAL-ADDRESS-HIGH); staying inside it
-;;; keeps the fresh world's wired footprint comparable.
+;;; keeps the fresh world's wired footprint comparable.  The wired region
+;;; itself is a full quantum (its table entry says 1 quantum, like the
+;;; distribution's region 1); the machinery gate asserts the free pointer
+;;; stayed under this limit.
 (defconstant +wired-zone-limit+ #xF804A600)
+
+(defun cold-init-architectural-regions (w)
+  "Regions 0-5, numbered exactly like the distribution world.
+FEP-AREA is the vma=pma image of the FEP reservation: fully allocated,
+no pages in the world file.  STACK-AREA's initial region is reserved
+address space only (the first data stack is created at first boot by
+GROW-DATA-STACK, allocate-common.lisp:990)."
+  (let ((fep (cold-add-region w "FEP-AREA" #xF8000000 #x40000)))
+    (setf (cold-region-free fep) #xF8040000))
+  (cold-add-region w "WIRED-CONTROL-TABLES" #xF8040000 #x10000)
+  (cold-add-region w "SAFEGUARDED-OBJECTS-AREA" #xF0000000 #x10000)
+  (cold-add-region w "CONTROL-STACK-AREA" #xF6000000 #x10000)
+  (cold-add-region w "BINDING-STACK-AREA" #xF2000000 #x10000)
+  (cold-add-region w "STACK-AREA" #xF0010000 #x20000))
 
 (defun cold-build-symbol-block (w vma &key value-tag value-data)
   "The fixed 5-Q symbol shape (NIL and T; SYMBOL-AREA symbols reuse it):
@@ -37,25 +70,87 @@ package.  Pname, plist and package cells start as placeholders."
 
 (defun cold-build-nil-t (w)
   "NIL and T at their architectural addresses (the emulator hard-sets its
-NIL/T registers to these), plus the wired region whose free pointer starts
-right after T."
+NIL/T registers to these).  The wired region's allocation pointer resumes
+right after T's block -- the original generator's first wired allocation
+is *REGION-FREE-POINTER*'s header at NIL+#xD."
   (let ((nil-vma (cold-address w "NIL-ADDRESS"))
-        (t-vma (cold-address w "T-ADDRESS")))
+        (t-vma (cold-address w "T-ADDRESS"))
+        (region (cold-area-current-region w "WIRED-CONTROL-TABLES")))
     (setf (cold-world-nil-vma w) nil-vma
           (cold-world-t-vma w) t-vma)
-    ;; Wired allocations live in the same region NIL/T open.
-    (let ((region (cold-add-region w "WIRED-CONTROL-TABLES"
-                                   nil-vma (- +wired-zone-limit+ nil-vma))))
-      (cold-build-symbol-block w nil-vma
-                               :value-tag (tag 0 (cold-dtp w "NIL"))
-                               :value-data nil-vma)
-      (cold-build-symbol-block w t-vma
-                               :value-tag (tag 0 (cold-dtp w "SYMBOL"))
-                               :value-data t-vma)
-      ;; NIL+5..T-1 stays zero (ground truth keeps unrelated heap objects
-      ;; there); allocation resumes after T's block.
-      (setf (cold-region-free region) (+ t-vma 5))))
+    (cold-build-symbol-block w nil-vma
+                             :value-tag (tag 0 (cold-dtp w "NIL"))
+                             :value-data nil-vma)
+    (cold-build-symbol-block w t-vma
+                             :value-tag (tag 0 (cold-dtp w "SYMBOL"))
+                             :value-data t-vma)
+    ;; The trap page and comm pages below NIL are stored with cw-set
+    ;; directly; allocation starts after T.
+    (setf (cold-region-free region) (+ t-vma 5)))
   w)
+
+(defun cold-reserve-wired-array (w area type-name length &key leader-length
+                                                              named-structure)
+  "Allocate an array shell (optional leader + header) in AREA and return
+the header vma.  Data Qs are left for the machinery fill pass.  Mirrors
+cold-array's layout: [leader-header][leader elts reversed][header][data]."
+  (let* ((code (cold-array-type-code w type-name))
+         (packing (ldb (byte 3 1) code))
+         (nwords (if (zerop packing) length (ceiling length (ash 1 packing))))
+         (leader-length (or leader-length 0))
+         (total (+ (if (zerop leader-length) 0 (1+ leader-length)) 1 nwords))
+         (base (cold-alloc w area total))
+         (header (if (zerop leader-length) base (+ base 1 leader-length))))
+    (unless (zerop leader-length)
+      (cw-set w base
+              (tag (layout-value (cold-world-layout w)
+                                 "SYSTEM:%HEADER-TYPE-LEADER")
+                   (cold-dtp w "HEADER-P"))
+              header)
+      ;; Leader elements start NIL; the fill pass sets the fill pointer.
+      (multiple-value-bind (ntag ndata) (cold-nil-q w)
+        (dotimes (i leader-length)
+          (cw-set w (- header 1 i) ntag ndata))))
+    (cw-set w header (tag 1 (cold-dtp w "HEADER-I"))
+            (logior (ash code 26)
+                    (if named-structure (ash 1 25) 0)
+                    (ash leader-length 15)
+                    length))
+    header))
+
+(defun cold-reserve-storage-tables (w)
+  "Reserve the wired region tables (first allocations after T, region 1)
+and the SAFEGUARDED area/region/oblast tables (first allocations in region
+2) at their ground-truth addresses.  Header vmas land in the machinery
+plist; contents are written by COLD-FILL-STORAGE-TABLES after the load."
+  (flet ((reserve (key area type len &key leader)
+           (setf (getf (cold-world-machinery w) key)
+                 (cold-reserve-wired-array w area type len
+                                           :leader-length leader))))
+    ;; Wired region tables, in the distribution's allocation order.
+    (reserve :region-free-pointer  "WIRED-CONTROL-TABLES" "ART-Q" 1024)
+    (reserve :region-gc-pointer    "WIRED-CONTROL-TABLES" "ART-Q" 1024)
+    (reserve :region-quantum-origin "WIRED-CONTROL-TABLES" "ART-Q" 1024)
+    (reserve :region-quantum-length "WIRED-CONTROL-TABLES" "ART-Q" 1024)
+    (reserve :region-bits          "WIRED-CONTROL-TABLES" "ART-Q" 1024)
+    ;; Safeguarded storage tables.  The five area tables carry 2-Q leaders
+    ;; (fill pointer = number of areas); the region tables don't.
+    (reserve :area-name            "SAFEGUARDED-OBJECTS-AREA" "ART-Q-LIST" 128
+             :leader 1)
+    (reserve :area-maximum-quantum-size "SAFEGUARDED-OBJECTS-AREA"
+             "ART-Q-LIST" 128 :leader 1)
+    (reserve :area-region-quantum-size "SAFEGUARDED-OBJECTS-AREA"
+             "ART-Q-LIST" 128 :leader 1)
+    (reserve :area-region-list     "SAFEGUARDED-OBJECTS-AREA" "ART-16B" 128
+             :leader 1)
+    (reserve :area-region-bits     "SAFEGUARDED-OBJECTS-AREA" "ART-Q-LIST" 128
+             :leader 1)
+    (reserve :region-free-pointer-before-flip "SAFEGUARDED-OBJECTS-AREA"
+             "ART-Q" 1024)
+    (reserve :region-list-thread   "SAFEGUARDED-OBJECTS-AREA" "ART-16B" 1024)
+    (reserve :region-created-pages "SAFEGUARDED-OBJECTS-AREA" "ART-Q" 1024)
+    (reserve :region-area          "SAFEGUARDED-OBJECTS-AREA" "ART-16B" 1024)
+    (reserve :oblast-free-size     "SAFEGUARDED-OBJECTS-AREA" "ART-8B" 2048)))
 
 (defun cold-build-catch-all (w)
   "A two-Q instruction block: packed (halt, halt) then end-of-code.  Every
@@ -80,7 +175,7 @@ SET-TRAP-VECTOR-ENTRY overwrites the defined ones during the cold load."
 
 (defun cold-touch-comm-areas (w)
   "FEP and SYSCOM communication pages: present but zero.  Slot values are
-installed by DEFINE-MAGIC-LOCATIONS-1 handling (M3e)."
+installed by DEFINE-MAGIC-LOCATIONS-1 handling during the cold load."
   (dolist (block (layout-section (cold-world-layout w) :magic-locations))
     (destructuring-bind (name start end ventries) block
       (declare (ignore name ventries))
@@ -98,7 +193,9 @@ installed by DEFINE-MAGIC-LOCATIONS-1 handling (M3e)."
                                         layout
                                         (read-layout layout)))))
     (cold-init-areas w)
+    (cold-init-architectural-regions w)
     (cold-build-nil-t w)
+    (cold-reserve-storage-tables w)
     (cold-build-catch-all w)
     (cold-build-trap-vectors w)
     (cold-touch-comm-areas w)

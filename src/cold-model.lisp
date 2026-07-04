@@ -40,7 +40,11 @@
   (patches nil)                             ; (vma package-string form): first-boot
                                             ; %P-STORE-CONTENTS patches for Qs whose
                                             ; value only exists at run time
-  (magic nil)                               ; DEFINE-MAGIC-LOCATIONS-1 stash (M3e)
+  (magic nil)                               ; DEFINE-MAGIC-LOCATIONS-1 stash (M3e
+                                            ; gate cross-check; the forwarding
+                                            ; itself happens at load time)
+  (machinery nil)                           ; plist: reserved wired/storage-table
+                                            ; header vmas + :initial-stack-group
   ;; DECLARE-STORAGE-CATEGORY-LOAD wired-cell forwarding (cold-eval):
   (wired-cell-table 0)                      ; FORWARDED-SYMBOL-CELL-TABLE header vma
   (wired-cell-fill 0)                       ; its fill pointer

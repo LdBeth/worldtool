@@ -18,9 +18,10 @@
   "Package name for vsyms with :DEFAULT package, bound per input file from
 its attribute list.")
 
-;;; Provisional area regions.  Bases are placeholders in the unwired oblast
-;;; space until M3e derives the real address-space policy; sizes are ample
-;;; for the 85-file cold set.  Ground truth puts the heap at #x80000000+.
+;;; Heap area regions (quantum-aligned; the storage tables make these the
+;;; world's address-space policy).  SAFEGUARDED-OBJECTS-AREA is region 2 at
+;;; #xF0000000 (architectural, made by the skeleton); ground truth puts the
+;;; unwired heap in the #x80000000 zone.
 (defparameter *cold-heap-regions*
   '(("SYMBOL-AREA"             #x80100000 #x100000)
     ("PNAME-AREA"              #x80300000 #x100000)
@@ -29,12 +30,16 @@ its attribute list.")
     ("WORKING-STORAGE-AREA"    #x80C00000 #x100000)
     ("COMPILED-FUNCTION-AREA"  #x81000000 #x800000)
     ("DEBUG-INFO-AREA"         #x81900000 #x400000)
-    ("CONSTANTS-AREA"          #x81E00000 #x100000)
-    ("SAFEGUARDED-OBJECTS-AREA" #x82000000 #x200000)))
+    ("CONSTANTS-AREA"          #x81E00000 #x100000)))
 
 (defun cold-add-heap-regions (w)
   (loop for (name origin length) in *cold-heap-regions*
-        do (cold-add-region w name origin length)))
+        do (cold-add-region w name origin length))
+  ;; PAGE-TABLE-AREA: reserved address space for boot-time dynamic tables
+  ;; (build-address-space-map's create-dynamic-space allocates here);
+  ;; initialize-storage-globals resets its free pointer via the wired
+  ;; variable %PAGE-TABLE-AREA-REGION, which cold-machinery stamps.
+  (cold-add-region w "PAGE-TABLE-AREA" #xF0040000 #x200000))
 
 ;;; EQ identity for materialized host objects (conses, varrays, vfuns).
 (defvar *cold-object-vmas*)
