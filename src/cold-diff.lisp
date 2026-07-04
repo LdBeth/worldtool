@@ -1096,23 +1096,24 @@ symbol."
           (cold-check (and (= (tag-type et) (tag-type st)) (= ed sd))
                       "root disk event element 0 is STORAGE:DISK-EVENT"))))))
 
-(defun check-ignore-stubs (w)
-  "M3h gate: the missing-source NETI entries are aliased to LISP:IGNORE's
-definition (emb-ethernet-driver.lisp has no .vbin; initialize-disk calls
-one pre-banner)."
+(defun check-embedded-network-functions (w)
+  "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
+and the periodic timer call pre-banner are real compiled functions (not
+the interim IGNORE aliases, which LISP:IGNORE's cell would equal)."
   (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION")))
     (multiple-value-bind (itag idata)
         (cw-ref w (cold-follow-cell
                    w (+ (cold-vsym w (make-vsym "LISP" "IGNORE")) 2)))
-      (cold-check (= (tag-type itag) dtp-cf) "LISP:IGNORE is fbound")
-      (dolist (name *cold-ignore-stub-names*)
+      (declare (ignore itag))
+      (dolist (name '("INITIALIZE-EMBEDDED-NETWORK"
+                      "EMB-ETHERNET-PERIODIC-TIMER-FUNCTION"))
         (multiple-value-bind (tag data)
             (cw-ref w (cold-follow-cell
                        w (+ (cold-vsym w (make-vsym "NETWORK-INTERNALS"
                                                     name))
                             2)))
-          (cold-check (and (= (tag-type tag) dtp-cf) (= data idata))
-                      "NETI:~A aliased to IGNORE (~2,'0X:~8,'0X)"
+          (cold-check (and (= (tag-type tag) dtp-cf) (/= data idata))
+                      "NETI:~A is a real compiled function (~2,'0X:~8,'0X)"
                       name tag data))))))
 
 (defun check-reserved-regions (w reference)
@@ -1212,7 +1213,7 @@ page fully reconciled against the reference."
         (check-wired-arrays w reference)
         (check-disk-events w reference)
         (check-reserved-regions w reference))
-      (check-ignore-stubs w))))
+      (check-embedded-network-functions w))))
 
 ;;; M3f gate: finalize, emit, re-read, audit.
 

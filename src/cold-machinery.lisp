@@ -690,43 +690,6 @@ wired-table forwards, so they land in the comm slots or wired cells."
               do (cold-set-symbol-value w (make-vsym "STORAGE" name)
                                         (tag 0 array) hdr))))))
 
-;;; ---------------- Missing-source stubs ----------------
-
-;;; emb-ethernet-driver.lisp was in the original cold set -- the
-;;; distribution has both these functions wired (1C:F80492xx) and
-;;; initialize-disk's VLM branch calls INITIALIZE-EMBEDDED-NETWORK
-;;; pre-banner (M3h boot-6 trap: unbound fn cell called from wired
-;;; disk init) -- but no .vbin of it survives on disk.  Until the file
-;;; is recompiled into the set, alias both entries to IGNORE (&rest,
-;;; returns NIL), the same aliasing the cold load's own
-;;; *COLD-LOAD-FUNCTION-INITIALIZATIONS* uses (cold-load.lisp:131,
-;;; e.g. LT:FUNCTION-INLINE-FORM-METHOD . IGNORE).  Consequences: no
-;;; EMB network interfaces, and the periodic timer's Embedded branch
-;;; (interrupts.lisp:137,800) is a no-op; the banner path needs no
-;;; networking.  DROP both stubs when the real .vbin joins the set --
-;;; the graft errors if the name is already defined.
-(defparameter *cold-ignore-stub-names*
-  '("INITIALIZE-EMBEDDED-NETWORK" "EMB-ETHERNET-PERIODIC-TIMER-FUNCTION"))
-
-(defun cold-graft-ignore-stubs (w)
-  (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
-        (dtp-null (cold-dtp w "NULL"))
-        (ignore-cell (cold-follow-cell
-                      w (+ (cold-vsym w (make-vsym "LISP" "IGNORE")) 2))))
-    (multiple-value-bind (itag idata) (cw-ref w ignore-cell)
-      (unless (= (tag-type itag) dtp-cf)
-        (error "LISP:IGNORE is not fbound (~2,'0X:~8,'0X)" itag idata))
-      (dolist (name *cold-ignore-stub-names*)
-        (let ((cell (cold-follow-cell
-                     w (cold-fdefinition-cell
-                        w (make-vsym "NETWORK-INTERNALS" name)))))
-          (multiple-value-bind (tag data) (cw-ref w cell)
-            (declare (ignore data))
-            (unless (= (tag-type tag) dtp-null)
-              (error "NETI:~A is defined now -- drop its IGNORE stub"
-                     name))
-            (cw-set w cell (logior (logand tag #xC0) dtp-cf) idata)))))))
-
 ;;; ---------------- FEP boot parameters ----------------
 
 ;;; FEPComm slots the FEP populates on real hardware before starting
@@ -774,7 +737,6 @@ slots from the reference world."
   (cold-build-disk-events w)
   (cold-fill-storage-tables w)
   (cold-stamp-fepcomm-boot-slots w)
-  (cold-graft-ignore-stubs w)
   (when reference
     (cold-graft-ifep-vectors w reference)
     (cold-graft-fepcomm-functions w reference))

@@ -63,7 +63,12 @@
     "SYS: STORAGE; VLM-DISK-UTILITIES" "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
-    "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"))
+    "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"
+    ;; In the original cold set (dist has its functions wired) but the
+    ;; .vbin was lost; recompiled from source in the user's Genera 8.5
+    ;; 2026-07-04.  initialize-disk's VLM branch calls
+    ;; INITIALIZE-EMBEDDED-NETWORK pre-banner (M3h boot-6 trap).
+    "SYS: NETWORK; EMB-ETHERNET-DRIVER"))
 
 ;;; ---- M3f: finalization and the full pipeline -----------------------------
 
