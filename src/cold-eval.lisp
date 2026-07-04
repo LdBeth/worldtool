@@ -548,6 +548,89 @@ back-pointer."
               (cold-vsym w back-sym)))
     slot))
 
+;;; ---------------- Keyword self-evaluation ----------------
+
+(defconstant +cold-self-eval-table-size+ 11000
+  "Initial :SELF-EVALUATING symbol-cell table size (the descriptor in
+sys2/memory-cold.lisp:64).  The cold world interns ~1200 keywords; the
+table has ample headroom and never needs the boot-time extension.")
+
+(defun cold-self-eval-table (w)
+  "The generator's :SELF-EVALUATING FORWARDED-SYMBOL-CELL-TABLE, in
+CONSTANTS-AREA (MAKE-FORWARDED-SYMBOL-CELL-TABLE:112).  Leader length 3;
+for :SELF-EVALUATING the back-pointers slot (leader 2) is the table itself
+(memory-cold.lisp:120) -- the slot content already names each symbol, so
+no separate back-pointer array is consed.  Created on first use.
+
+Unlike the wired table this does NOT set *CURRENT-SELF-EVALUATING-SYMBOL-
+TABLE* or *ALL-FORWARDED-SYMBOL-CELL-TABLES*: INITIALIZE-SELF-EVALUATING-
+SYMBOL-TABLE re-creates *CURRENT-...* with a fresh table at first boot
+(memory-cold.lisp:524) and BUILD-INITIAL-PACKAGES pushes that one.  This
+cold table stays live through the keyword value-cell forwards that point
+into it (it lives in static CONSTANTS-AREA)."
+  (let ((table (cold-world-self-eval-table w)))
+    (if (plusp table)
+        table
+        (let* ((kw (lambda (n) (make-vsym "KEYWORD" n)))
+               (tbl (make-varray (list +cold-self-eval-table-size+)
+                                 (list (funcall kw "TYPE")
+                                       (make-vsym "SYSTEM" "ART-Q")
+                                       (funcall kw "LEADER-LENGTH") 3
+                                       (funcall kw "FILL-POINTER") 0
+                                       (funcall kw "NAMED-STRUCTURE-SYMBOL")
+                                       (si-vsym "FORWARDED-SYMBOL-CELL-TABLE")
+                                       (funcall kw "LEADER-LIST")
+                                       (list nil nil nil)))))
+          (let ((tbl-vma (cold-array w tbl "CONSTANTS-AREA")))
+            ;; back-pointers (leader 2, at header-3) = the table itself.
+            (cw-set w (- tbl-vma 3) (tag 0 (cold-dtp w "ARRAY")) tbl-vma)
+            (setf (cold-world-self-eval-table w) tbl-vma
+                  (cold-world-self-eval-fill w) 0)
+            tbl-vma)))))
+
+(defun cold-forward-self-eval-symbol (w sym-vma)
+  "Replicate FORWARD-SELF-EVALUATING-SYMBOL (memory-cold.lisp:529) at
+generation time: store the symbol in the next self-eval table slot and
+make its value cell a one-q-forward to that slot (preserving cdr bits).
+SYMEVAL then follows the forward to the slot and reads back the symbol,
+so the keyword self-evaluates."
+  (let* ((tbl (cold-self-eval-table w))
+         (index (cold-world-self-eval-fill w))
+         (slot (+ tbl 1 index))
+         (cell (+ sym-vma 1)))               ; value cell
+    (when (>= index +cold-self-eval-table-size+)
+      (error "Self-evaluating symbol cell table is full"))
+    ;; The slot holds the symbol itself (PKG-NEW-KEYWORD-SYMBOL's SET SYM
+    ;; SYM, then FORWARD stores SYMBOL into the table cell).
+    (cw-set w slot (tag 0 (cold-dtp w "SYMBOL")) sym-vma)
+    (multiple-value-bind (tag data) (cw-ref w cell)
+      (declare (ignore data))
+      (cw-set w cell
+              (logior (logand tag #xC0) (cold-dtp w "ONE-Q-FORWARD"))
+              slot))
+    (setf (cold-world-self-eval-fill w) (1+ index))
+    (cw-set w (- tbl 1) (tag 0 (cold-dtp w "FIXNUM")) (1+ index))  ; fill ptr
+    slot))
+
+(defun cold-forward-all-keywords (w)
+  "Make every interned KEYWORD-package symbol self-evaluating.  Genera
+interns keywords with PKG-NEW-KEYWORD-SYMBOL (package.lisp:1125), which
+self-evaluates each one; the cold world pre-interns keywords, so the
+generator must do the equivalent before BUILD-INITIAL-PACKAGES EVALs its
+DEFPACKAGE-INTERNAL forms.  Returns the number forwarded.  (NIL and T are
+folded to architectural blocks, not interned here, and are forwarded at
+boot by INITIALIZE-SELF-EVALUATING-SYMBOL-TABLE.)"
+  (let ((keywords nil))
+    (maphash (lambda (key vma)
+               (when (equal (cdr key) "KEYWORD")
+                 (push vma keywords)))
+             (cold-world-symbols w))
+    ;; Deterministic order: ascending symbol vma (intern order is
+    ;; hash-traversal order, which SBCL does not promise across runs).
+    (dolist (vma (sort keywords #'<))
+      (cold-forward-self-eval-symbol w vma))
+    (length keywords)))
+
 (defun cold-do-dscl (w ref-type sym category)
   "DECLARE-STORAGE-CATEGORY-LOAD (sys2/storage-categories.lisp:553).
 Wired cells are forwarded by the generator; safeguarded ones only get the

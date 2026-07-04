@@ -54,6 +54,14 @@
   ;; DECLARE-STORAGE-CATEGORY-LOAD wired-cell forwarding (cold-eval):
   (wired-cell-table 0)                      ; FORWARDED-SYMBOL-CELL-TABLE header vma
   (wired-cell-fill 0)                       ; its fill pointer
+  ;; Keyword self-evaluation forwarding (cold-eval): every KEYWORD-package
+  ;; symbol's value cell is a one-q-forward into a :SELF-EVALUATING
+  ;; FORWARDED-SYMBOL-CELL-TABLE, so BUILD-INITIAL-PACKAGES can EVAL the
+  ;; DEFPACKAGE-INTERNAL forms (package.lisp:2393) before
+  ;; BOOTSTRAP-FORWARD-SYMBOL-CELLS runs (memory-cold.lisp:521, PKG-NEW-
+  ;; KEYWORD-SYMBOL package.lisp:1125).
+  (self-eval-table 0)                       ; :SELF-EVALUATING table header vma
+  (self-eval-fill 0)                        ; its fill pointer
   ;; Landmarks stamped by cold-wired:
   (nil-vma 0) (t-vma 0) (catch-all-pc 0)
   ;; MAKE-INSTANCE-COLD marker (cold-load.lisp:404): instances in the cold

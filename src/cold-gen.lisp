@@ -121,7 +121,9 @@ pages on demand."
 3. SI:*VALUE-CELLS-TO-LOCALIZE-FIRST* / SI:*LINKED-SYMBOL-CELLS* := NIL
    (the boot localize pass reads both, memory-cold.lisp:286-297; ground
    truth has them NIL);
-4. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp).
+4. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp);
+5. every KEYWORD-package symbol is forwarded self-evaluating (cold-eval),
+   so BUILD-INITIAL-PACKAGES can EVAL those forms at first boot.
 Returns (values deferred-count patch-count package-count)."
   (with-cold-materializer (w)
     (let* ((*cold-load-time-eval* #'cold-operand-eval)
@@ -167,8 +169,14 @@ the deferred list"
                     :area "WORKING-STORAGE-AREA")
         (cold-set-symbol-value
          w (make-vsym "SYSTEM-INTERNALS" "*LINKED-SYMBOL-CELLS*") lt ld))
-      (values (length entries) (length patches)
-              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp"))))))
+      (let ((package-count
+              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp"))))
+        ;; 5. Every keyword must self-evaluate before BUILD-INITIAL-PACKAGES
+        ;;    EVALs the DEFPACKAGE-INTERNAL forms it just stored
+        ;;    (package.lisp:2393, well before BOOTSTRAP-FORWARD-SYMBOL-CELLS).
+        ;;    Done last: PKGDCL is the final pass that interns keywords.
+        (cold-forward-all-keywords w)
+        (values (length entries) (length patches) package-count)))))
 
 (defun cold-build-world (w &key reference)
   "The full generator pipeline after MAKE-SKELETON-WORLD: heap regions,

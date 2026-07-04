@@ -1252,6 +1252,40 @@ and is only correct while no link form has been loaded."
 (~D bad, ~D missing)"
                         n bad (length records)))))))
 
+(defun check-keyword-self-eval (w)
+  "M3h gate: every interned KEYWORD-package symbol self-evaluates -- its
+value cell is a one-q-forward into the generator's :SELF-EVALUATING table
+(CONSTANTS-AREA) whose slot holds the symbol back.  BUILD-INITIAL-PACKAGES
+EVALs the DEFPACKAGE-INTERNAL forms (package.lisp:2393) before
+BOOTSTRAP-FORWARD-SYMBOL-CELLS, so keywords must already be forwarded in
+the cold image (cf. PKG-NEW-KEYWORD-SYMBOL, package.lisp:1125)."
+  (let ((tbl (cold-world-self-eval-table w))
+        (fill (cold-world-self-eval-fill w))
+        (fwd (cold-dtp w "ONE-Q-FORWARD"))
+        (sym-dtp (cold-dtp w "SYMBOL"))
+        (nkw 0) (bad 0))
+    (cold-check (plusp tbl)
+                "self-evaluating symbol table was created (header #x~8,'0X)"
+                tbl)
+    (maphash
+     (lambda (key vma)
+       (when (equal (cdr key) "KEYWORD")
+         (incf nkw)
+         (multiple-value-bind (vt vd) (cw-ref w (+ vma 1))
+           (let ((slotp (and (= (tag-type vt) fwd)
+                             (>= vd (+ tbl 1))
+                             (< vd (+ tbl 1 fill)))))
+             (unless (and slotp
+                          (multiple-value-bind (st sd) (cw-ref w vd)
+                            (and (= (tag-type st) sym-dtp) (= sd vma))))
+               (incf bad))))))
+     (cold-world-symbols w))
+    (cold-check (= nkw fill)
+                "~D keyword~:P forwarded, table fill pointer ~D" nkw fill)
+    (cold-check (zerop bad)
+                "~D keyword value cell~:P self-evaluate (~D not forwarded ~
+to a slot naming the symbol)" nkw bad)))
+
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
 and the periodic timer call pre-banner are real compiled functions (not
@@ -1436,6 +1470,8 @@ prints the R1 unbound-function-cell audit."
         ;; *LINKED-SYMBOL-CELLS* mirrors the permanent-links load pass;
         ;; runs here because finalize materializes it just above.
         (check-linked-symbol-cells w)
+        ;; Keyword self-evaluation forwarding, also materialized by finalize.
+        (check-keyword-self-eval w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model
