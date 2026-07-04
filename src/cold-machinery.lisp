@@ -439,6 +439,15 @@ wired-table forwards, so they land in the comm slots or wired cells."
                  (cold-region-origin region))
           (stamp "STORAGE" (format nil "%~A-REGION-LENGTH" area-name) fixnum
                  (cold-region-length region))))
+      ;; Region allocator scalars (allocate-common.lisp:67-69): region
+      ;; creation extends the tables at *NUMBER-OF-ACTIVE-REGIONS* and
+      ;; pops *FREE-REGION*; nothing initializes either (M3h boot-5
+      ;; trap: build-address-space-map's N-REGIONS loop read the count
+      ;; unbound).  An empty free list is any value with bit 15 set
+      ;; (REGION-VALID-P, storage.lisp:1564) -- NIL would trap in LDB.
+      (stamp "SYSTEM-INTERNALS" "*NUMBER-OF-ACTIVE-REGIONS*" fixnum
+             (fill-pointer (cold-world-regions w)))
+      (stamp "SYSTEM-INTERNALS" "*FREE-REGION*" fixnum #xFFFF)
       (stamp "SYSTEM" "%REGION-CONS-ALARM" fixnum 0)
       (stamp "SYSTEM" "%PAGE-CONS-ALARM" fixnum 0)
       ;; Not SETQ'd anywhere in the cold set; ground truth has 8 (the

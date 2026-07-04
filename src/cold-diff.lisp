@@ -1124,7 +1124,22 @@ region-table rows (14/15/16) with its origins, lengths and bits, and the
                                     (= (tag-type gt) (tag-type rt))
                                     (= gd rd))
                                "~A: ~2,'0X:~8,'0X vs ref ~
-~:[missing~;~:*~2,'0X:~8,'0X~]" sname gt gd rt rd)))))))
+~:[missing~;~:*~2,'0X:~8,'0X~]" sname gt gd rt rd))))))
+  ;; The region allocator's scalars: active count = this world's region
+  ;; count, free list empty (bit 15 set per REGION-VALID-P).
+  (let ((fixnum (cold-dtp w "FIXNUM")))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q
+         w (make-vsym "SYSTEM-INTERNALS" "*NUMBER-OF-ACTIVE-REGIONS*"))
+      (cold-check (and boundp (= (tag-type tag) fixnum)
+                       (= data (fill-pointer (cold-world-regions w))))
+                  "*NUMBER-OF-ACTIVE-REGIONS* = ~@[~D~] (region count ~D)"
+                  (and boundp data) (fill-pointer (cold-world-regions w))))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS" "*FREE-REGION*"))
+      (cold-check (and boundp (= (tag-type tag) fixnum)
+                       (logbitp 15 data))
+                  "*FREE-REGION* is a bit-15-set fixnum (empty free list)"))))
 
 (defun check-wired-machinery (w reference)
   "M3e gate: magic-location forwarding for all three comm blocks, the
