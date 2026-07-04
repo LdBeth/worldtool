@@ -35,6 +35,11 @@
   kind                                  ; :value or :function
   target)                               ; symbol / function spec
 
+(defstruct (vraw (:constructor make-vraw (tag data)))
+  ;; A Q given verbatim -- the generator's own escape hatch for host forms
+  ;; that must reference an arbitrary address (M3f patch locatives).
+  tag data)
+
 (defstruct (vchar (:constructor make-vchar (code bits &optional charset style)))
   code bits charset style)
 

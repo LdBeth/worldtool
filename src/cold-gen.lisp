@@ -56,3 +56,89 @@
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
     "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"))
+
+;;; ---- M3f: finalization and the full pipeline -----------------------------
+
+(defun cold-wired-ranges (w)
+  "VMA ranges emitted as WIRED map entries: the architectural wired region
+(trap page, comm blocks, NIL/T, region tables, wired control tables, the
+initial stack group), the SAFEGUARDED region (ITRAP-DISPATCH's handlers
+materialize there -- the page-fault handler cannot itself be pageable;
+ground truth wires its F0000000 map entries), and the initial
+control/binding stacks.  Everything else -- heap, page-table space --
+pages on demand."
+  (loop for r across (cold-world-regions w)
+        for area = (strip-package
+                    (cold-area-name (cold-area w (cold-region-area r))))
+        when (member area '("WIRED-CONTROL-TABLES" "SAFEGUARDED-OBJECTS-AREA"
+                            "CONTROL-STACK-AREA" "BINDING-STACK-AREA")
+                     :test #'string=)
+          collect (cons (cold-region-origin r)
+                        (+ (cold-region-origin r) (cold-region-length r)))))
+
+(defun cold-finalize (w)
+  "Everything between the last vbin and emit (M3f):
+1. the first-boot Q patches become (SYS:%P-STORE-CONTENTS locative form)
+   forms ahead of the deferred forms proper (%P-STORE-CONTENTS is a
+   DEFUPRIM, iprim.lisp:209, so EVAL can apply it at boot; locatives
+   self-evaluate);
+2. the captured deferred list materializes as the value of
+   SI:*COLD-LOAD-DEFERRED-FORMS* -- LISP-INITIALIZE-FIRST-TIME MAPCs EVAL
+   over it after BUILD-INITIAL-PACKAGES (cold-load.lisp:543-547);
+3. SI:*VALUE-CELLS-TO-LOCALIZE-FIRST* / SI:*LINKED-SYMBOL-CELLS* := NIL
+   (the boot localize pass reads both, memory-cold.lisp:286-297; ground
+   truth has them NIL);
+4. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp).
+Returns (values deferred-count patch-count package-count)."
+  (with-cold-materializer (w)
+    (let* ((*cold-load-time-eval* #'cold-operand-eval)
+           (patches (reverse (cold-world-patches w)))
+           (deferred (reverse (cold-world-deferred w)))
+           (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
+           (loc-tag (tag 0 (cold-dtp w "LOCATIVE")))
+           (entries
+             (append
+              (loop for (vma pkg form) in patches
+                    collect (cons pkg (list store (make-vraw loc-tag vma)
+                                            form)))
+              deferred)))
+      (multiple-value-bind (spine-tag spine-data) (cold-nil-q w)
+        (dolist (entry (reverse entries))
+          (let ((*cold-default-package* (car entry)))
+            (multiple-value-bind (ft fd)
+                (cold-ref w (cdr entry) :area "WORKING-STORAGE-AREA")
+              (setf spine-data (cold-cons w ft fd spine-tag spine-data)
+                    spine-tag (tag 0 (cold-dtp w "LIST"))))))
+        (cold-set-symbol-value
+         w (make-vsym "SYSTEM-INTERNALS" "*COLD-LOAD-DEFERRED-FORMS*")
+         spine-tag spine-data))
+      ;; Anything deferred or patched WHILE materializing the list would
+      ;; never execute -- insist the capture was complete.
+      (unless (and (= (length (cold-world-patches w)) (length patches))
+                   (= (length (cold-world-deferred w)) (length deferred)))
+        (error "~D patch~:P / ~D deferral~:P noted while materializing ~
+the deferred list"
+               (- (length (cold-world-patches w)) (length patches))
+               (- (length (cold-world-deferred w)) (length deferred))))
+      (multiple-value-bind (nt nd) (cold-nil-q w)
+        (cold-set-symbol-value
+         w (make-vsym "SYSTEM-INTERNALS" "*VALUE-CELLS-TO-LOCALIZE-FIRST*")
+         nt nd)
+        (cold-set-symbol-value
+         w (make-vsym "SYSTEM-INTERNALS" "*LINKED-SYMBOL-CELLS*") nt nd))
+      (values (length entries) (length patches)
+              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp"))))))
+
+(defun cold-build-world (w &key reference)
+  "The full generator pipeline after MAKE-SKELETON-WORLD: heap regions,
+the 88-file cold load, the wired machinery (REFERENCE world supplies the
+IFEP vector grafts), finalization.  One materializer scope end to end so
+deferred forms alias the structure the load materialized.  Returns the
+values of COLD-FINALIZE."
+  (cold-add-heap-regions w)
+  (with-cold-materializer (w)
+    (let ((failures (cold-load-cold-set w)))
+      (unless (zerop failures)
+        (error "~D fixup~:P never resolved" failures)))
+    (cold-build-wired-machinery w :reference reference)
+    (cold-finalize w)))

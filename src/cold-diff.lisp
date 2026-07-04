@@ -957,6 +957,139 @@ page fully reconciled against the reference."
         (check-trap-page-against-reference w reference)
         (check-magic-table-vs-reference w reference #xF8041100)))))
 
+;;; M3f gate: finalize, emit, re-read, audit.
+
+(defun fspec-key-name (key)
+  "The NAME part of a symbol fspec key (\"PKG:NAME\"); NIL for list keys."
+  (when (stringp key)
+    (let ((colon (position #\: key)))
+      (if colon (subseq key (1+ colon)) key))))
+
+(defun cold-unbound-function-cells (w)
+  "R1 audit: fspecs whose (forward-followed) definition cell is still
+dtp-null at emit -- everything the cold load referenced (function-cell
+locatives, trap vectors, fdefine targets) that never got a definition --
+minus the boot stubs (FSET at first boot, cold-load.lisp:131).  Sorted
+key strings."
+  (let ((dtp-null (cold-dtp w "NULL")) (rows nil))
+    (maphash
+     (lambda (key cell)
+       (multiple-value-bind (tag data)
+           (cw-ref w (cold-follow-cell w cell))
+         (declare (ignore data))
+         (when (and (= (tag-type tag) dtp-null)
+                    (not (member (fspec-key-name key)
+                                 *cold-boot-stub-functions*
+                                 :test #'equal)))
+           (push (if (stringp key) key (format nil "~S" key)) rows))))
+     (cold-world-fdefs w))
+    (sort rows #'string<)))
+
+(defun check-cold-emit (w tmpdir reference)
+  "Finalize the loaded world, emit fresh.ilod with the wired/unwired map
+split, re-read it, and check the boot-critical Qs on the FILE.  Also
+prints the R1 unbound-function-cell audit."
+  (with-cold-checks ("cold emit (fresh world)")
+    (multiple-value-bind (ndeferred npatches npackages)
+        (handler-case (cold-finalize w)
+          (error (e)
+            (cold-check nil "finalize: ~A" e)
+            (values nil nil nil)))
+      (when ndeferred
+        (format t "  deferred list: ~D forms (~D patches ahead), ~
+~D packages~%" ndeferred npatches npackages)
+        (cold-check (<= 90 npackages 120) "~D packages" npackages)
+        ;; The three finalize-owned variables, in the world.
+        (multiple-value-bind (tag data boundp)
+            (cold-symbol-value-q
+             w (make-vsym "SYSTEM-INTERNALS" "*COLD-LOAD-DEFERRED-FORMS*"))
+          (declare (ignore data))
+          (cold-check (and boundp (= (tag-type tag) (cold-dtp w "LIST")))
+                      "*COLD-LOAD-DEFERRED-FORMS* is a bound list"))
+        (multiple-value-bind (tag data boundp)
+            (cold-symbol-value-q
+             w (make-vsym "SYSTEM-INTERNALS" "BUILD-INITIAL-PACKAGES"))
+          (declare (ignore data))
+          (cold-check (and boundp (= (tag-type tag) (cold-dtp w "LIST")))
+                      "BUILD-INITIAL-PACKAGES is a bound list"))
+        (dolist (name '("*VALUE-CELLS-TO-LOCALIZE-FIRST*"
+                        "*LINKED-SYMBOL-CELLS*"))
+          (multiple-value-bind (tag data boundp)
+              (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS" name))
+            (cold-check (and boundp (cold-q-nil-p w tag data))
+                        "~A is NIL" name)))
+        ;; Emit with the map split and re-read.
+        (let ((out (format nil "~A/fresh.ilod" tmpdir))
+              (model (cold-world-model
+                      w :wired-ranges (cold-wired-ranges w))))
+          (format t "  map: ~D wired + ~D unwired entries~%"
+                  (length (world-model-wired-map model))
+                  (length (world-model-unwired-map model)))
+          (cold-check (plusp (length (world-model-unwired-map model)))
+                      "heap pages are unwired")
+          (write-file-bytes out (write-world model))
+          (let ((fresh (read-world out)))
+            ;; The Q the emulator boots through (interfac.c:775).
+            (multiple-value-bind (tag data)
+                (world-q fresh (+ #xF8041100 2))
+              (cold-check (and tag
+                               (= (tag-type tag)
+                                  (cold-dtp w "COMPILED-FUNCTION")))
+                          "fresh.ilod SYSCOM+2 (systemStartup) tag ~
+#x~2,'0X, need #x1C" (and tag (tag-type tag)))
+              (when reference
+                (multiple-value-bind (rt rd)
+                    (world-q reference (+ #xF8041100 2))
+                  (declare (ignore rd))
+                  (cold-check (and tag (= (tag-type tag) (tag-type rt)))
+                              "SYSCOM+2 tag matches reference")
+                  data)))
+            ;; NIL/T and the trap page live in the WIRED map of the file.
+            (dolist (vma (list (cold-world-nil-vma w) #xF8040000))
+              (cold-check
+               (loop for e in (world-model-wired-map fresh)
+                     thereis (and (<= (map-entry-address e) vma)
+                                  (< vma (+ (map-entry-address e)
+                                            (map-entry-count e)))))
+               "vma #x~X wired in the file" vma))
+            ;; Every trap-vector handler PC targets a WIRED page: the
+            ;; page-fault path must never fault on its own handler.  PCs
+            ;; into the FEP reservation (F8000000..F8040000) are exempt --
+            ;; the grafted mode-3 vectors point into the IFEP kernel,
+            ;; which the emulator loads itself (unmapped even in the
+            ;; reference world).
+            (let ((even-pc (cold-dtp w "EVEN-PC"))
+                  (odd-pc (cold-dtp w "ODD-PC"))
+                  (unwired-pcs 0))
+              (dotimes (i 4096)
+                (multiple-value-bind (tag data)
+                    (world-q fresh (+ #xF8040000 i))
+                  (when (and tag
+                             (member (tag-type tag) (list even-pc odd-pc))
+                             (not (<= #xF8000000 data (1- #xF8040000))))
+                    (unless (loop for e in (world-model-wired-map fresh)
+                                  thereis (and (<= (map-entry-address e) data)
+                                               (< data
+                                                  (+ (map-entry-address e)
+                                                     (map-entry-count e)))))
+                      (incf unwired-pcs)))))
+              (cold-check (zerop unwired-pcs)
+                          "trap page: ~D handler PCs on unwired pages"
+                          unwired-pcs))
+            ;; Byte-stable emit.
+            (cold-check (equalp (write-world model) (write-world fresh))
+                        "re-emit of the re-read world is byte-identical")))
+        ;; R1 audit.
+        (let ((rows (cold-unbound-function-cells w)))
+          (format t "  R1 unbound function cells: ~D (boot stubs ~
+excluded)~%" (length rows))
+          (loop for name in rows
+                for i from 0 below 10
+                do (format t "    ~A~%" name))
+          (when (> (length rows) 10)
+            (format t "    ... ~D more (full list: coldgen writes ~
+OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
+
 ;;; Stage-test driver (CLI: worldtool coldtest TMPDIR [REFERENCE-WORLD])
 
 (defun cold-test (tmpdir &key reference layout-path sysdir)
@@ -1008,17 +1141,69 @@ number of failed stages (0 = success)."
               (incf failures))))
         ;; M3d: the vop dispatcher + mini-eval over the whole cold set.
         ;; M3e: the wired machinery pass on the same loaded world.
+        ;; M3f: finalize + emit + audit, in the SAME materializer scope so
+        ;; the deferred forms alias the load's materialized structure.
         (let ((w6 (make-skeleton-world layout)))
           (cold-add-heap-regions w6)
-          (unless (check-cold-eval w6 reference-model)
-            (incf failures))
-          (when reference-model
-            (handler-case
-                (progn
-                  (cold-build-wired-machinery w6 :reference reference-model)
-                  (unless (check-wired-machinery w6 reference-model)
-                    (incf failures)))
-              (error (e)
-                (format t "~&wired machinery: ERROR ~A~%" e)
+          (with-cold-materializer (w6)
+            (unless (check-cold-eval w6 reference-model)
+              (incf failures))
+            (when reference-model
+              (handler-case
+                  (progn
+                    (cold-build-wired-machinery w6 :reference reference-model)
+                    (unless (check-wired-machinery w6 reference-model)
+                      (incf failures)))
+                (error (e)
+                  (format t "~&wired machinery: ERROR ~A~%" e)
+                  (incf failures)))
+              (unless (check-cold-emit w6 tmpdir reference-model)
                 (incf failures)))))))
     failures))
+
+;;; Generator driver (CLI: worldtool coldgen LAYOUT OUT --reference R --sys D)
+
+(defun coldgen (layout-path out &key reference sysdir)
+  "Build a fresh world end to end and write OUT (.ilod) plus
+OUT.unbound-fcells.txt (the full R1 audit).  REFERENCE (the unpatched
+distribution world) and SYSDIR are required inputs: the symbol-home
+oracle and the IFEP vector grafts come from the reference.  Returns 0."
+  (let* ((layout (read-layout layout-path))
+         (reference-model (read-world reference)))
+    (multiple-value-bind (homes aliases) (world-symbol-homes reference-model)
+      (setf *cold-symbol-homes* homes
+            *cold-package-aliases* aliases))
+    (setup-sys-host (if (char= (char sysdir (1- (length sysdir))) #\/)
+                        sysdir
+                        (concatenate 'string sysdir "/")))
+    (let ((w (make-skeleton-world layout))
+          (*cold-eval-stats* (make-hash-table :test #'equal)))
+      (multiple-value-bind (ndeferred npatches npackages)
+          (cold-build-world w :reference reference-model)
+        (format t "~&cold set loaded: ~D deferred forms (~D patches ~
+ahead), ~D packages~%" ndeferred npatches npackages))
+      (let* ((model (cold-world-model w :wired-ranges (cold-wired-ranges w)))
+             (bytes (write-world model)))
+        (write-file-bytes out bytes)
+        (format t "~A: ~:D bytes, ~D wired + ~D unwired map entries~%"
+                out (length bytes)
+                (length (world-model-wired-map model))
+                (length (world-model-unwired-map model))))
+      ;; The Q the emulator boots through, on the file just written.
+      (let ((fresh (read-world out)))
+        (multiple-value-bind (tag data) (world-q fresh (+ #xF8041100 2))
+          (declare (ignore data))
+          (unless (and tag (= (tag-type tag)
+                              (cold-dtp w "COMPILED-FUNCTION")))
+            (error "~A: SYSCOM+2 tag #x~2,'0X -- the emulator requires ~
+#x1C (compiled function)" out (and tag (tag-type tag))))))
+      (let ((rows (cold-unbound-function-cells w))
+            (report (concatenate 'string out ".unbound-fcells.txt")))
+        (with-open-file (f report :direction :output :if-exists :supersede)
+          (format f ";;; R1 audit: function cells the cold load references ~
+that are still unbound at emit~%;;; (boot stubs from ~
+*COLD-LOAD-FUNCTION-INITIALIZATIONS* excluded).~%")
+          (dolist (r rows) (format f "~A~%" r)))
+        (format t "R1 audit: ~D unbound referenced function cells -> ~A~%"
+                (length rows) report)))
+    0))

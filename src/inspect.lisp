@@ -10,14 +10,15 @@
 (in-package #:worldtool)
 
 (defun find-wired-entry (model vma)
-  (loop for e in (world-model-wired-map model)
+  (loop for e in (append (world-model-wired-map model)
+                         (world-model-unwired-map model))
         when (and (<= (map-entry-address e) vma)
                   (< vma (+ (map-entry-address e) (map-entry-count e))))
           return e))
 
 (defun world-q (model vma)
-  "Read the Q at VMA via the wired load map.  Returns (values tag data) or NIL
-if the address is not wired."
+  "Read the Q at VMA via the load maps (wired, then unwired).  Returns
+\(values tag data) or NIL if the address is not mapped."
   (let ((e (find-wired-entry model vma)))
     (when e
       (let ((i (- vma (map-entry-address e))))

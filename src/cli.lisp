@@ -27,7 +27,9 @@
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
              ~7T worldtool roundtrip FILE~%~
-             ~7T worldtool coldtest LAYOUT.sexp TMPDIR [--reference WORLD]~%")
+             ~7T worldtool coldtest LAYOUT.sexp TMPDIR [--reference WORLD]~%~
+             ~7T worldtool coldgen LAYOUT.sexp OUT.ilod --reference WORLD ~
+--sys SYSDIR~%")
   1)
 
 (defun main (args)
@@ -74,6 +76,16 @@
            0))
         ((string= (first args) "roundtrip")
          (if (roundtrip (second args)) 0 1))
+        ((string= (first args) "coldgen")
+         (let ((layout (second args))
+               (out (third args))
+               (reference (let ((p (position "--reference" args :test #'string=)))
+                            (and p (nth (1+ p) args))))
+               (sysdir (let ((p (position "--sys" args :test #'string=)))
+                         (and p (nth (1+ p) args)))))
+           (unless (and layout out reference sysdir)
+             (return-from main (usage)))
+           (coldgen layout out :reference reference :sysdir sysdir)))
         ((string= (first args) "coldtest")
          (let ((layout (second args))
                (tmpdir (third args))

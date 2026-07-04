@@ -162,39 +162,68 @@ No automatic region extension yet -- callers add regions explicitly."
           (incf (cdar runs))
           (push (cons p 1) runs)))))
 
-(defun cold-world-model (w &key (version-q #x410040) extra-entries)
+(defun cold-run-entry (w start-page npages)
+  "A :data-pages map entry covering NPAGES present pages from START-PAGE."
+  (let* ((count (* npages +ivory-page-size-qs+))
+         (qv (make-qvec count)))
+    (dotimes (p npages)
+      (let ((src (gethash (+ start-page p) (cold-world-pages w))))
+        (dotimes (i +ivory-page-size-qs+)
+          (multiple-value-bind (tag data) (qref src i)
+            (set-q qv (+ (* p +ivory-page-size-qs+) i) tag data)))))
+    (make-map-entry :address (ash start-page 8)
+                    :opcode +op-data-pages+ :count count
+                    :address-tag +type-fixnum+
+                    :op-tag +type-fixnum+
+                    :data-tag +type-fixnum+
+                    :payload qv)))
+
+(defun cold-split-run (start-page npages wired-ranges)
+  "Split a run of pages into ((start count wiredp) ...) by whether each
+page's base vma falls in a wired range (ranges are quantum-aligned, so
+pages never straddle one)."
+  (let ((groups nil))
+    (dotimes (p npages (nreverse groups))
+      (let* ((vma (ash (+ start-page p) 8))
+             (wiredp (loop for (start . end) in wired-ranges
+                           thereis (and (<= start vma) (< vma end)))))
+        (if (and groups (eq (third (car groups)) wiredp))
+            (incf (second (car groups)))
+            (push (list (+ start-page p) 1 wiredp) groups))))))
+
+(defun cold-world-model (w &key (version-q #x410040) extra-entries
+                              wired-ranges)
   "Freeze the cold-world into an :ilod world-model.  EXTRA-ENTRIES are
 prebuilt map-entry structures (e.g. :constant entries) appended after the
-:data-pages entries."
-  (let* ((entries
-           (append
-            (loop for (start-page . npages) in (cold-page-runs w)
-                  collect
-                  (let* ((count (* npages +ivory-page-size-qs+))
-                         (qv (make-qvec count)))
-                    (dotimes (p npages)
-                      (let ((src (gethash (+ start-page p) (cold-world-pages w))))
-                        (dotimes (i +ivory-page-size-qs+)
-                          (multiple-value-bind (tag data) (qref src i)
-                            (set-q qv (+ (* p +ivory-page-size-qs+) i) tag data)))))
-                    (make-map-entry :address (ash start-page 8)
-                                    :opcode +op-data-pages+ :count count
-                                    :address-tag +type-fixnum+
-                                    :op-tag +type-fixnum+
-                                    :data-tag +type-fixnum+
-                                    :payload qv)))
-            extra-entries))
-         (model (make-world-model :format :ilod :wired-map entries))
-         (header-pages (assign-ilod-file-pages model))
-         (header (make-array (* header-pages +ivory-page-size-bytes+)
-                             :element-type '(unsigned-byte 8)
-                             :initial-element 0)))
-    (setf (world-model-header-bytes model) header)
-    (dotimes (q (* header-pages +ivory-page-size-qs+))
-      (ivory-write-q header q +type-fixnum+ 0))
-    (ivory-write-q header 0 (aref *ilod-header-tags* 0) version-q)
-    (ivory-write-q header 1 (aref *ilod-header-tags* 1) (length entries))
-    (ivory-write-q header 2 (aref *ilod-header-tags* 2) 0)
-    (ivory-write-q header 3 (aref *ilod-header-tags* 3) 0)
-    (synthesize-map-qs model +ivory-first-map-q+)
-    model))
+wired :data-pages entries.  WIRED-RANGES non-NIL splits pages into the
+wired and unwired maps ((start . end) vmas, see COLD-WIRED-RANGES); NIL
+keeps everything wired (the skeleton tests)."
+  (let ((wired nil) (unwired nil))
+    (loop for (start-page . npages) in (cold-page-runs w)
+          do (if (null wired-ranges)
+                 (push (cold-run-entry w start-page npages) wired)
+                 (loop for (start count wiredp)
+                         in (cold-split-run start-page npages wired-ranges)
+                       do (if wiredp
+                              (push (cold-run-entry w start count) wired)
+                              (push (cold-run-entry w start count) unwired)))))
+    (let* ((wired-entries (append (nreverse wired) extra-entries))
+           (unwired-entries (nreverse unwired))
+           (model (make-world-model :format :ilod
+                                    :wired-map wired-entries
+                                    :unwired-map unwired-entries))
+           (header-pages (assign-ilod-file-pages model))
+           (header (make-array (* header-pages +ivory-page-size-bytes+)
+                               :element-type '(unsigned-byte 8)
+                               :initial-element 0)))
+      (setf (world-model-header-bytes model) header)
+      (dotimes (q (* header-pages +ivory-page-size-qs+))
+        (ivory-write-q header q +type-fixnum+ 0))
+      (ivory-write-q header 0 (aref *ilod-header-tags* 0) version-q)
+      (ivory-write-q header 1 (aref *ilod-header-tags* 1)
+                     (length wired-entries))
+      (ivory-write-q header 2 (aref *ilod-header-tags* 2)
+                     (length unwired-entries))
+      (ivory-write-q header 3 (aref *ilod-header-tags* 3) 0)
+      (synthesize-map-qs model +ivory-first-map-q+)
+      model)))

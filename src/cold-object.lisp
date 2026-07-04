@@ -69,10 +69,35 @@ the Q-store site that consumed the placeholder records a first-boot patch
   #("LIST" "LEXICAL-CLOSURE" "DYNAMIC-CLOSURE" "DOUBLE-FLOAT"
     "BIG-RATIO" "COMPLEX" "COMPILED-FUNCTION" "LOCATIVE"))
 
+;;; Character-set slots (%%CHAR-CHAR-SET, byte 8 8 of the char word).
+;;; Slots are assigned warm on first use (character-sets.lisp
+;;; ASSIGN-OFFSETS: standard = 0 and mouse = 1 asserted, the rest
+;;; first-free), so a cold character must bake in the slot the finished
+;;; world will assign.  Keyboard = 2 is ground truth: all seven cold-set
+;;; Keyboard characters (input-editor command registrations) appear in
+;;; the distribution world with charset byte 2 (e.g. Cut = 23:00000200,
+;;; c-Back-Scroll = 23:10000203, Find = 23:00000268).
+(defparameter *cold-character-set-slots*
+  '(("Standard" . 0) ("Mouse" . 1) ("Keyboard" . 2)))
+
+(defun cold-charset-slot (vchar)
+  (let* ((cs (vchar-charset vchar))
+         (name (let ((n (vcharset-name cs)))
+                 (if (vsym-p n) (vsym-name n) n))))
+    (or (cdr (assoc name *cold-character-set-slots* :test #'string-equal))
+        (error "Character set ~A has no known cold slot (see ~
+*COLD-CHARACTER-SET-SLOTS*)" name))))
+
 
 (defmacro with-cold-materializer ((w) &body body)
+  "Establish the host-object identity table.  Re-entrant: a nested use
+joins the enclosing scope, so a driver can wrap load + machinery +
+finalize in ONE scope and deferred forms keep aliasing the structure the
+load already materialized (vbin table slots share host conses)."
   (declare (ignore w))
-  `(let ((*cold-object-vmas* (make-hash-table :test #'eq)))
+  `(let ((*cold-object-vmas* (if (boundp '*cold-object-vmas*)
+                                 *cold-object-vmas*
+                                 (make-hash-table :test #'eq))))
      ,@body))
 
 ;;; ---------------- Strings ----------------
@@ -586,10 +611,26 @@ Returns (values tag data)."
                          (1+ (cold-vsym w target)))
                  (:function (cold-fdefinition-cell w target))))))
     (vchar
-     (when (or (vchar-charset obj) (vchar-style obj))
-       (error "Styled character ~S not yet supported" obj))
+     ;; The only style the cold set carries is the plain default
+     ;; (NIL.NIL.NIL, no attributes) = style index 0; anything else would
+     ;; need the warm style-interning machinery.
+     (let ((style (vchar-style obj)))
+       (unless (or (null style)
+                   (and (vfalse-p (vstyle-family style))
+                        (vfalse-p (vstyle-face style))
+                        (vfalse-p (vstyle-size style))
+                        (vfalse-p (vstyle-attributes style))))
+         (error "Styled character ~S not yet supported" obj)))
+     ;; Char word: bits(4@28) style(12@16) charset(8@8) subindex(8@0)
+     ;; (%%CHAR-* byte specs).  Op #o53 chars carry the full 16-bit code
+     ;; in VCHAR-CODE with no charset; op #o54 chars carry the subindex
+     ;; plus a charset whose slot the generator must bake in.
      (values (tag 0 (cold-dtp w "CHARACTER"))
-             (logior (ash (or (vchar-bits obj) 0) 28) (vchar-code obj))))
+             (logior (ash (or (vchar-bits obj) 0) 28)
+                     (if (vchar-charset obj)
+                         (ash (cold-charset-slot obj) 8)
+                         0)
+                     (vchar-code obj))))
     (vsingle
      (values (tag 0 (cold-dtp w "SINGLE-FLOAT")) (vsingle-bits obj)))
     (voldfloat
@@ -613,6 +654,7 @@ Returns (values tag data)."
              (+ *cold-cca-base* (vembed-offset obj))))
     (vnative
      (values (tag 0 (cold-dtp w "SPARE-IMMEDIATE-1")) (vnative-word obj)))
+    (vraw (values (vraw-tag obj) (vraw-data obj)))
     (vinstance
      (values (tag 0 (cold-dtp w "LIST")) (cold-instance w obj area)))
     (character  ; strings decode to CL chars only via veval forms
