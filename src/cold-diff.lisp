@@ -1028,10 +1028,17 @@ expected ~D" name i lt ld lv)))
                           for vma from base
                           always (= word (nth-value 1 (cw-ref w vma)))))
                    (contents
-                    (loop for c in contents
-                          for vma from base
-                          always (multiple-value-bind (et ed) (cw-ref w vma)
-                                   (and (= (tag-type et) fixnum) (= ed c)))))
+                    (and (loop for c in contents
+                               for vma from base
+                               always (multiple-value-bind (et ed)
+                                          (cw-ref w vma)
+                                        (and (= (tag-type et) fixnum)
+                                             (= ed c))))
+                         ;; Tail beyond the spec'd prefix stays NIL.
+                         (loop for i from (length contents) below len
+                               always (multiple-value-bind (et ed)
+                                          (cw-ref w (+ base i))
+                                        (and (= et ntag) (= ed ndata))))))
                    (fill-fixnum
                     (loop for i below len
                           always (multiple-value-bind (et ed)
@@ -1098,6 +1105,67 @@ symbol."
         (multiple-value-bind (et ed) (cw-ref w (+ (first events) 1))
           (cold-check (and (= (tag-type et) (tag-type st)) (= ed sd))
                       "root disk event element 0 is STORAGE:DISK-EVENT"))))))
+
+(defun check-allocator-tables (w)
+  "M3h gate: *ZONE-LEVEL* mirrors this world's regions (every region's
+zone byte = its level, unpopulated zones -1); the stack registry holds
+the initial SG's binding and control stacks sorted by origin; the array
+metadata maps every known type code to its name symbol."
+  (let ((fixnum (cold-dtp w "FIXNUM")))
+    ;; *ZONE-LEVEL* vs the region table.
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS" "*ZONE-LEVEL*"))
+      (declare (ignore tag))
+      (cold-check boundp "*ZONE-LEVEL* is bound")
+      (when boundp
+        (let ((bytes (make-array 32 :initial-element #xFF)))
+          (dotimes (word 8)
+            (let ((v (nth-value 1 (cw-ref w (+ data 1 word)))))
+              (dotimes (b 4)
+                (setf (aref bytes (+ (* word 4) b))
+                      (ldb (byte 8 (* 8 b)) v)))))
+          (cold-check
+           (loop for region across (cold-world-regions w)
+                 always (= (aref bytes (ldb (byte 5 27)
+                                            (cold-region-origin region)))
+                           (ldb (byte 6 18) (cold-region-bits-for w region))))
+           "every region's zone byte is its level"))))
+    ;; Stack registry: two stacks, sorted, initial SG.
+    (multiple-value-bind (tag n boundp)
+        (cold-symbol-value-q
+         w (make-vsym "SYSTEM-INTERNALS" "*NUMBER-OF-ACTIVE-STACKS*"))
+      (cold-check (and boundp (= (tag-type tag) fixnum) (= n 2))
+                  "*NUMBER-OF-ACTIVE-STACKS* = 2 (~@[~D~])" (and boundp n)))
+    (let ((org (nth-value 1 (cold-symbol-value-q
+                             w (make-vsym "SYSTEM-INTERNALS"
+                                          "*STACK-ORIGIN*"))))
+          (sg (cold-machinery w :initial-stack-group)))
+      (cold-check
+       (and org
+            (< (nth-value 1 (cw-ref w (+ org 1)))
+               (nth-value 1 (cw-ref w (+ org 2)))))
+       "*STACK-ORIGIN* is sorted ascending")
+      (let ((ssg (nth-value 1 (cold-symbol-value-q
+                               w (make-vsym "SYSTEM-INTERNALS"
+                                            "*STACK-STACK-GROUP*")))))
+        (cold-check
+         (and ssg
+              (= (nth-value 1 (cw-ref w (+ ssg 1))) sg)
+              (= (nth-value 1 (cw-ref w (+ ssg 2))) sg))
+         "*STACK-STACK-GROUP* entries reference the initial SG")))
+    ;; Array metadata: every known code maps to its named symbol.
+    (let ((types (nth-value 1 (cold-symbol-value-q
+                               w (make-vsym "SYSTEM" "*ARRAY-TYPES*")))))
+      (cold-check
+       (and types
+            (loop for (name . code) in *cold-array-type-codes*
+                  always (multiple-value-bind (st sd)
+                             (cold-symbol-ref w (make-vsym "SYSTEM" name))
+                           (multiple-value-bind (et ed)
+                               (cw-ref w (+ types 1 code))
+                             (and (= (tag-type et) (tag-type st))
+                                  (= ed sd))))))
+       "*ARRAY-TYPES* maps every known code to its symbol"))))
 
 (defun check-area-list (w)
   "M3h gate: SI:AREA-LIST is the cdr-coded area-name table data
@@ -1239,6 +1307,7 @@ page fully reconciled against the reference."
         (check-disk-events w reference)
         (check-reserved-regions w reference))
       (check-area-list w)
+      (check-allocator-tables w)
       (check-embedded-network-functions w))))
 
 ;;; M3f gate: finalize, emit, re-read, audit.

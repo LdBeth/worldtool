@@ -203,13 +203,23 @@ but no store."
     (cond ((< n (length *cold-architectural-region-bits*))
            (aref *cold-architectural-region-bits* n))
           (t
-           (let ((config (assoc area *cold-area-config*)))
-             (unless config
-               (error "Region ~D belongs to non-cold area ~D" n area))
-             (if (member area '(16 17))          ; PAGE-TABLE / GC-TABLE
-                 (third config)
-                 (cold-heap-region-bits (third config)))))
-    )))
+           (let* ((config (assoc area *cold-area-config*))
+                  (bits (progn
+                          (unless config
+                            (error "Region ~D belongs to non-cold area ~D"
+                                   n area))
+                          (if (member area '(16 17)) ; PAGE-TABLE / GC-TABLE
+                              (third config)
+                              (cold-heap-region-bits (third config))))))
+             ;; The saved heap (zone 16) is uniformly STATIC level 36,
+             ;; exactly like the distribution's zone-16 regions: one
+             ;; level per zone is an architectural invariant
+             ;; (UPDATE-ZONE-AND-DEMILEVEL-TABLES errors on mismatch),
+             ;; and the area templates' 34/35 only shape regions the
+             ;; runtime creates later in fresh zones.
+             (if (= (ldb (byte 5 27) (cold-region-origin region)) 16)
+                 (dpb 36 (byte 6 18) bits)
+                 bits))))))
 
 (defun cold-region-has-pages-p (w region)
   "Does any world page fall inside the region?  (FEP-AREA and reserved
@@ -457,6 +467,28 @@ wired-table forwards, so they land in the comm slots or wired cells."
       (stamp "SYSTEM-INTERNALS" "*NUMBER-OF-ACTIVE-REGIONS*" fixnum
              (fill-pointer (cold-world-regions w)))
       (stamp "SYSTEM-INTERNALS" "*FREE-REGION*" fixnum #xFFFF)
+      ;; Allocator / GC / process scalars the safeguarded code reads
+      ;; before anything sets them (M3h boot-9: C4-operand scan of the
+      ;; F000xxxx code region).  All NIL/0 in the distribution except
+      ;; the migration mode (ECASEd against SI:NORMAL) and the control
+      ;; stack growth factor (single-float 1.3, dist verbatim).
+      (multiple-value-bind (ntag ndata) (cold-nil-q w)
+        (flet ((stamp-nil (package name)
+                 (cold-set-symbol-value w (make-vsym package name)
+                                        ntag ndata)))
+          (stamp-nil "SYSTEM" "%STRUCTURE-CACHE-REGION")
+          (stamp-nil "SYSTEM" "%LIST-CACHE-REGION")
+          (stamp-nil "SYSTEM-INTERNALS" "*EPHEMERAL-GC-IN-PROGRESS*")
+          (stamp-nil "SYMBOLICS-COMMON-LISP" "*CURRENT-PROCESS*")
+          (stamp-nil "SYSTEM-INTERNALS" "GC-PROCESS")))
+      (stamp "SYSTEM-INTERNALS" "GC-RECLAIM-OLDSPACE-INHIBIT" fixnum 0)
+      (multiple-value-bind (st sd)
+          (cold-symbol-ref w (make-vsym "SYSTEM-INTERNALS" "NORMAL"))
+        (cold-set-symbol-value
+         w (make-vsym "SYSTEM-INTERNALS" "*EPHEMERAL-MIGRATION-MODE*")
+         st sd))
+      (stamp "DEBUGGER" "PDL-GROW-RATIO" (cold-dtp w "SINGLE-FLOAT")
+             #x3FA66666)
       (stamp "SYSTEM" "%REGION-CONS-ALARM" fixnum 0)
       (stamp "SYSTEM" "%PAGE-CONS-ALARM" fixnum 0)
       ;; Not SETQ'd anywhere in the cold set; ground truth has 8 (the
@@ -630,7 +662,21 @@ wired-table forwards, so they land in the comm slots or wired cells."
     ;; this world's region bits use.
     ("SYSTEM-INTERNALS" "*LEVEL-TYPE*"             "ART-4B"      64
      :area "SAFEGUARDED-OBJECTS-AREA"
-     :words (#x00005555 0 0 0 #x00034321 0 0 0))))
+     :words (#x00005555 0 0 0 #x00034321 0 0 0))
+    ;; Ephemeral level -> PHT group crumbs (i-allocate.lisp:93, the
+    ;; third of the "initialized by the cold load generator" trio with
+    ;; *ZONE-LEVEL* / *DEMILEVEL-LEVEL*).  Distribution verbatim.
+    ("SYSTEM-INTERNALS" "*EPHEMERAL-LEVEL-GROUP*"  "ART-2B"      32
+     :area "SAFEGUARDED-OBJECTS-AREA"
+     :words (#x79E79E71 #x9E79E79E))
+    ;; Flip thresholds for the in-use ephemeral levels 0-3 (gc-defs.lisp
+    ;; :352 -- gc-defs is NOT in the cold set, so its DEFVAR initializer
+    ;; never runs; MAKE-REGION-INTERNAL %FIXNUM-CEILINGs the level's
+    ;; entry when consing makes an ephemeral region -- M3h boot-9's
+    ;; recursion driver).  Values are the distribution's.
+    ("SYSTEM-INTERNALS" "*EPHEMERAL-GC-FLIP-CAPACITY*" "ART-Q"   32
+     :area "SAFEGUARDED-OBJECTS-AREA"
+     :contents (#x186A0 #x30D40 #x4E20 #x2710))))
 
 (defun cold-build-wired-arrays (w)
   (dolist (spec *cold-wired-arrays*)
@@ -655,7 +701,11 @@ wired-table forwards, so they land in the comm slots or wired cells."
                       (list (make-vsym "KEYWORD" "LEADER-LIST")
                             leader-list))))))
         (when contents
-          (setf (varray-contents arr) (coerce contents 'vector)))
+          ;; Shorter than the array: the tail stays NIL.
+          (setf (varray-contents arr)
+                (coerce (append contents
+                                (make-list (- len (length contents))))
+                        'vector)))
         (let* ((hdr (cold-array w arr area))
                (fixnum (cold-dtp w "FIXNUM")))
           (when words
@@ -670,6 +720,115 @@ wired-table forwards, so they land in the comm slots or wired cells."
               (cw-set w (+ hdr len) (logior #x40 tag) data)))
           (cold-set-symbol-value w (make-vsym package name)
                                  (tag 0 (cold-dtp w "ARRAY")) hdr))))))
+
+;;; ---------------- Allocator and stack-registry tables ----------------
+
+(defconstant +cold-zone-count+ 32)
+
+(defun cold-build-zone-level (w)
+  "SI:*ZONE-LEVEL* -- \"initialized by the cold load generator\"
+(i-allocate.lisp:90): each zone's byte is the level of its resident
+regions, -1 elsewhere; region creation validates new regions against it
+(M3h boot-9 original trap at PC F0001B99)."
+  (let ((bytes (make-array +cold-zone-count+ :initial-element #xFF)))
+    (loop for region across (cold-world-regions w)
+          for zone = (ldb (byte 5 27) (cold-region-origin region))
+          for level = (ldb (byte 6 18) (cold-region-bits-for w region))
+          do (let ((old (aref bytes zone)))
+               (unless (member old (list #xFF level))
+                 (error "Zone ~D hosts levels ~D and ~D" zone old level))
+               (setf (aref bytes zone) level)))
+    (let* ((arr (make-varray (list +cold-zone-count+)
+                             (list (make-vsym "KEYWORD" "TYPE")
+                                   (make-vsym "SYSTEM" "ART-8B"))))
+           (hdr (cold-array w arr "SAFEGUARDED-OBJECTS-AREA"))
+           (fixnum (cold-dtp w "FIXNUM")))
+      (dotimes (word (/ +cold-zone-count+ 4))
+        (cw-set w (+ hdr 1 word) (tag 0 fixnum)
+                (loop for b below 4
+                      sum (ash (aref bytes (+ (* word 4) b)) (* 8 b)))))
+      (cold-set-symbol-value w (make-vsym "SYSTEM-INTERNALS" "*ZONE-LEVEL*")
+                             (tag 0 (cold-dtp w "ARRAY")) hdr))))
+
+(defun cold-build-stack-registry (w)
+  "The safeguarded stack tables (ldata.lisp:215-218): FIND-STACK
+binary-searches origin/length/stack-group triples sorted ascending,
+bounded by *NUMBER-OF-ACTIVE-STACKS*.  The fresh world registers the
+initial stack group's binding and control stacks, which
+cold-build-initial-stack-group allocates at the architectural region
+starts (cold-wired.lisp:51-52)."
+  (let* ((fixnum (cold-dtp w "FIXNUM"))
+         (array (cold-dtp w "ARRAY"))
+         (sg (cold-machinery w :initial-stack-group))
+         (stacks `((#xF2000000 ,+cold-binding-stack-size+)
+                   (#xF6000000 ,+cold-control-stack-size+))))
+    (flet ((build (name type)
+             (let* ((arr (make-varray (list 256)
+                                      (list (make-vsym "KEYWORD" "TYPE")
+                                            (make-vsym "SYSTEM" type))))
+                    (hdr (cold-array w arr "SAFEGUARDED-OBJECTS-AREA")))
+               (cold-set-symbol-value w (make-vsym "SYSTEM-INTERNALS" name)
+                                      (tag 0 array) hdr)
+               hdr)))
+      (let ((org (build "*STACK-ORIGIN*" "ART-FIXNUM"))
+            (len (build "*STACK-LENGTH*" "ART-FIXNUM"))
+            (ssg (build "*STACK-STACK-GROUP*" "ART-Q")))
+        (dotimes (i 256)
+          (cw-set w (+ org 1 i) (tag 0 fixnum) 0)
+          (cw-set w (+ len 1 i) (tag 0 fixnum) 0))
+        (loop for (origin size) in stacks
+              for i from 0
+              do (cw-set w (+ org 1 i) (tag 0 fixnum) origin)
+                 (cw-set w (+ len 1 i) (tag 0 fixnum) size)
+                 (cw-set w (+ ssg 1 i) (tag 0 array) sg))
+        (cold-set-symbol-value w (make-vsym "SYSTEM-INTERNALS"
+                                            "*NUMBER-OF-ACTIVE-STACKS*")
+                               (tag 0 fixnum) (length stacks))))))
+
+;;; Distribution patterns for the array metadata (ldata.lisp:213-223):
+;;; the null WORD is fixnum 0 for the numeric/packed types, and the null
+;;; ELEMENT is 0 for numerics and the null character for strings.
+(defparameter *cold-array-null-word-zeros* '(0 2 4 6 8 10 16 20 42))
+(defparameter *cold-array-null-element-zeros* '(0 2 4 6 8 10))
+(defparameter *cold-array-null-element-chars* '(16 20))
+
+(defun cold-build-array-meta (w)
+  "SYS:*ARRAY-TYPES* / *ARRAY-NULL-WORD* / *ARRAY-NULL-ELEMENT*
+(safeguarded, ldata.lisp): the type-code -> name-symbol map (known
+names at their codes, %ARRAY-TYPE-~O filler like the distribution) and
+the per-type null Qs.  *ARRAY-ELEMENTS-PER-Q* / *ARRAY-BITS-PER-ELEMENT*
+stay unbound -- they are unbound in the distribution too."
+  (let ((fixnum (cold-dtp w "FIXNUM"))
+        (array (cold-dtp w "ARRAY"))
+        (char (cold-dtp w "CHARACTER")))
+    (multiple-value-bind (ntag ndata) (cold-nil-q w)
+      (flet ((build (name fill-fn)
+               (let* ((arr (make-varray (list 64)
+                                        (list (make-vsym "KEYWORD" "TYPE")
+                                              (make-vsym "SYSTEM" "ART-Q"))))
+                      (hdr (cold-array w arr "SAFEGUARDED-OBJECTS-AREA")))
+                 (dotimes (i 64) (funcall fill-fn (+ hdr 1 i) i))
+                 (cold-set-symbol-value w (make-vsym "SYSTEM" name)
+                                        (tag 0 array) hdr))))
+        (build "*ARRAY-TYPES*"
+               (lambda (vma i)
+                 (let ((name (or (car (rassoc i *cold-array-type-codes*))
+                                 (format nil "%ARRAY-TYPE-~O" i))))
+                   (multiple-value-bind (st sd)
+                       (cold-symbol-ref w (make-vsym "SYSTEM" name))
+                     (cw-set w vma st sd)))))
+        (build "*ARRAY-NULL-WORD*"
+               (lambda (vma i)
+                 (if (member i *cold-array-null-word-zeros*)
+                     (cw-set w vma (tag 0 fixnum) 0)
+                     (cw-set w vma ntag ndata))))
+        (build "*ARRAY-NULL-ELEMENT*"
+               (lambda (vma i)
+                 (cond ((member i *cold-array-null-element-zeros*)
+                        (cw-set w vma (tag 0 fixnum) 0))
+                       ((member i *cold-array-null-element-chars*)
+                        (cw-set w vma (tag 0 char) 0))
+                       (t (cw-set w vma ntag ndata)))))))))
 
 ;;; ---------------- System disk events ----------------
 
@@ -750,10 +909,14 @@ region state, and grafts the IFEP trap vectors and FEPComm function
 slots from the reference world."
   (cold-build-initial-stack-group w)
   (cold-stamp-storage-values w)
-  ;; These allocate in WIRED-CONTROL-TABLES -- they must precede the
-  ;; table fill so the region free pointers cover them.
+  ;; These allocate in WIRED-CONTROL-TABLES / SAFEGUARDED-OBJECTS-AREA
+  ;; -- they must precede the table fill so the region free pointers
+  ;; cover them.
   (cold-build-wired-arrays w)
   (cold-build-disk-events w)
+  (cold-build-zone-level w)
+  (cold-build-stack-registry w)
+  (cold-build-array-meta w)
   (cold-fill-storage-tables w)
   (cold-stamp-fepcomm-boot-slots w)
   (when reference
