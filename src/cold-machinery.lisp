@@ -252,7 +252,16 @@ this world's areas and regions."
                     (cold-table-set w name-tbl a st sd)))
                 (cold-table-set w name-tbl a ntag ndata))))
         (dolist (tbl (list name-tbl maxq-tbl rqsz-tbl rlist-tbl abits-tbl))
-          (cold-set-fill-pointer w tbl +cold-area-count+)))
+          (cold-set-fill-pointer w tbl +cold-area-count+))
+        ;; The name table doubles as the generator-owned SI:AREA-LIST
+        ;; (ldata.lisp:201; M3h boot-8 trap): it is ART-Q-LIST, cdr-next
+        ;; through the live areas with cdr-nil on the last (dist element
+        ;; 66 tag 58), and AREA-LIST references its data verbatim.
+        (multiple-value-bind (tag data)
+            (cw-ref w (+ name-tbl +cold-area-count+))
+          (cw-set w (+ name-tbl +cold-area-count+) (logior #x40 tag) data))
+        (cold-set-symbol-value w (make-vsym "SYSTEM-INTERNALS" "AREA-LIST")
+                               (tag 0 (cold-dtp w "LIST")) (+ name-tbl 1)))
       ;; --- Region tables (1024 entries).
       (let ((fp-tbl (cold-machinery w :region-free-pointer))
             (gcp-tbl (cold-machinery w :region-gc-pointer))
@@ -612,13 +621,23 @@ wired-table forwards, so they land in the comm slots or wired cells."
     ("STORAGE" "*ZONE-COUNT-WIRED-PAGES*"          "ART-Q"       32
      :fill-fixnum 0)
     ("STORAGE" "*PAGE-WAITER-VPN*"                 "ART-Q"        8)
-    ("STORAGE" "*PAGE-WAITER-PROCESS*"             "ART-Q"        8)))
+    ("STORAGE" "*PAGE-WAITER-PROCESS*"             "ART-Q"        8)
+    ;; Level -> section-type policy nibbles (allocate-common.lisp:86,
+    ;; safeguarded; M3h boot-8: FERROR's consing hit the allocator,
+    ;; which reads it -- the error recursed 20 deep and AUX-HALTed).
+    ;; Distribution verbatim: levels 0-3 ephemeral (5), 32-36 the
+    ;; static/dynamic ladder (1,2,3,4,3) -- covers levels 2/33/35 that
+    ;; this world's region bits use.
+    ("SYSTEM-INTERNALS" "*LEVEL-TYPE*"             "ART-4B"      64
+     :area "SAFEGUARDED-OBJECTS-AREA"
+     :words (#x00005555 0 0 0 #x00034321 0 0 0))))
 
 (defun cold-build-wired-arrays (w)
   (dolist (spec *cold-wired-arrays*)
     (destructuring-bind (package name type dims
                          &key fill-pointer leader-length leader-list
-                              contents words fill-fixnum last-cdr-nil)
+                              contents words fill-fixnum last-cdr-nil
+                              (area "WIRED-CONTROL-TABLES"))
         spec
       (let* ((len (if (listp dims) (reduce #'* dims) dims))
              (arr (make-varray
@@ -637,7 +656,7 @@ wired-table forwards, so they land in the comm slots or wired cells."
                             leader-list))))))
         (when contents
           (setf (varray-contents arr) (coerce contents 'vector)))
-        (let* ((hdr (cold-array w arr "WIRED-CONTROL-TABLES"))
+        (let* ((hdr (cold-array w arr area))
                (fixnum (cold-dtp w "FIXNUM")))
           (when words
             (loop for word in words

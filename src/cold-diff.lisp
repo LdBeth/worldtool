@@ -972,14 +972,17 @@ exactly what the spec bakes (NIL / fixnum fill / verbatim words)."
       (dolist (spec *cold-wired-arrays*)
         (destructuring-bind (package name type dims
                              &key fill-pointer leader-length leader-list
-                                  contents words fill-fixnum last-cdr-nil)
+                                  contents words fill-fixnum last-cdr-nil
+                                  (area "WIRED-CONTROL-TABLES"))
             spec
           (declare (ignore leader-length))
           (multiple-value-bind (tag data boundp)
               (cold-symbol-value-q w (make-vsym package name))
-            (cold-check (and boundp (= (tag-type tag) array)
-                             (<= #xF8040000 data #xF804FFFF))
-                        "~A is a bound wired array" name)
+            (let ((region (cold-area-current-region w area)))
+              (cold-check (and boundp (= (tag-type tag) array) region
+                               (<= (cold-region-origin region) data)
+                               (< data (cold-region-free region)))
+                          "~A is a bound array in ~A" name area))
             (when (and boundp (= (tag-type tag) array))
               (multiple-value-bind (ht hd) (cw-ref w data)
                 (cold-check (= (tag-type ht) header-i)
@@ -1095,6 +1098,28 @@ symbol."
         (multiple-value-bind (et ed) (cw-ref w (+ (first events) 1))
           (cold-check (and (= (tag-type et) (tag-type st)) (= ed sd))
                       "root disk event element 0 is STORAGE:DISK-EVENT"))))))
+
+(defun check-area-list (w)
+  "M3h gate: SI:AREA-LIST is the cdr-coded area-name table data
+(ldata.lisp:201 generator contract) and the last live area's Q is
+cdr-nil so the list ends at the area count."
+  (let ((name-tbl (cold-machinery w :area-name)))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS" "AREA-LIST"))
+      (cold-check (and boundp (= (tag-type tag) (cold-dtp w "LIST"))
+                       (= data (+ name-tbl 1)))
+                  "AREA-LIST is the area-name table data (~@[~2,'0X:~8,'0X~])"
+                  tag data))
+    (multiple-value-bind (tag data)
+        (cw-ref w (+ name-tbl +cold-area-count+))
+      (declare (ignore data))
+      (cold-check (= (ldb (byte 2 6) tag) 1)
+                  "last live area Q is cdr-nil (~2,'0X)" tag))
+    (multiple-value-bind (tag data)
+        (cw-ref w (+ name-tbl +cold-area-count+ -1))
+      (declare (ignore data))
+      (cold-check (= (ldb (byte 2 6) tag) 0)
+                  "penultimate area Q is cdr-next (~2,'0X)" tag))))
 
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
@@ -1213,6 +1238,7 @@ page fully reconciled against the reference."
         (check-wired-arrays w reference)
         (check-disk-events w reference)
         (check-reserved-regions w reference))
+      (check-area-list w)
       (check-embedded-network-functions w))))
 
 ;;; M3f gate: finalize, emit, re-read, audit.
