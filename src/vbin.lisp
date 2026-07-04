@@ -495,7 +495,12 @@
   (setf *sys-host-root* root))
 
 (defun sys-pathname (spec &optional (type "vbin"))
-  "Translate a Genera pathname string like \"SYS: IO; RDDEFS\" to a host pathname."
+  "Translate a Genera pathname string like \"SYS: IO; RDDEFS\" to a host
+pathname.  SPEC may be a (name . type) cons for non-vbin extensions
+(e.g. the dumped TRAP-DISPATCH-TABLE.IBIN)."
+  (when (consp spec)
+    (setf type (cdr spec)
+          spec (car spec)))
   (unless *sys-host-root*
     (setup-sys-host))
   (translate-logical-pathname

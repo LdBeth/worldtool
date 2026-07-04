@@ -47,6 +47,14 @@
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
     "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH" "SYS: SYS2; DOUBLE"
     "SYS: SYS2; COMPLEX" "SYS: SYS; WIRED" "SYS: DEBUGGER; ITRAP-DISPATCH"
+    ;; The compiled error tables (COMPILE-ERROR-TABLES output; original
+    ;; *TRAP-DISPATCH-TABLE-FILE*): SETQs of DBG:*TRAP-DISPATCH-TABLES* /
+    ;; *TRAP-ON-EXIT-MICROSTATES* / *TRAP-DISPATCH-TABLE-VERSIONS*, which
+    ;; SYSTEM-STARTUP's INITIALIZE-ERROR-TRAP-DISPATCH AREFs pre-banner
+    ;; (M3h boot-7 trap).  The REV~D-ERROR-TABLE.LISP sources and the
+    ;; original ibin are lost; this one was re-dumped 2026-07-04 from the
+    ;; user's running Genera 8.5 with the same DUMP-FORMS-TO-FILE call.
+    ("SYS: I-SYS; TRAP-DISPATCH-TABLE" . "ibin")
     "SYS: GC; IGC-COLD"
     "SYS: I-SYS; WIRED-CONSOLE"
     "SYS: I-SYS; WIRED-SCREEN" "SYS: STORAGE; STORAGE" "SYS: STORAGE; USER-STORAGE"
