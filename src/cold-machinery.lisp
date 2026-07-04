@@ -458,6 +458,26 @@ wired-table forwards, so they land in the comm slots or wired cells."
                  (cold-region-origin region))
           (stamp "STORAGE" (format nil "%~A-REGION-LENGTH" area-name) fixnum
                  (cold-region-length region))))
+      ;; "Declare the area names to be variables (values are area numbers)
+      ;; / These values are stored by the cold load generator now."
+      ;; (ldata.lisp:152-153 -- explicit contract; M3h boot-11 trap:
+      ;; first-boot GROW-DATA-STACK read STACK-AREA unbound).  Areas made
+      ;; by load-time (SETQ var (MAKE-AREA ...)) forms are already bound
+      ;; to the same number; a bound mismatch means the layout and the
+      ;; load disagree and must be a hard error.
+      (dotimes (i +cold-area-count+)
+        (let* ((full-name (cold-area-name (cold-area w i)))
+               (colon (or (position #\: full-name)
+                          (error "unqualified area name ~A" full-name)))
+               (vsym (make-vsym (subseq full-name 0 colon)
+                                (subseq full-name (1+ colon)))))
+          (multiple-value-bind (tag data boundp)
+              (cold-symbol-value-q w vsym)
+            (when (and boundp (not (and (= (tag-type tag) fixnum)
+                                        (= data i))))
+              (error "~A bound to ~2,'0X:~8,'0X, not area number ~D"
+                     full-name tag data i)))
+          (cold-set-symbol-value w vsym (tag 0 fixnum) i)))
       ;; Region allocator scalars (allocate-common.lisp:67-69): region
       ;; creation extends the tables at *NUMBER-OF-ACTIVE-REGIONS* and
       ;; pops *FREE-REGION*; nothing initializes either (M3h boot-5

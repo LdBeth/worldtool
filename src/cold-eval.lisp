@@ -817,11 +817,19 @@ compiler-side and have no cold definition or boot effect.")
                             "deferred setqs"))))
          (:putprop (cold-do-putprop w (first args) (second args)
                                     (third args)))
+         ;; The value operand of the DEFVAR/DEFCONST bin ops is the
+         ;; SOURCE FORM (DEFVAR-1 semantics -- evaluated lazily by the
+         ;; loader), not a quoted object: constants coincide either way,
+         ;; but (QUOTE X) must store X and calls like (MAKE-AREA ...)
+         ;; must evaluate (M3h boot-11: *WIRED-CONSOLE-AREA* held its
+         ;; own make-area form; dist holds area number 19).
          (:defconst (cold-do-defvar w :defconst (first args) (second args)
-                                    (> (length args) 1) (third args) nil))
+                                    (> (length args) 1) (third args) nil
+                                    :value-kind :form))
          (:defvar (cold-do-defvar w :defvar (first args) (second args)
                                   (> (length args) 1)
-                                  (third args) (fourth args)))
+                                  (third args) (fourth args)
+                                  :value-kind :form))
          (:attribute-list nil))))
     ;; initialize-array events already mutated their varray during decode.
     (symbol nil)

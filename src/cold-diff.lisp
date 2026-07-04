@@ -1110,8 +1110,23 @@ symbol."
   "M3h gate: *ZONE-LEVEL* mirrors this world's regions (every region's
 zone byte = its level, unpopulated zones -1); the stack registry holds
 the initial SG's binding and control stacks sorted by origin; the array
-metadata maps every known type code to its name symbol."
+metadata maps every known type code to its name symbol; every cold
+area's name variable holds its area number (ldata.lisp:152-153
+generator contract; dist-verified for all 22, M3h boot-11)."
   (let ((fixnum (cold-dtp w "FIXNUM")))
+    ;; Area-name variables = area numbers.
+    (let ((bad 0))
+      (dotimes (i +cold-area-count+)
+        (let* ((full-name (cold-area-name (cold-area w i)))
+               (colon (position #\: full-name)))
+          (multiple-value-bind (tag data boundp)
+              (cold-symbol-value-q
+               w (make-vsym (subseq full-name 0 colon)
+                            (subseq full-name (1+ colon))))
+            (unless (and boundp (= (tag-type tag) fixnum) (= data i))
+              (incf bad)))))
+      (cold-check (zerop bad)
+                  "~D area-name variable~:P off their area numbers" bad))
     ;; *ZONE-LEVEL* vs the region table.
     (multiple-value-bind (tag data boundp)
         (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS" "*ZONE-LEVEL*"))
