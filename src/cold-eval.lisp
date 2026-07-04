@@ -648,7 +648,10 @@ for the deferred forms."
     "REMEMBER-VARIABLE-BINDING"
     "DEFMACRO-SET-INDENTATION-FOR-ZWEI" "DEFMACRO-CLEAR-INDENTATION-FOR-ZWEI"
     "ADD-INITIALIZATION" "REDEFINE-GC-OPTIMIZATION"
-    "DEFINE-SETF-PROPERTY"
+    "DEFINE-SETF-PROPERTY" "DEFINE-LOCF-PROPERTY"
+    ;; iofns.lisp:1088 defines it and its own load forms call it (the CL
+    ;; WRITE keyword registry); everything its body touches is cold.
+    "ADD-WRITE-KEYWORD"
     "START-DEFSTRUCT-DEFINITION" "FINISH-DEFSTRUCT-DEFINITION"
     "INITIALIZE-RESOURCE" "REDEFINE-FORMAT-DIRECTIVE"
     "DEFGENERIC-INTERNAL"
@@ -662,6 +665,7 @@ and the M2 file list must gain (see plan).")
 (defparameter *cold-guarded-heads*
   '("DEFFLAVOR-INTERNAL" "NOTE-SOLITARY-METHOD"
     "COMPILE-FLAVOR-METHODS-LOAD-TIME" "ADD-OPTIMIZER-INTERNAL"
+    "ADD-TRANSFORMER"
     "LOOP-ADD-PATH" "ADD-IO-VARIABLE" "ADD-IE-COMMAND"
     "ADD-PROMPT-AND-READ-KEYWORD"
     ;; CLI:INTERNAL deftype records (octet-structure): owner is CLCP.
@@ -765,6 +769,23 @@ compiler-side and have no cold definition or boot effect.")
          (cold-do-define-magic-locations w parsed)))
       ((string= head "INITIALIZE-POINTER-TYPE-P-ARRAY")
        (cold-do-initialize-pointer-type-p-array w))
+      ((or (string= head "LINK-SYMBOL-VALUE-CELLS")
+           (string= head "LINK-SYMBOL-FUNCTION-CELLS"))
+       ;; clcp/permanent-links.lisp: "These functions are actually
+       ;; simulated by the cold load generator."  The simulation is a
+       ;; RECORD, not the forwarding itself: the entries become
+       ;; SI:*LINKED-SYMBOL-CELLS*, which BOOTSTRAP-FORWARD-SYMBOL-CELLS
+       ;; consumes at first boot (sys2/memory-cold.lisp:286-292).
+       (cold-note (string-downcase head))
+       (let ((from (quoted (first args)))
+             (to (quoted (second args))))
+         (unless (and (vsym-p from) (vsym-p to))
+           (error "Unsupported ~A arguments ~S" head args))
+         (push (list from to
+                     (if (string= head "LINK-SYMBOL-VALUE-CELLS")
+                         (make-vsym "KEYWORD" "VARIABLE")
+                         (make-vsym "KEYWORD" "FUNCTION")))
+               (cold-world-linked-cells w))))
       ((member head *cold-noop-heads* :test #'string=)
        (cold-note (format nil "noop ~A" head)))
       ((member head *cold-defer-heads* :test #'string=)

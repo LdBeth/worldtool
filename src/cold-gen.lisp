@@ -68,7 +68,27 @@
     ;; .vbin was lost; recompiled from source in the user's Genera 8.5
     ;; 2026-07-04.  initialize-disk's VLM branch calls
     ;; INITIALIZE-EMBEDDED-NETWORK pre-banner (M3h boot-6 trap).
-    "SYS: NETWORK; EMB-ETHERNET-DRIVER"))
+    "SYS: NETWORK; EMB-ETHERNET-DRIVER"
+    ;; The CLCP crossing the SI-subsystem derivation missed entirely (M3h
+    ;; boot-10 trap: BUILD-INITIAL-PACKAGES -> COPYLIST -> unbound
+    ;; CLI:LAST-1).  Membership oracle: sys/mini-alists.lisp -- QLD's
+    ;; INNER-SYSTEM-FILE-ALIST loads seqfns/arrayfns/stringfns/numerics/
+    ;; error ON TOP of the cold load (their .vbins are the only CLCP
+    ;; binaries in the distribution), so the CLCP files it does NOT list
+    ;; that cold code calls pre-banner were in the cold load itself:
+    ;;   PERMANENT-LINKS -- "simulated by the cold load generator"
+    ;;     (its header comment); records SI:*LINKED-SYMBOL-CELLS* triples
+    ;;     that BOOTSTRAP-FORWARD-SYMBOL-CELLS forwards at first boot
+    ;;     (CL:*TERMINAL-IO* <-> ZL:TERMINAL-IO, *PACKAGE* <-> PACKAGE...)
+    ;;   FUNCTIONS -- CL:EQUAL/MAPC/GENSYM/CLI:PUTPROP/SET-GETF/...
+    ;;   LISTFNS -- CLI:LAST-1 (COPYLIST's (cdr (last list)) transform),
+    ;;     MEMBER-EQUAL, ASSOC-EQUAL, ...
+    ;;   IOFNS -- LISP:MAKE-SYNONYM-STREAM (the banner's SYN-TERMINAL-IO),
+    ;;     CLI:FOLLOW-SYNONYM-STREAM, WRITE-CHAR/WRITE-STRING/FRESH-LINE;
+    ;;     its own comments record cold-load history (Hornig & Dodds
+    ;;     10/09/92).  Compiled from source in the user's Genera 8.5.
+    "SYS: CLCP; PERMANENT-LINKS" "SYS: CLCP; FUNCTIONS"
+    "SYS: CLCP; LISTFNS" "SYS: CLCP; IOFNS"))
 
 ;;; ---- M3f: finalization and the full pipeline -----------------------------
 
@@ -136,9 +156,17 @@ the deferred list"
       (multiple-value-bind (nt nd) (cold-nil-q w)
         (cold-set-symbol-value
          w (make-vsym "SYSTEM-INTERNALS" "*VALUE-CELLS-TO-LOCALIZE-FIRST*")
-         nt nd)
+         nt nd))
+      ;; The permanent-links load pass recorded (from to :variable/:function)
+      ;; triples; BOOTSTRAP-FORWARD-SYMBOL-CELLS walks this list at first
+      ;; boot and performs the actual cell forwarding
+      ;; (sys2/memory-cold.lisp:286-292).  The dist's NIL is the CONSUMED
+      ;; state -- a fresh world must carry the records.
+      (multiple-value-bind (lt ld)
+          (cold-ref w (reverse (cold-world-linked-cells w))
+                    :area "WORKING-STORAGE-AREA")
         (cold-set-symbol-value
-         w (make-vsym "SYSTEM-INTERNALS" "*LINKED-SYMBOL-CELLS*") nt nd))
+         w (make-vsym "SYSTEM-INTERNALS" "*LINKED-SYMBOL-CELLS*") lt ld))
       (values (length entries) (length patches)
               (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp"))))))
 

@@ -1189,6 +1189,54 @@ cdr-nil so the list ends at the area count."
       (cold-check (= (ldb (byte 2 6) tag) 0)
                   "penultimate area Q is cdr-next (~2,'0X)" tag))))
 
+(defun check-linked-symbol-cells (w)
+  "M3h gate: SI:*LINKED-SYMBOL-CELLS* carries the (from to type) records
+that permanent-links' SI:LINK-SYMBOL-*-CELLS load forms accumulated, in
+load order, for BOOTSTRAP-FORWARD-SYMBOL-CELLS to consume at first boot
+(sys2/memory-cold.lisp:286-292).  The dist's NIL is the consumed state
+and is only correct while no link form has been loaded."
+  (let ((records (reverse (cold-world-linked-cells w))))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS"
+                                          "*LINKED-SYMBOL-CELLS*"))
+      (if (null records)
+          (cold-check (and boundp (cold-q-nil-p w tag data))
+                      "*LINKED-SYMBOL-CELLS* is NIL (no links recorded)")
+          (let ((dtp-list (cold-dtp w "LIST"))
+                (n 0)
+                (bad 0))
+            (cold-check (and boundp (= (tag-type tag) dtp-list))
+                        "*LINKED-SYMBOL-CELLS* is a list (~2,'0X:~8,'0X)"
+                        tag data)
+            (when (and boundp (= (tag-type tag) dtp-list))
+              (cold-map-list
+               w tag data
+               (lambda (et ed evma)
+                 (declare (ignore evma))
+                 (let ((rec (pop records)))
+                   (incf n)
+                   (if (and rec (= (tag-type et) dtp-list))
+                       (destructuring-bind (from to kind) rec
+                         (let ((want (list (cold-vsym w from)
+                                           (cold-vsym w to)
+                                           (cold-vsym w kind)))
+                               (got nil))
+                           (cold-map-list
+                            w (tag 0 dtp-list) ed
+                            (lambda (st sd svma)
+                              (declare (ignore svma))
+                              (push (list (tag-type st) sd) got)
+                              nil))
+                           (unless (equal (mapcar #'second (reverse got))
+                                          want)
+                             (incf bad))))
+                       (incf bad))
+                   nil))))
+            (cold-check (and (zerop bad) (null records))
+                        "~D linked-cell record~:P mirror the load pass ~
+(~D bad, ~D missing)"
+                        n bad (length records)))))))
+
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
 and the periodic timer call pre-banner are real compiled functions (not
@@ -1365,12 +1413,14 @@ prints the R1 unbound-function-cell audit."
           (declare (ignore data))
           (cold-check (and boundp (= (tag-type tag) (cold-dtp w "LIST")))
                       "BUILD-INITIAL-PACKAGES is a bound list"))
-        (dolist (name '("*VALUE-CELLS-TO-LOCALIZE-FIRST*"
-                        "*LINKED-SYMBOL-CELLS*"))
-          (multiple-value-bind (tag data boundp)
-              (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS" name))
-            (cold-check (and boundp (cold-q-nil-p w tag data))
-                        "~A is NIL" name)))
+        (multiple-value-bind (tag data boundp)
+            (cold-symbol-value-q
+             w (make-vsym "SYSTEM-INTERNALS" "*VALUE-CELLS-TO-LOCALIZE-FIRST*"))
+          (cold-check (and boundp (cold-q-nil-p w tag data))
+                      "*VALUE-CELLS-TO-LOCALIZE-FIRST* is NIL"))
+        ;; *LINKED-SYMBOL-CELLS* mirrors the permanent-links load pass;
+        ;; runs here because finalize materializes it just above.
+        (check-linked-symbol-cells w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model

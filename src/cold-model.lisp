@@ -36,6 +36,12 @@
   (plists (make-hash-table :test #'equal))  ; symbol key -> build-time plist
   (deferred nil)                            ; reversed *COLD-LOAD-DEFERRED-FORMS*,
                                             ; entries (package-string . host-form)
+  (linked-cells nil)                        ; reversed SI:*LINKED-SYMBOL-CELLS*,
+                                            ; entries (from-vsym to-vsym :variable/
+                                            ; :function) recorded from permanent-links'
+                                            ; SI:LINK-SYMBOL-*-CELLS load forms; the
+                                            ; boot pass BOOTSTRAP-FORWARD-SYMBOL-CELLS
+                                            ; consumes them (sys2/memory-cold.lisp:286)
   (fixups nil)                              ; thunks re-run until quiescent at finalize
   (patches nil)                             ; (vma package-string form): first-boot
                                             ; %P-STORE-CONTENTS patches for Qs whose
