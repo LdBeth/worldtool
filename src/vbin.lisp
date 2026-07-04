@@ -519,12 +519,17 @@
             (t (push (cons (vbin-op-name op) value) events))))))
     (let ((read (vstream-pos s))
           (total (vstream-nwords s)))
-      ;; LMFS->host copies may pad the tail; insist it is all zeros.
+      ;; LMFS->host copies pad the tail with zeros, but recompiles written
+      ;; in place over a longer file leave words of the OLD file's last
+      ;; event + EOF behind.  The EOF command was explicitly parsed, so a
+      ;; nonzero tail is stale bytes, not truncation -- warn, don't die.
       (loop for i from read below total
             for word = (vnext-word s)
             unless (zerop word)
-              do (error "~D nonzero words after EOF (first: #x~4,'0X at word ~D)"
-                        (- total i) word i))
+              do (warn "~A: ~D nonzero words after EOF (first: #x~4,'0X ~
+at word ~D) -- stale tail from an in-place overwrite"
+                       path (- total i) word i)
+                 (loop-finish))
       (make-vbin-file :path path :version version :attributes attributes
                       :events (nreverse events)
                       :table-size (fill-pointer *vtable*)

@@ -504,8 +504,9 @@ points to (1C:F8046C44 in genera-8-5-wired.txt)."
 (defparameter *cold-known-pending-functions*
   '()
   "Heads accepted by the audit despite having no cold definition or stub,
-so the gate tracks only NEW problems.  Empty since the two late-found
-cold files (LISP-DATABASE-COLD, ITRAP-DISPATCH) joined the load order.")
+so the gate tracks only NEW problems.  Empty since the three late-found
+cold files (LISP-DATABASE-COLD, ITRAP-DISPATCH, IGC-COLD) joined the
+load order.")
 
 (defparameter *cold-interpreter-special-forms*
   '("IF" "PROGN" "QUOTE" "SETQ" "LET" "LET*" "COND" "AND" "OR" "BLOCK"
@@ -566,7 +567,7 @@ stub-backed, FBOUNDP-guarded, nor interpreter special forms."
                   "deferred forms call undefined-at-boot: ~{~A~^ ~}" names))))
 
 (defun check-cold-eval (w reference)
-  "M3d gate: full 87-file load with zero unhandled forms and zero
+  "M3d gate: full 88-file load with zero unhandled forms and zero
 unresolved fixups; register-map ASETs took; the trap page carries real
 vectors and ITRAP-DISPATCH's entry-T catch-all displaced the synthesized
 filler; SYSTEM-STARTUP is Q-for-Q EXACT against the reference
@@ -867,12 +868,11 @@ independent reconstruction."
 
 (defun check-trap-page-against-reference (w reference)
   "After the grafts, tags may differ from the reference only in the
-generic-dispatch block (warm-installed) and the transport vector (pending
-igc-cold, cold file #88)."
+generic-dispatch block (warm-installed)."
   (multiple-value-bind (labels base len) (trap-vector-labels
                                           (cold-world-layout w))
     (declare (ignore labels))
-    (let ((unexpected nil) (transport-missing nil))
+    (let ((unexpected nil))
       (dotimes (i len)
         (multiple-value-bind (gt gd) (cw-ref w (+ base i))
           (declare (ignore gd))
@@ -880,13 +880,9 @@ igc-cold, cold file #88)."
             (declare (ignore rd))
             (when (and rt (/= gt rt))
               (cond ((<= 2560 i 2623))           ; generic dispatch, warm
-                    ((= i 2630) (setf transport-missing t))
                     (t (push i unexpected)))))))
       (cold-check (null unexpected)
                   "trap page: unexpected tag mismatches at ~S" unexpected)
-      (when transport-missing
-        (format t "  note: trap 2630 (%TRANSPORT-TRAP-VECTOR) still ~
-catch-all -- igc-cold (cold file #88) not yet in the set~%"))
       ;; Grafted slots are Q-for-Q the reference.
       (dolist (slot *cold-ifep-vector-slots*)
         (multiple-value-bind (gt gd) (cw-ref w (+ base slot))

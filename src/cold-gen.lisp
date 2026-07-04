@@ -8,11 +8,14 @@
 ;;; between RTC and LDATA, matching sysdcl's module order.  SYS:SYS;PKGDCL
 ;;; is :lisp-read-only -- the generator reads it as source (M3f).
 ;;;
-;;; Two files the SI-subsystem crossing missed (M3d finding), compiled via
+;;; Three files the SI-subsystem crossing missed, compiled via
 ;;; m2-compile.lisp *cold-set-late-found-files*: SYS:SYS;LISP-DATABASE-COLD
-;;; (PROCLAIM and the DEFVAR-1 boot bookkeeping; after "SYS: SYS; EVAL")
-;;; and SYS:DEBUGGER;ITRAP-DISPATCH (the trap handlers, incl. the entry-T
-;;; catch-all that fills the trap page; after "SYS: SYS; WIRED").
+;;; (PROCLAIM and the DEFVAR-1 boot bookkeeping; after "SYS: SYS; EVAL"),
+;;; SYS:DEBUGGER;ITRAP-DISPATCH (the trap handlers, incl. the entry-T
+;;; catch-all that fills the trap page; after "SYS: SYS; WIRED"), and
+;;; SYS:GC;IGC-COLD (M3e finding: %GC-FLIP-READY / GC-RECLAIMED-OLDSPACE
+;;; that every inline allocation site tests, plus %HARDWARE-TRANSPORT-TRAP
+;;; for trap vector 2630; after ITRAP-DISPATCH so DEF-TRAP-HANDLER exists).
 
 (in-package #:worldtool)
 
@@ -44,6 +47,7 @@
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
     "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH" "SYS: SYS2; DOUBLE"
     "SYS: SYS2; COMPLEX" "SYS: SYS; WIRED" "SYS: DEBUGGER; ITRAP-DISPATCH"
+    "SYS: GC; IGC-COLD"
     "SYS: I-SYS; WIRED-CONSOLE"
     "SYS: I-SYS; WIRED-SCREEN" "SYS: STORAGE; STORAGE" "SYS: STORAGE; USER-STORAGE"
     "SYS: STORAGE; STACK-WIRING" "SYS: STORAGE; DISK-DRIVER"
