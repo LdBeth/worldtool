@@ -929,6 +929,40 @@ IFEP debugger-kernel entries (1C:F801xxxx)."
                                "FEPComm ~A: ~2,'0X:~8,'0X not an IFEP ~
 kernel entry" fname gt gd)))))))
 
+(defun check-fepcomm-boot-stamps (w reference)
+  "M3h gate: the FEP-populated boot-parameter slots carry the
+distribution Qs (the IFEP reads them at startup and halts silently when
+they are unbound), and the generator-allocated EMB handle array is a
+bound wired ART-Q of the ground-truth size."
+  (destructuring-bind (bname base end ventries) (cold-fepcomm-block w)
+    (declare (ignore bname end))
+    (loop for (sname nil nil) in *cold-fepcomm-boot-stamps*
+          for slot = (position sname ventries
+                               :key (lambda (v)
+                                      (strip-package (second (second v))))
+                               :test #'string=)
+          do (cold-check slot "FEPComm ventry ~A exists" sname)
+             (when slot
+               (multiple-value-bind (gt gd) (cw-ref w (+ base slot))
+                 (multiple-value-bind (rt rd) (world-q reference (+ base slot))
+                   (cold-check (and rt (= (tag-type gt) (tag-type rt))
+                                    (= gd rd))
+                               "FEPComm ~A: ~2,'0X:~8,'0X vs ref ~
+~:[unmapped~;~:*~2,'0X:~8,'0X~]" sname gt gd rt rd))))))
+  (multiple-value-bind (tag data boundp)
+      (cold-symbol-value-q
+       w (make-vsym "COMMON-LISP-INTERNALS" "*EMB-HANDLE-ARRAY*"))
+    (let ((array (cold-dtp w "ARRAY")))
+      (cold-check (and boundp (= (tag-type tag) array))
+                  "*EMB-HANDLE-ARRAY* is a bound array")
+      (when (and boundp (= (tag-type tag) array))
+        (multiple-value-bind (ht hd) (cw-ref w data)
+          (cold-check (and (= (tag-type ht) (cold-dtp w "HEADER-I"))
+                           (= hd (logior #xC0000000
+                                         +cold-emb-handle-array-size+)))
+                      "*EMB-HANDLE-ARRAY* header ~2,'0X:~8,'0X, ground ~
+truth 43:C0000A30" ht hd))))))
+
 (defun check-wired-machinery (w reference)
   "M3e gate: magic-location forwarding for all three comm blocks, the
 storage tables at ground-truth addresses describing this world's regions,
@@ -976,7 +1010,8 @@ page fully reconciled against the reference."
       (when reference
         (check-trap-page-against-reference w reference)
         (check-magic-table-vs-reference w reference #xF8041100)
-        (check-fepcomm-grafts w reference)))))
+        (check-fepcomm-grafts w reference)
+        (check-fepcomm-boot-stamps w reference)))))
 
 ;;; M3f gate: finalize, emit, re-read, audit.
 

@@ -524,6 +524,54 @@ wired-table forwards, so they land in the comm slots or wired cells."
 ~:[unmapped~;~:*~2,'0X:~8,'0X~], expected 1C:F801xxxx" fname tag data))
                  (cw-set w (+ base slot) tag data))))))
 
+;;; ---------------- EMB handle array + FEP boot parameters ----------------
+
+;;; emb-buffer.lisp:60: "a large-ish art-q allocated by the cold-load
+;;; generator, out of which all handles into the comm area are built".
+;;; The DEFWIREDVAR's initializer is #+IGNORE'd, so no cold file makes
+;;; it, and EMB-HANDLE-ARRAY-ALLOCATE AREFs it during the pre-banner EMB
+;;; bring-up (M3h boot trap %ERROR at its instruction 2 proved the
+;;; path).  Ground truth: wired ART-Q 2608, header 43:C0000A30.
+(defconstant +cold-emb-handle-array-size+ 2608)
+
+(defun cold-build-emb-handle-array (w)
+  (let ((arr (make-varray (list +cold-emb-handle-array-size+)
+                          (list (make-vsym "KEYWORD" "TYPE")
+                                (make-vsym "SYSTEM" "ART-Q")))))
+    (cold-set-symbol-value
+     w (make-vsym "COMMON-LISP-INTERNALS" "*EMB-HANDLE-ARRAY*")
+     (tag 0 (cold-dtp w "ARRAY"))
+     (cold-array w arr "WIRED-CONTROL-TABLES"))))
+
+;;; FEPComm slots the FEP populates on real hardware before starting
+;;; Lisp, so no cold file sets them, but the world must carry them: the
+;;; IFEP kernel reads them during its startup go/no-go and HALTS the
+;;; machine (silently, pre-console) when they are unbound -- proved
+;;; empirically 2026-07-04 by stamping a halting fresh.ilod into one the
+;;; IFEP boots.  *SYSTEM-TYPE* is also checked by
+;;; INITIALIZE-EMB-COMM-AREA against the host's EMB area type, and
+;;; *EMB-COMMUNICATION-AREA* equals what the host puts in BOOT-COMM slot
+;;; 0.  Values = distribution ground truth Qs (genera-8-5-wired.txt).
+(defparameter *cold-fepcomm-boot-stamps*
+  ;; (name tag-name data), all SYSTEM:; slot = layout ventry position
+  '(("*SYSTEM-TYPE*"                 "FIXNUM"   #x0000020E)
+    ("%FEP-PHYSICAL-ADDRESS-HIGH"    "FIXNUM"   #x00040000)
+    ("%UNWIRED-VIRTUAL-ADDRESS-LOW"  "FIXNUM"   0)
+    ("%UNWIRED-VIRTUAL-ADDRESS-HIGH" "FIXNUM"   0)
+    ("%UNWIRED-PHYSICAL-ADDRESS-LOW" "FIXNUM"   0)
+    ("%UNWIRED-PHYSICAL-ADDRESS-HIGH" "FIXNUM"  0)
+    ("*REQUESTING-LISP-TO-STOP*"     "NIL"      :nil)
+    ("%SOFTWARE-CONFIGURATION"       "FIXNUM"   #x0000000F)
+    ("*EMB-COMMUNICATION-AREA*"      "LOCATIVE" #xFFFE0080)))
+
+(defun cold-stamp-fepcomm-boot-slots (w)
+  (dolist (s *cold-fepcomm-boot-stamps*)
+    (destructuring-bind (name tag-name data) s
+      (cold-set-symbol-value
+       w (make-vsym "SYSTEM" name)
+       (tag 0 (cold-dtp w tag-name))
+       (if (eq data :nil) (cold-world-nil-vma w) data)))))
+
 ;;; ---------------- Driver ----------------
 
 (defun cold-build-wired-machinery (w &key reference)
@@ -534,7 +582,11 @@ region state, and grafts the IFEP trap vectors and FEPComm function
 slots from the reference world."
   (cold-build-initial-stack-group w)
   (cold-stamp-storage-values w)
+  ;; Allocates in WIRED-CONTROL-TABLES -- must precede the table fill so
+  ;; the region free pointers cover it.
+  (cold-build-emb-handle-array w)
   (cold-fill-storage-tables w)
+  (cold-stamp-fepcomm-boot-slots w)
   (when reference
     (cold-graft-ifep-vectors w reference)
     (cold-graft-fepcomm-functions w reference))
