@@ -35,11 +35,17 @@ its attribute list.")
 (defun cold-add-heap-regions (w)
   (loop for (name origin length) in *cold-heap-regions*
         do (cold-add-region w name origin length))
-  ;; PAGE-TABLE-AREA: reserved address space for boot-time dynamic tables
-  ;; (build-address-space-map's create-dynamic-space allocates here);
-  ;; initialize-storage-globals resets its free pointer via the wired
-  ;; variable %PAGE-TABLE-AREA-REGION, which cold-machinery stamps.
-  (cold-add-region w "PAGE-TABLE-AREA" #xF0040000 #x200000))
+  ;; Reserved address space for boot-time wired allocation, in the
+  ;; distribution's region order (14/15/16): initialize-disk resets
+  ;; WIRED-DYNAMIC-AREA's free pointer and allocates disk structures
+  ;; there; build-address-space-map's create-dynamic-space allocates in
+  ;; PAGE-TABLE-AREA after initialize-storage-globals resets it; the GC
+  ;; grows its tables in GC-TABLE-AREA.  Each region's identity reaches
+  ;; the resetters through %<AREA>-REGION{,-ORIGIN,-LENGTH} wired
+  ;; variables, which cold-machinery stamps.
+  (cold-add-region w "WIRED-DYNAMIC-AREA" #xF0030000 #x10000)
+  (cold-add-region w "PAGE-TABLE-AREA" #xF0040000 #x200000)
+  (cold-add-region w "GC-TABLE-AREA" #xF0240000 #x80000))
 
 ;;; EQ identity for materialized host objects (conses, varrays, vfuns).
 (defvar *cold-object-vmas*)

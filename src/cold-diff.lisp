@@ -932,8 +932,7 @@ kernel entry" fname gt gd)))))))
 (defun check-fepcomm-boot-stamps (w reference)
   "M3h gate: the FEP-populated boot-parameter slots carry the
 distribution Qs (the IFEP reads them at startup and halts silently when
-they are unbound), and the generator-allocated EMB handle array is a
-bound wired ART-Q of the ground-truth size."
+they are unbound)."
   (destructuring-bind (bname base end ventries) (cold-fepcomm-block w)
     (declare (ignore bname end))
     (loop for (sname nil nil) in *cold-fepcomm-boot-stamps*
@@ -948,20 +947,144 @@ bound wired ART-Q of the ground-truth size."
                    (cold-check (and rt (= (tag-type gt) (tag-type rt))
                                     (= gd rd))
                                "FEPComm ~A: ~2,'0X:~8,'0X vs ref ~
-~:[unmapped~;~:*~2,'0X:~8,'0X~]" sname gt gd rt rd))))))
-  (multiple-value-bind (tag data boundp)
-      (cold-symbol-value-q
-       w (make-vsym "COMMON-LISP-INTERNALS" "*EMB-HANDLE-ARRAY*"))
-    (let ((array (cold-dtp w "ARRAY")))
-      (cold-check (and boundp (= (tag-type tag) array))
-                  "*EMB-HANDLE-ARRAY* is a bound array")
-      (when (and boundp (= (tag-type tag) array))
-        (multiple-value-bind (ht hd) (cw-ref w data)
-          (cold-check (and (= (tag-type ht) (cold-dtp w "HEADER-I"))
-                           (= hd (logior #xC0000000
-                                         +cold-emb-handle-array-size+)))
-                      "*EMB-HANDLE-ARRAY* header ~2,'0X:~8,'0X, ground ~
-truth 43:C0000A30" ht hd))))))
+~:[unmapped~;~:*~2,'0X:~8,'0X~]" sname gt gd rt rd)))))))
+
+(defun reference-symbol-value (reference name)
+  "(values tag data) of NAME's value in the reference world, following
+the cell forward; NIL when the symbol is missing.  Prefers a bound cell
+when the pname appears in more than one package."
+  (loop with best-tag = nil and best-data = nil
+        for vma in (world-find-symbols reference name)
+        do (multiple-value-bind (tag data) (w-follow-cell reference (1+ vma))
+             (when (and tag (or (null best-tag) (/= (tag-type tag) 0)))
+               (setf best-tag tag best-data data)))
+        finally (return (values best-tag best-data))))
+
+(defun check-wired-arrays (w reference)
+  "M3h gate: every generator-owned wired array is bound to a
+WIRED-CONTROL-TABLES array whose header Q equals the reference's (same
+type/leader/length), fill pointers start 0, and the fresh contents are
+NIL (boxed) / zero (packed)."
+  (let ((array (cold-dtp w "ARRAY"))
+        (header-i (cold-dtp w "HEADER-I"))
+        (fixnum (cold-dtp w "FIXNUM")))
+    (multiple-value-bind (ntag ndata) (cold-nil-q w)
+      (dolist (spec *cold-wired-arrays*)
+        (destructuring-bind (package name type length fill-pointer) spec
+          (multiple-value-bind (tag data boundp)
+              (cold-symbol-value-q w (make-vsym package name))
+            (cold-check (and boundp (= (tag-type tag) array)
+                             (<= #xF8040000 data #xF804FFFF))
+                        "~A is a bound wired array" name)
+            (when (and boundp (= (tag-type tag) array))
+              (multiple-value-bind (ht hd) (cw-ref w data)
+                (cold-check (= (tag-type ht) header-i)
+                            "~A header is HEADER-I" name)
+                (multiple-value-bind (rt rd)
+                    (reference-symbol-value reference name)
+                  (cold-check (and rt (= (tag-type rt) array))
+                              "~A bound to an array in the reference" name)
+                  (when (and rt (= (tag-type rt) array))
+                    (multiple-value-bind (rht rhd) (world-q reference rd)
+                      (declare (ignore rht))
+                      (cold-check (eql hd rhd)
+                                  "~A header ~8,'0X vs ref ~@[~8,'0X~]"
+                                  name hd rhd)))))
+              (when fill-pointer
+                (multiple-value-bind (ft fd) (cw-ref w (- data 1))
+                  (cold-check (and (= (tag-type ft) fixnum)
+                                   (= fd fill-pointer))
+                              "~A fill pointer ~2,'0X:~8,'0X, expected ~D"
+                              name ft fd fill-pointer)))
+              ;; Fresh contents.
+              (if (string= type "ART-Q")
+                  (cold-check
+                   (loop for i from 1 to length
+                         always (multiple-value-bind (et ed)
+                                    (cw-ref w (+ data i))
+                                  (and (= et ntag) (= ed ndata))))
+                   "~A elements all start NIL" name)
+                  (cold-check
+                   (loop for i from 1 to (ceiling length 32)
+                         always (zerop (nth-value 1 (cw-ref w (+ data i)))))
+                   "~A bits all start 0" name)))))))))
+
+(defun check-disk-events (w reference)
+  "M3h gate: the five system disk-event variables reference four all-NIL
+18-Q events with the distribution's headers; the serial event is the
+storage root; the root's element 0 is the DISK-EVENT named-structure
+symbol."
+  (let ((array (cold-dtp w "ARRAY"))
+        (names '("*ROOT-DISK-EVENT*" "*STORAGE-ROOT-DISK-EVENT*"
+                 "*STORAGE-SERIAL-DISK-EVENT*" "*STORAGE-PARALLEL-DISK-EVENT*"
+                 "*STORAGE-BACKGROUND-DISK-EVENT*"))
+        (events '()))
+    (multiple-value-bind (ntag ndata) (cold-nil-q w)
+      (dolist (name names)
+        (multiple-value-bind (tag data boundp)
+            (cold-symbol-value-q w (make-vsym "STORAGE" name))
+          (cold-check (and boundp (= (tag-type tag) array)
+                           (<= #xF8040000 data #xF804FFFF))
+                      "~A is a bound wired array" name)
+          (push data events)
+          (multiple-value-bind (ht hd) (cw-ref w data)
+            (declare (ignore ht))
+            (multiple-value-bind (rt rd) (reference-symbol-value reference name)
+              (multiple-value-bind (rht rhd)
+                  (if (and rt (= (tag-type rt) array))
+                      (world-q reference rd)
+                      nil)
+                (declare (ignore rht))
+                (cold-check (eql hd rhd)
+                            "~A header ~8,'0X vs ref ~@[~8,'0X~]"
+                            name hd rhd))))
+          ;; Generator-fresh fields are all NIL (the root's element 0,
+          ;; checked below, is the exception).
+          (cold-check
+           (loop for i from (if (string= name "*ROOT-DISK-EVENT*") 2 1) to 18
+                 always (multiple-value-bind (et ed) (cw-ref w (+ data i))
+                          (and (= et ntag) (= ed ndata))))
+           "~A fields all start NIL" name)))
+      (setf events (nreverse events))
+      (cold-check (= (second events) (third events))
+                  "the serial disk event is the storage root")
+      (cold-check (= 4 (length (remove-duplicates events)))
+                  "four distinct disk events")
+      (multiple-value-bind (st sd)
+          (cold-symbol-ref w (make-vsym "STORAGE" "DISK-EVENT"))
+        (multiple-value-bind (et ed) (cw-ref w (+ (first events) 1))
+          (cold-check (and (= (tag-type et) (tag-type st)) (= ed sd))
+                      "root disk event element 0 is STORAGE:DISK-EVENT"))))))
+
+(defun check-reserved-regions (w reference)
+  "M3h gate: the three reserved wired regions occupy the distribution's
+region-table rows (14/15/16) with its origins, lengths and bits, and the
+%<AREA>-REGION{,-ORIGIN,-LENGTH} stamps carry the distribution values."
+  (loop for (area-name number) in '(("WIRED-DYNAMIC-AREA" 14)
+                                    ("PAGE-TABLE-AREA" 15)
+                                    ("GC-TABLE-AREA" 16))
+        do (let ((region (cold-area-current-region w area-name)))
+             (cold-check (and region (= (cold-region-number region) number))
+                         "~A is region ~D" area-name number))
+           (dolist (key '(:region-quantum-origin :region-quantum-length
+                          :region-bits))
+             (let ((vma (+ (cold-machinery w key) 1 number)))
+               (multiple-value-bind (gt gd) (cw-ref w vma)
+                 (multiple-value-bind (rt rd) (world-q reference vma)
+                   (cold-check (and rt (= gt rt) (= gd rd))
+                               "~A ~S: ~2,'0X:~8,'0X vs ref ~
+~:[unmapped~;~:*~2,'0X:~8,'0X~]" area-name key gt gd rt rd)))))
+           (dolist (suffix '("-REGION" "-REGION-ORIGIN" "-REGION-LENGTH"))
+             (let ((sname (format nil "%~A~A" area-name suffix)))
+               (multiple-value-bind (gt gd boundp)
+                   (cold-symbol-value-q w (make-vsym "STORAGE" sname))
+                 (multiple-value-bind (rt rd)
+                     (reference-symbol-value reference sname)
+                   (cold-check (and boundp rt
+                                    (= (tag-type gt) (tag-type rt))
+                                    (= gd rd))
+                               "~A: ~2,'0X:~8,'0X vs ref ~
+~:[missing~;~:*~2,'0X:~8,'0X~]" sname gt gd rt rd)))))))
 
 (defun check-wired-machinery (w reference)
   "M3e gate: magic-location forwarding for all three comm blocks, the
@@ -1011,7 +1134,10 @@ page fully reconciled against the reference."
         (check-trap-page-against-reference w reference)
         (check-magic-table-vs-reference w reference #xF8041100)
         (check-fepcomm-grafts w reference)
-        (check-fepcomm-boot-stamps w reference)))))
+        (check-fepcomm-boot-stamps w reference)
+        (check-wired-arrays w reference)
+        (check-disk-events w reference)
+        (check-reserved-regions w reference)))))
 
 ;;; M3f gate: finalize, emit, re-read, audit.
 

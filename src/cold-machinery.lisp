@@ -206,7 +206,7 @@ but no store."
            (let ((config (assoc area *cold-area-config*)))
              (unless config
                (error "Region ~D belongs to non-cold area ~D" n area))
-             (if (= area 16)                     ; PAGE-TABLE-AREA
+             (if (member area '(16 17))          ; PAGE-TABLE / GC-TABLE
                  (third config)
                  (cold-heap-region-bits (third config)))))
     )))
@@ -425,16 +425,20 @@ wired-table forwards, so they land in the comm slots or wired cells."
            w (make-vsym "SYSTEM" "*DEFAULT-FLOAT-OPERATING-MODE*"))
         (stamp "SYSTEM" "FLOAT-OPERATING-MODE" fixnum
                (if (and boundp (= (tag-type tag) fixnum)) data #x6C000000)))
-      ;; PAGE-TABLE-AREA region identity (storage.lisp:249; nothing in the
-      ;; sources sets these -- generator contract).
-      (let ((region (or (cold-area-current-region w "PAGE-TABLE-AREA")
-                        (error "no PAGE-TABLE-AREA region"))))
-        (stamp "STORAGE" "%PAGE-TABLE-AREA-REGION" fixnum
-               (cold-region-number region))
-        (stamp "STORAGE" "%PAGE-TABLE-AREA-REGION-ORIGIN" fixnum
-               (cold-region-origin region))
-        (stamp "STORAGE" "%PAGE-TABLE-AREA-REGION-LENGTH" fixnum
-               (cold-region-length region)))
+      ;; Reserved-region identities (storage.lisp:249; nothing in the
+      ;; sources sets these -- generator contract).  initialize-storage-
+      ;; globals resets PAGE-TABLE-AREA's free pointer through them and
+      ;; initialize-disk WIRED-DYNAMIC-AREA's, both pre-banner.
+      (dolist (area-name '("WIRED-DYNAMIC-AREA" "PAGE-TABLE-AREA"
+                           "GC-TABLE-AREA"))
+        (let ((region (or (cold-area-current-region w area-name)
+                          (error "no ~A region" area-name))))
+          (stamp "STORAGE" (format nil "%~A-REGION" area-name) fixnum
+                 (cold-region-number region))
+          (stamp "STORAGE" (format nil "%~A-REGION-ORIGIN" area-name) fixnum
+                 (cold-region-origin region))
+          (stamp "STORAGE" (format nil "%~A-REGION-LENGTH" area-name) fixnum
+                 (cold-region-length region))))
       (stamp "SYSTEM" "%REGION-CONS-ALARM" fixnum 0)
       (stamp "SYSTEM" "%PAGE-CONS-ALARM" fixnum 0)
       ;; Not SETQ'd anywhere in the cold set; ground truth has 8 (the
@@ -524,24 +528,88 @@ wired-table forwards, so they land in the comm slots or wired cells."
 ~:[unmapped~;~:*~2,'0X:~8,'0X~], expected 1C:F801xxxx" fname tag data))
                  (cw-set w (+ base slot) tag data))))))
 
-;;; ---------------- EMB handle array + FEP boot parameters ----------------
+;;; ---------------- Generator-owned wired arrays ----------------
 
-;;; emb-buffer.lisp:60: "a large-ish art-q allocated by the cold-load
-;;; generator, out of which all handles into the comm area are built".
-;;; The DEFWIREDVAR's initializer is #+IGNORE'd, so no cold file makes
-;;; it, and EMB-HANDLE-ARRAY-ALLOCATE AREFs it during the pre-banner EMB
-;;; bring-up (M3h boot trap %ERROR at its instruction 2 proved the
-;;; path).  Ground truth: wired ART-Q 2608, header 43:C0000A30.
-(defconstant +cold-emb-handle-array-size+ 2608)
+;;; Arrays the original generator allocated in WIRED-CONTROL-TABLES
+;;; ("allocated/set up by the cold load generator" in the sources), all
+;;; touched pre-banner: EMB-HANDLE-ARRAY-ALLOCATE carves handles out of
+;;; *EMB-HANDLE-ARRAY* (emb-buffer.lisp:60; its DEFWIREDVAR initializer
+;;; is #+IGNORE'd -- the M3h boot-2 trap at its instruction 2 proved the
+;;; path); INITIALIZE-INTERRUPTS %block-stores *INTERRUPT-TASK-STORAGE*
+;;; and INSTALL-EMB-SIGNAL-HANDLER the three EMB signal tables
+;;; (interrupts.lisp:237,698; boot-3 trap); the wired scheduler pushes
+;;; into *QUEUED-WAKEUPS* (wired.lisp:251); REINITIALIZE-OLDSPACE-MAP
+;;; block-writes *OLDSPACE-MAP* (igc-cold.lisp:515; all-zero = nothing
+;;; is oldspace, exactly right for a cold world); console attach
+;;; indexes *SLB-WIRED-CONSOLES* (wired-console.lisp:253).  Lengths,
+;;; leaders (fill pointers start 0) and packing are distribution ground
+;;; truth (headers C0000A30 / C0000100 / C0000020 x3 / C000800A /
+;;; A8000800 / C0008020).  *SLB-CONSOLE-BUFFER* also says "set up by
+;;; cold-load generator" but is unbound even in the distribution.
+(defparameter *cold-wired-arrays*
+  ;; (package name type length fill-pointer)
+  '(("COMMON-LISP-INTERNALS" "*EMB-HANDLE-ARRAY*"       "ART-Q" 2608 nil)
+    ("COMMON-LISP-INTERNALS" "*INTERRUPT-TASK-STORAGE*" "ART-Q"  256 nil)
+    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-HANDLER*"     "ART-Q"   32 nil)
+    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-ARGUMENT*"    "ART-Q"   32 nil)
+    ("COMMON-LISP-INTERNALS" "*EMB-SIGNAL-PRIORITY*"    "ART-Q"   32 nil)
+    ("SYSTEM-INTERNALS"      "*QUEUED-WAKEUPS*"         "ART-Q"   10 0)
+    ("SYSTEM-INTERNALS"      "*OLDSPACE-MAP*"     "ART-BOOLEAN" 2048 nil)
+    ("SYSTEM-INTERNALS"      "*SLB-WIRED-CONSOLES*"     "ART-Q"   32 0)))
 
-(defun cold-build-emb-handle-array (w)
-  (let ((arr (make-varray (list +cold-emb-handle-array-size+)
-                          (list (make-vsym "KEYWORD" "TYPE")
-                                (make-vsym "SYSTEM" "ART-Q")))))
-    (cold-set-symbol-value
-     w (make-vsym "COMMON-LISP-INTERNALS" "*EMB-HANDLE-ARRAY*")
-     (tag 0 (cold-dtp w "ARRAY"))
-     (cold-array w arr "WIRED-CONTROL-TABLES"))))
+(defun cold-build-wired-arrays (w)
+  (dolist (spec *cold-wired-arrays*)
+    (destructuring-bind (package name type length fill-pointer) spec
+      (let ((arr (make-varray
+                  (list length)
+                  (append (list (make-vsym "KEYWORD" "TYPE")
+                                (make-vsym "SYSTEM" type))
+                          (when fill-pointer
+                            (list (make-vsym "KEYWORD" "FILL-POINTER")
+                                  fill-pointer))))))
+        (cold-set-symbol-value w (make-vsym package name)
+                               (tag 0 (cold-dtp w "ARRAY"))
+                               (cold-array w arr "WIRED-CONTROL-TABLES"))))))
+
+;;; ---------------- System disk events ----------------
+
+;;; disk-driver.lisp:93: "The following `system' disk events are
+;;; allocated in wired-control-tables by the cold load generator" -- 18-Q
+;;; DISK-EVENT defstorages (disk-definitions.lisp:104, IMach form: ()
+;;; header + () named-structure-symbol + 16 fields).  initialize-disk
+;;; (pre-banner on VLM) only wires *ROOT-DISK-EVENT* up via
+;;; initialize-system-disk-event, so generator-fresh events are all-NIL;
+;;; only the root carries the named-structure bit and its DISK-EVENT
+;;; symbol (dist headers C2000012 / C0000012).  The serial event IS the
+;;; storage root ("the serial disk event is the root"): both variables
+;;; reference one object, so there are five variables but four events.
+(defun cold-build-disk-events (w)
+  (multiple-value-bind (ntag ndata) (cold-nil-q w)
+    (flet ((event (&key root)
+             (let ((hdr (cold-reserve-wired-array
+                         w "WIRED-CONTROL-TABLES" "ART-Q" 18
+                         :named-structure root)))
+               (loop for i from 1 to 18
+                     do (cw-set w (+ hdr i) ntag ndata))
+               (when root
+                 (multiple-value-bind (st sd)
+                     (cold-symbol-ref w (make-vsym "STORAGE" "DISK-EVENT"))
+                   (cw-set w (+ hdr 1) st sd)))
+               hdr)))
+      (let ((root (event :root t))
+            (serial (event))
+            (parallel (event))
+            (background (event))
+            (array (cold-dtp w "ARRAY")))
+        (loop for (name hdr) in `(("*ROOT-DISK-EVENT*" ,root)
+                                  ("*STORAGE-ROOT-DISK-EVENT*" ,serial)
+                                  ("*STORAGE-SERIAL-DISK-EVENT*" ,serial)
+                                  ("*STORAGE-PARALLEL-DISK-EVENT*" ,parallel)
+                                  ("*STORAGE-BACKGROUND-DISK-EVENT*" ,background))
+              do (cold-set-symbol-value w (make-vsym "STORAGE" name)
+                                        (tag 0 array) hdr))))))
+
+;;; ---------------- FEP boot parameters ----------------
 
 ;;; FEPComm slots the FEP populates on real hardware before starting
 ;;; Lisp, so no cold file sets them, but the world must carry them: the
@@ -582,9 +650,10 @@ region state, and grafts the IFEP trap vectors and FEPComm function
 slots from the reference world."
   (cold-build-initial-stack-group w)
   (cold-stamp-storage-values w)
-  ;; Allocates in WIRED-CONTROL-TABLES -- must precede the table fill so
-  ;; the region free pointers cover it.
-  (cold-build-emb-handle-array w)
+  ;; These allocate in WIRED-CONTROL-TABLES -- they must precede the
+  ;; table fill so the region free pointers cover them.
+  (cold-build-wired-arrays w)
+  (cold-build-disk-events w)
   (cold-fill-storage-tables w)
   (cold-stamp-fepcomm-boot-slots w)
   (when reference
