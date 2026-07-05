@@ -42,6 +42,14 @@
                                             ; SI:LINK-SYMBOL-*-CELLS load forms; the
                                             ; boot pass BOOTSTRAP-FORWARD-SYMBOL-CELLS
                                             ; consumes them (sys2/memory-cold.lisp:286)
+  (relative-names nil)                      ; (pkg-name rel-name target-name) triples
+                                            ; withheld from the DEFPACKAGE-INTERNAL
+                                            ; calls (cold-pkg) and re-established by
+                                            ; deferred SI:PKG-ADD-RELATIVE-NAME forms:
+                                            ; MAKE-PACKAGE's own :RELATIVE-NAMES path
+                                            ; COPYTREEs the (name . package) alist and
+                                            ; LENGTH ENDPs the dotted pair -- fatal
+                                            ; pre-banner (M3h boot 14)
   (fixups nil)                              ; thunks re-run until quiescent at finalize
   (patches nil)                             ; (vma package-string form): first-boot
                                             ; %P-STORE-CONTENTS patches for Qs whose

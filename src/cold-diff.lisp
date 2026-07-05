@@ -1298,6 +1298,68 @@ the cold image (cf. PKG-NEW-KEYWORD-SYMBOL, package.lisp:1125)."
                 "~D keyword value cell~:P self-evaluate (~D not forwarded ~
 to a slot naming the symbol)" nkw bad)))
 
+(defun check-relative-name-deferral (w)
+  "M3h boot-14 gate: no DEFPACKAGE-INTERNAL call in the stored
+BUILD-INITIAL-PACKAGES list carries :RELATIVE-NAMES (MAKE-PACKAGE's
+handling COPYTREEs a dotted (name . package) alist; COPYLIST's LENGTH
+ENDPs the package object and the trap is unresumable pre-banner), and
+the withheld triples ride *COLD-LOAD-DEFERRED-FORMS* as
+SI:PKG-ADD-RELATIVE-NAME calls instead (the RE-MAKE-PACKAGE path,
+package.lisp:1393).  8.5 PKGDCL has exactly two live clauses:
+I-LISP-COMPILER (I GLOBAL) and NETBOOT (WT WORLD-TOOLS)."
+  (let* ((dtp-list (cold-dtp w "LIST"))
+         (dtp-symbol (cold-dtp w "SYMBOL"))
+         (rel-kw (gethash (cons "RELATIVE-NAMES"
+                                (cold-resolve-home "RELATIVE-NAMES"
+                                                   "KEYWORD"))
+                          (cold-world-symbols w)))
+         (triples (cold-world-relative-names w))
+         (stray 0))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS"
+                                          "BUILD-INITIAL-PACKAGES"))
+      (when (and boundp (= (tag-type tag) dtp-list) rel-kw)
+        (cold-map-list
+         w tag data
+         (lambda (ct cd cvma)
+           (declare (ignore cvma))
+           (when (= (tag-type ct) dtp-list)
+             (cold-map-list
+              w (tag 0 dtp-list) cd
+              (lambda (et ed evma)
+                (declare (ignore evma))
+                (when (and (= (tag-type et) dtp-symbol) (= ed rel-kw))
+                  (incf stray))
+                nil)))
+           nil))))
+    (cold-check (zerop stray)
+                ":RELATIVE-NAMES withheld from BUILD-INITIAL-PACKAGES ~
+(~D stray clause~:P)" stray)
+    (cold-check (<= 2 (length triples) 6)
+                "~D relative-name triple~:P withheld for deferral"
+                (length triples))
+    (let ((add-name (and triples
+                         (cold-vsym w (make-vsym "SYSTEM-INTERNALS"
+                                                 "PKG-ADD-RELATIVE-NAME"))))
+          (found 0))
+      (multiple-value-bind (tag data boundp)
+          (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS"
+                                            "*COLD-LOAD-DEFERRED-FORMS*"))
+        (when (and boundp (= (tag-type tag) dtp-list) add-name)
+          (cold-map-list
+           w tag data
+           (lambda (ct cd cvma)
+             (declare (ignore cvma))
+             (when (= (tag-type ct) dtp-list)
+               (multiple-value-bind (ht hd)
+                   (cw-ref w (cold-follow-cell w cd))
+                 (when (and (= (tag-type ht) dtp-symbol) (= hd add-name))
+                   (incf found))))
+             nil))))
+      (cold-check (= found (length triples))
+                  "~D deferred SI:PKG-ADD-RELATIVE-NAME form~:P (~D ~
+withheld)" found (length triples)))))
+
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
 and the periodic timer call pre-banner are real compiled functions (not
@@ -1484,6 +1546,9 @@ prints the R1 unbound-function-cell audit."
         (check-linked-symbol-cells w)
         ;; Keyword self-evaluation forwarding, also materialized by finalize.
         (check-keyword-self-eval w)
+        ;; :RELATIVE-NAMES withheld from the package calls, deferred as
+        ;; SI:PKG-ADD-RELATIVE-NAME forms (M3h boot 14).
+        (check-relative-name-deferral w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model

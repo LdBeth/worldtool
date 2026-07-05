@@ -229,28 +229,57 @@ digit reads decimal (the Zetalisp rule pkgdcl relies on)."
 
 (defun cold-expand-defpackage (form)
   "(DEFPACKAGE name . clauses) -> host form
-\(DEFPACKAGE-INTERNAL \"NAME\" :KW (QUOTE value) ...)."
+\(DEFPACKAGE-INTERNAL \"NAME\" :KW (QUOTE value) ...).
+Second value: (pkg-name rel-name target-name) triples for any
+:RELATIVE-NAMES clauses, which are withheld from the call.
+MAKE-PACKAGE's :RELATIVE-NAMES path COPYTREEs the (name . package)
+alist it builds (package.lisp:544-551); COPYLIST's (1+ (LENGTH list))
+on the dotted pair ENDPs the package object, and pre-banner there are
+no error tables to resume the trap -- ERROR-TRAP-HANDLER-1-COLD FERRORs
+into the unbound-TERMINAL-IO recursion (M3h boot 14).  The names are
+re-established by deferred SI:PKG-ADD-RELATIVE-NAME forms, the same
+safe path RE-MAKE-PACKAGE-INTERNAL uses (package.lisp:1393,746).
+\(:RELATIVE-NAMES-FOR-ME stays: MAKE-PACKAGE routes it through
+PKG-ADD-RELATIVE-NAME already, and boots 10-13 executed those.)"
   (destructuring-bind (head name . clauses) form
     (unless (and (vsym-p head) (string= (vsym-name head) "DEFPACKAGE"))
       (error "PKGDCL contains a non-DEFPACKAGE form: ~S" head))
-    (let ((quote (make-vsym :default "QUOTE"))
-          (result (list (pkgdcl-string name)
-                        (make-vsym :default "DEFPACKAGE-INTERNAL"))))
+    (let* ((quote (make-vsym :default "QUOTE"))
+           (pkg-name (pkgdcl-string name))
+           (result (list pkg-name
+                         (make-vsym :default "DEFPACKAGE-INTERNAL")))
+           (relative nil))
       (dolist (clause clauses)
         (multiple-value-bind (kw args)
             (if (consp clause)
                 (values (first clause) (rest clause))
                 (values clause (list t)))
-          (push kw result)
-          (push (list quote (pkgdcl-canonicalize kw args)) result)))
-      (nreverse result))))
+          (cond ((string= (vsym-name kw) "RELATIVE-NAMES")
+                 ;; Mirror PROCESS-RELATIVE-NAME-SPEC (package.lisp:855):
+                 ;; (name target...) fans out to one record per target.
+                 (dolist (entry args)
+                   (let ((rel (pkgdcl-string (first entry))))
+                     (dolist (target (rest entry))
+                       (push (list pkg-name rel (pkgdcl-string target))
+                             relative)))))
+                (t
+                 (push kw result)
+                 (push (list quote (pkgdcl-canonicalize kw args)) result)))))
+      (values (nreverse result) (nreverse relative)))))
 
 (defun cold-load-pkgdcl (w path)
   "Read PKGDCL, expand every DEFPACKAGE, and store the list of
-DEFPACKAGE-INTERNAL calls as SI:BUILD-INITIAL-PACKAGES.  Returns the
-number of packages."
+DEFPACKAGE-INTERNAL calls as SI:BUILD-INITIAL-PACKAGES.  Withheld
+:RELATIVE-NAMES triples land on (COLD-WORLD-RELATIVE-NAMES W) for
+finalize to defer.  Returns the number of packages."
   (let* ((*cold-default-package* "SYSTEM-INTERNALS")
-         (calls (mapcar #'cold-expand-defpackage (read-genera-source path))))
+         (calls (mapcar (lambda (form)
+                          (multiple-value-bind (call triples)
+                              (cold-expand-defpackage form)
+                            (dolist (triple triples)
+                              (push triple (cold-world-relative-names w)))
+                            call))
+                        (read-genera-source path))))
     (multiple-value-bind (tag data)
         (cold-ref w calls :area "WORKING-STORAGE-AREA")
       (cold-set-symbol-value

@@ -111,32 +111,46 @@ pages on demand."
 
 (defun cold-finalize (w)
   "Everything between the last vbin and emit (M3f):
-1. the first-boot Q patches become (SYS:%P-STORE-CONTENTS locative form)
+1. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp),
+   withholding :RELATIVE-NAMES triples (M3h boot 14) -- it runs first
+   so the deferred list can carry their re-establishment forms;
+2. the first-boot Q patches become (SYS:%P-STORE-CONTENTS locative form)
    forms ahead of the deferred forms proper (%P-STORE-CONTENTS is a
    DEFUPRIM, iprim.lisp:209, so EVAL can apply it at boot; locatives
    self-evaluate);
-2. the captured deferred list materializes as the value of
+3. the captured deferred list materializes as the value of
    SI:*COLD-LOAD-DEFERRED-FORMS* -- LISP-INITIALIZE-FIRST-TIME MAPCs EVAL
-   over it after BUILD-INITIAL-PACKAGES (cold-load.lisp:543-547);
-3. SI:*VALUE-CELLS-TO-LOCALIZE-FIRST* / SI:*LINKED-SYMBOL-CELLS* := NIL
+   over it after BUILD-INITIAL-PACKAGES (cold-load.lisp:543-547); the
+   withheld relative names go last as (SI:PKG-ADD-RELATIVE-NAME pkg
+   name target) calls, the cold-safe path (MAKE-PACKAGE's own
+   :RELATIVE-NAMES handling COPYTREEs a dotted (name . package) alist
+   and LENGTH dies in the pre-banner ENDP trap);
+4. SI:*VALUE-CELLS-TO-LOCALIZE-FIRST* / SI:*LINKED-SYMBOL-CELLS* := NIL
    (the boot localize pass reads both, memory-cold.lisp:286-297; ground
    truth has them NIL);
-4. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp);
 5. every KEYWORD-package symbol is forwarded self-evaluating (cold-eval),
-   so BUILD-INITIAL-PACKAGES can EVAL those forms at first boot.
+   so BUILD-INITIAL-PACKAGES can EVAL those forms at first boot.  Done
+   last: the PKGDCL pass and the deferred-list materialization both
+   intern keywords.
 Returns (values deferred-count patch-count package-count)."
   (with-cold-materializer (w)
     (let* ((*cold-load-time-eval* #'cold-operand-eval)
+           (package-count
+             (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
            (patches (reverse (cold-world-patches w)))
            (deferred (reverse (cold-world-deferred w)))
            (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
            (loc-tag (tag 0 (cold-dtp w "LOCATIVE")))
+           (add-name (make-vsym "SYSTEM-INTERNALS" "PKG-ADD-RELATIVE-NAME"))
            (entries
              (append
               (loop for (vma pkg form) in patches
                     collect (cons pkg (list store (make-vraw loc-tag vma)
                                             form)))
-              deferred)))
+              deferred
+              (loop for triple in (reverse (cold-world-relative-names w))
+                    collect (cons "SYSTEM-INTERNALS"
+                                  (cons add-name triple))))))
       (multiple-value-bind (spine-tag spine-data) (cold-nil-q w)
         (dolist (entry (reverse entries))
           (let ((*cold-default-package* (car entry)))
@@ -169,14 +183,13 @@ the deferred list"
                     :area "WORKING-STORAGE-AREA")
         (cold-set-symbol-value
          w (make-vsym "SYSTEM-INTERNALS" "*LINKED-SYMBOL-CELLS*") lt ld))
-      (let ((package-count
-              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp"))))
-        ;; 5. Every keyword must self-evaluate before BUILD-INITIAL-PACKAGES
-        ;;    EVALs the DEFPACKAGE-INTERNAL forms it just stored
-        ;;    (package.lisp:2393, well before BOOTSTRAP-FORWARD-SYMBOL-CELLS).
-        ;;    Done last: PKGDCL is the final pass that interns keywords.
-        (cold-forward-all-keywords w)
-        (values (length entries) (length patches) package-count)))))
+      ;; 5. Every keyword must self-evaluate before BUILD-INITIAL-PACKAGES
+      ;;    EVALs the DEFPACKAGE-INTERNAL forms the PKGDCL pass stored
+      ;;    (package.lisp:2393, well before BOOTSTRAP-FORWARD-SYMBOL-CELLS).
+      ;;    Done last: the PKGDCL pass and the deferred-list
+      ;;    materialization above both intern keywords.
+      (cold-forward-all-keywords w)
+      (values (length entries) (length patches) package-count))))
 
 (defun cold-build-world (w &key reference)
   "The full generator pipeline after MAKE-SKELETON-WORLD: heap regions,
