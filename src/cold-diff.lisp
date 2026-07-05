@@ -1597,6 +1597,267 @@ key strings."
      (cold-world-fdefs w))
     (sort rows #'string<)))
 
+(defun cold-unbound-value-cells (w)
+  "R2 audit: symbols whose value cell is locative-referenced somewhere in
+the loaded world, still unbound (forward-followed dtp-null) at emit, and
+not repaired by the boot's own *COLD-LOAD-VARIABLE-INITIALIZATIONS* loop
+(cold-load.lisp:526).  Sorted \"PKG:PNAME\" strings.  A locative does not
+say whether its instruction reads, writes, or binds (that needs
+instruction decoding), so rows are review candidates, not certain traps;
+the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
+  (let ((dtp-null (cold-dtp w "NULL"))
+        (dtp-loc (cold-dtp w "LOCATIVE"))
+        (dtp-list (cold-dtp w "LIST"))
+        (dtp-symbol (cold-dtp w "SYMBOL"))
+        (key-of (make-hash-table))
+        (referenced (make-hash-table))
+        (init (make-hash-table)))
+    (maphash (lambda (key vma)
+               (setf (gethash vma key-of)
+                     (format nil "~A:~A" (cdr key) (car key))))
+             (cold-world-symbols w))
+    (maphash (lambda (pageno qv)
+               (declare (ignore pageno))
+               (dotimes (i +ivory-page-size-qs+)
+                 (multiple-value-bind (tag data) (qref qv i)
+                   (when (= (tag-type tag) dtp-loc)
+                     (let ((sym (1- data)))
+                       (when (gethash sym key-of)
+                         (setf (gethash sym referenced) t)))))))
+             (cold-world-pages w))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q
+         w (si-vsym "*COLD-LOAD-VARIABLE-INITIALIZATIONS*"))
+      (when (and boundp (= (tag-type tag) dtp-list))
+        (cold-map-list
+         w tag data
+         (lambda (et ed evma)
+           (declare (ignore evma))
+           (when (= (tag-type et) dtp-list)
+             (multiple-value-bind (ct cd)
+                 (cw-ref w (cold-follow-cell w ed))
+               (when (= (tag-type ct) dtp-symbol)
+                 (setf (gethash cd init) t))))
+           nil))))
+    (let ((rows nil))
+      (maphash
+       (lambda (vma key)
+         (when (and (gethash vma referenced)
+                    (not (gethash vma init)))
+           (multiple-value-bind (tag data)
+               (cw-ref w (cold-follow-cell w (1+ vma)))
+             (declare (ignore data))
+             (when (= (tag-type tag) dtp-null)
+               (push key rows)))))
+       key-of)
+      (sort rows #'string<))))
+
+(defparameter *cold-reviewed-unbound-value-cells*
+  '(
+    "CLOS-INTERNALS:*DECL-TYPES-INHERITED-FROM-METHOD*"
+    "COMMON-LISP-INTERNALS:*ALL-EMB-POOLS*"
+    "COMMON-LISP-INTERNALS:*COMM-AREA-NEXT-FREE-OFFSET*"
+    "COMMON-LISP-INTERNALS:*COMM-AREA-TOP-OFFSET*"
+    "COMMON-LISP-INTERNALS:*EMB-HANDLE-ARRAY-NEXT-FREE*"
+    "COMMON-LISP-INTERNALS:*EMB-POOL-COUNT*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-MODE-METERS*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-MODE-TIME*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-MODE*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-TASK-CACHE*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-TASK-FREE-LIST*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-TASK-HEADS*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-TASK-PRIORITY*"
+    "COMMON-LISP-INTERNALS:*INTERRUPT-TASK-TAILS*"
+    "COMMON-LISP-INTERNALS:*MAX-RUN-LIGHT-OFFSET*"
+    "COMMON-LISP-INTERNALS:*MIN-RUN-LIGHT-OFFSET*"
+    "COMMON-LISP-INTERNALS:*TIMER-MULTIPLE*"
+    "COMMON-LISP-INTERNALS:*TIMER-PERIOD*"
+    "COMMON-LISP-INTERNALS:*TIMER-PHASE*"
+    "COMPILER:*BINARY-OUTPUT-STREAM*"
+    "COMPILER:*COMPILE-FUNCTION*"
+    "COMPILER:DEFAULT-WARNING-DEFINITION-TYPE"
+    "COMPILER:DEFAULT-WARNING-FUNCTION"
+    "COMPILER:QC-FILE-READ-IN-PROGRESS"
+    "CONDITIONS:CONDITION"
+    "DEBUGGER:.RESTART.DESCRIPTION."
+    "DEBUGGER:*TRAP-DISPATCH-TABLE*"
+    "DEBUGGER:REPORT-IGNORED-ERRORS"
+    "DYNAMIC-WINDOWS:*ACCEPT-ACTIVATION-CHARS*"
+    "DYNAMIC-WINDOWS:*ACCEPT-ACTIVE*"
+    "DYNAMIC-WINDOWS:*ACCEPT-BLIP-CHARS*"
+    "DYNAMIC-WINDOWS:*ACCEPT-HELP*"
+    "FORMAT:*COMMON-LISP-FORMAT*"
+    "GLOBAL:PKG-GLOBAL-PACKAGE"
+    "GLOBAL:PKG-SYSTEM-PACKAGE"
+    "GLOBAL:RETURN-LIST"
+    "LANGUAGE-TOOLS:*SIMPLE-VARIABLES*"
+    "LISP:*DEBUG-IO*"
+    "LISP:*ERROR-OUTPUT*"
+    "LISP:*QUERY-IO*"
+    "LISP:*STANDARD-INPUT*"
+    "LISP:*STANDARD-OUTPUT*"
+    "LISP:*TERMINAL-IO*"
+    "LISP:*TRACE-OUTPUT*"
+    "METERING:*ENABLE-METERING-ON-FUNCTION-CALLS*"
+    "METERING:WIRED-METERING-AREA"
+    "NETWORK-INTERNALS:*EMB-ETHERNET-INTERFACES*"
+    "NETWORK-INTERNALS:*N-EMB-ETHERNET-INTERFACES*"
+    "NETWORK-INTERNALS:*PKTS-ALLOCATED*"
+    "NETWORK-INTERNALS:%ETHER-BUFFER-AREA-REGION"
+    "STORAGE:*ACTIVE-STACK-GROUPS-HEAD*"
+    "STORAGE:*ACTIVE-STACK-GROUPS-TAIL*"
+    "STORAGE:*COUNT-ACTIVE-STACK-GROUPS*"
+    "STORAGE:*CREATING-DYNAMIC-SPACE*"
+    "STORAGE:*FLUSHABLE-SCAN-PHT-INDEX*"
+    "STORAGE:*INHIBIT-READ-ONLY-IN-PROGRESS*"
+    "STORAGE:*LAST-AUX-PAGE-FAULT-VMA*"
+    "STORAGE:*PAGE-FAULT-CONTROL-REGISTER*"
+    "STORAGE:*PAGE-FAULT-DEPTH*"
+    "STORAGE:*PAGE-FAULT-FRAME-POINTER*"
+    "STORAGE:*PAGE-FAULT-PROGRAM-COUNTER*"
+    "STORAGE:*READ-ONLY-N-WRITTEN-PAGES*"
+    "STORAGE:*SMPT-CACHED-VPN*"
+    "STORAGE:*TRANSPORTER-READ-ONLY-VPN*"
+    "STORAGE:*USER-ANONYMOUS-DISK-EVENT*"
+    "STORAGE:*USER-ROOT-DISK-EVENT*"
+    "STORAGE:*USER-SERIAL-DISK-EVENT*"
+    "STORAGE:*WIRE/UNWIRE-TICK*"
+    "STORAGE:*WIRED-CONTROL-STACK-PAGES*"
+    "SYMBOLICS-COMMON-LISP:ARGLIST"
+    "SYSTEM-INTERNALS:****"
+    "SYSTEM-INTERNALS:*COLD-BOOT-MICROSECOND-TIME-HIGH*"
+    "SYSTEM-INTERNALS:*COLD-BOOT-MICROSECOND-TIME-LOW*"
+    "SYSTEM-INTERNALS:*COLD-LOAD-DUPLICATED-SYMBOLS*"
+    "SYSTEM-INTERNALS:*COLD-LOAD-STREAM-RUBOUT-HANDLER-BUFFER*"
+    "SYSTEM-INTERNALS:*COLD-LOADED-FILE-PROPERTY-LISTS*"
+    "SYSTEM-INTERNALS:*COUNT*"
+    "SYSTEM-INTERNALS:*CURRENT-SELF-EVALUATING-SYMBOL-TABLE*"
+    "SYSTEM-INTERNALS:*ECHOPLEX*"
+    "SYSTEM-INTERNALS:*FORWARDED-SYMBOL-CELL-TABLE-LOCK*"
+    "SYSTEM-INTERNALS:*HIGH-PART*"
+    "SYSTEM-INTERNALS:*INDEX*"
+    "SYSTEM-INTERNALS:*INPUT-HISTORY-DEFAULT*"
+    "SYSTEM-INTERNALS:*INSTANT-PACKAGE-DWIM-MODULUS*"
+    "SYSTEM-INTERNALS:*INSTANT-PACKAGE-DWIM-PACKAGE*"
+    "SYSTEM-INTERNALS:*INSTANT-PACKAGE-DWIM-TABLE*"
+    "SYSTEM-INTERNALS:*IOCH"
+    "SYSTEM-INTERNALS:*IOLST"
+    "SYSTEM-INTERNALS:*IVORY-REVISION-NUMBER*"
+    "SYSTEM-INTERNALS:*LISP-PACKAGE*"
+    "SYSTEM-INTERNALS:*LOCAL-DECLARATIONS-CACHE*"
+    "SYSTEM-INTERNALS:*LOCAL-DECLARATIONS-LAST-LOCAL-DECLARATIONS*"
+    "SYSTEM-INTERNALS:*LOW-PART*"
+    "SYSTEM-INTERNALS:*NUMERIC-ARG-P*"
+    "SYSTEM-INTERNALS:*NUMERIC-ARG*"
+    "SYSTEM-INTERNALS:*OPEN-BRACKET*"
+    "SYSTEM-INTERNALS:*PACKAGE-NAME-AARRAY*"
+    "SYSTEM-INTERNALS:*PACKAGE-NAME-TABLE-COUNT*"
+    "SYSTEM-INTERNALS:*PACKAGE-NAME-TABLE-MODULUS*"
+    "SYSTEM-INTERNALS:*POWER-10*"
+    "SYSTEM-INTERNALS:*PRINT-ERROR*"
+    "SYSTEM-INTERNALS:*PROMPT-AND-READ-ECHO*"
+    "SYSTEM-INTERNALS:*PROMPT-AND-READ-VISIBLE-SUFFIX*"
+    "SYSTEM-INTERNALS:*QLD-MESSAGES*"
+    "SYSTEM-INTERNALS:*READ-CIRCULARITY-UNRESOLVED-LABELS*"
+    "SYSTEM-INTERNALS:*READ-CIRCULARITY*"
+    "SYSTEM-INTERNALS:*RESCAN-STATE*"
+    "SYSTEM-INTERNALS:*SCAVENGE-IN-PROGRESS*"
+    "SYSTEM-INTERNALS:*SCL-PACKAGE*"
+    "SYSTEM-INTERNALS:*SIMPLE-LISTENER-PROCESS*"
+    "SYSTEM-INTERNALS:*STANDARD-CHARACTER-SET*"
+    "SYSTEM-INTERNALS:*SYSTEM-SYMBOL-CELL-TABLE-TAIL*"
+    "SYSTEM-INTERNALS:*SYSTEM-SYMBOL-CELL-TABLE*"
+    "SYSTEM-INTERNALS:*USER-PACKAGE*"
+    "SYSTEM-INTERNALS:++++"
+    "SYSTEM-INTERNALS:APROPOS-SUBSTRING"
+    "SYSTEM-INTERNALS:FDEFINE-FILE-DEFINITIONS"
+    "SYSTEM-INTERNALS:GC-FLIP-INHIBIT-WAIT-TIME"
+    "SYSTEM-INTERNALS:INFERIOR-INTERVAL"
+    "SYSTEM-INTERNALS:MINI-EOF-SEEN"
+    "SYSTEM-INTERNALS:MINI-LOCAL-INDEX"
+    "SYSTEM-INTERNALS:MINI-OPEN-FILE"
+    "SYSTEM-INTERNALS:MINI-OPEN-P"
+    "SYSTEM-INTERNALS:MINI-PACKET"
+    "SYSTEM-INTERNALS:MINI-PACKET-INDEX"
+    "SYSTEM-INTERNALS:MINI-PACKET-MAX"
+    "SYSTEM-INTERNALS:MINI-PACKET-NUMBER-IN"
+    "SYSTEM-INTERNALS:MINI-PACKET-NUMBER-OUT"
+    "SYSTEM-INTERNALS:MINI-PACKET-OPCODE"
+    "SYSTEM-INTERNALS:MINI-PACKET-STRING"
+    "SYSTEM-INTERNALS:MINI-REMOTE-INDEX"
+    "SYSTEM-INTERNALS:MINI-UNIQUE-ID"
+    "SYSTEM-INTERNALS:PKG-CODE-SYMBOLS"
+    "SYSTEM-INTERNALS:PKG-FONTS-PACKAGE"
+    "SYSTEM-INTERNALS:PKG-NETWORK-PACKAGE"
+    "SYSTEM-INTERNALS:PKG-SYSTEM-INTERNALS-PACKAGE"
+    "SYSTEM-INTERNALS:PKG-USER-PACKAGE"
+    "SYSTEM-INTERNALS:REHASH-THESE-HASH-TABLES-BEFORE-COLD"
+    "SYSTEM-INTERNALS:SETSYNTAX-FUNCTION"
+    "SYSTEM-INTERNALS:SETSYNTAX-SHARP-MACRO-CHARACTER"
+    "SYSTEM-INTERNALS:SETSYNTAX-SHARP-MACRO-FUNCTION"
+    "SYSTEM-INTERNALS:SORT-ARRAY-TEMP-V"
+    "SYSTEM-INTERNALS:SORT-DUMMY-ARRAY-HEADER"
+    "SYSTEM-INTERNALS:SORT-INPUT-LIST"
+    "SYSTEM-INTERNALS:SORT-LESSP-PREDICATE"
+    "SYSTEM-INTERNALS:SORT-LESSP-PREDICATE-ON-CAR"
+    "SYSTEM-INTERNALS:WARM-BOOTED-PROCESSES"
+    "SYSTEM-INTERNALS:XR-SHARP-ARGUMENT"
+    "SYSTEM:*DISK-UNIT-TABLE*"
+    "SYSTEM:*LISP-STATE-SAVED*"
+    "SYSTEM:*LISP-STOPPED-CLEANLY*"
+    "SYSTEM:*PACKAGE-NAME-TABLE*"
+    "SYSTEM:NET-ADDRESS-1"
+    "SYSTEM:NET-ADDRESS-2"
+    "SYSTEM:PKG-KEYWORD-PACKAGE"
+    "SYSTEM:SYN-TERMINAL-IO"
+    "TIME:*BOOT-MICROSECOND-TIME-HIGH*"
+    "TIME:*BOOT-MICROSECOND-TIME-LOW*"
+    "TV:*ACTIVE-WHO-LINE-SCREENS*"
+    "TV:*CURRENT-PROGRESS-NOTE*"
+    "TV:*FORCIBLY-SHOW-PROGRESS-NOTES*"
+    "TV:KBD-LAST-ACTIVITY-TIME"
+    "TV:MAIN-SCREEN"
+    "TV:WHO-LINE-RUN-LIGHT-LOC"
+    "TV:WHO-LINE-RUN-STATE"
+    "TV:WHO-LINE-RUN-STATE-SHEET"
+    "ZWEI:*INTERVAL*"
+    "ZWEI:*KILL-HISTORY-USER*"
+    "ZWEI:*KILL-HISTORY*"
+    "ZWEI:*MODE-LIST-SYNTAX-TABLE*"
+    )
+  "R2 danger set as reviewed 2026-07-05 (M3h boot 18).  Every entry was
+classified against its source: bind-before-read (LET/argument binding of
+a special -- SORT-*, XR-*, SETSYNTAX-*, *PRINT-ERROR*, IGNORE-ERRORS'
+DBG:REPORT-IGNORED-ERRORS, METERING's flag, FORMAT:*COMMON-LISP-FORMAT*),
+VARIABLE-BOUNDP-guarded (FDEFINE-FILE-DEFINITIONS, *INSTANT-PACKAGE-DWIM-*,
+SYS:SYN-TERMINAL-IO), write-before-read on the boot path
+(BUILD-INITIAL-PACKAGES' SETQs, BOOTSTRAP-FORWARD-SYMBOL-CELLS' tables,
+RESET-COLD-BOOT-HISTORY, TV:KBD-LAST-ACTIVITY-TIME),
+forwarded-then-set (LISP:*TERMINAL-IO* et al. via permanent-links),
+deferred-covered (*COLD-LOAD-STREAM-RUBOUT-HANDLER-BUFFER*), warm-only
+(ZWEI/TV/DW/MINI/QLD/compiler/CLOS...), or wired/embedding registers that
+trap handlers and the init code boots 1-18 already exercised write before
+anything reads (STORAGE:*PAGE-FAULT-*, CLI:*INTERRUPT-TASK-*,
+TIME:*BOOT-MICROSECOND-*; their value cells are one-q-forwards into the
+wired tables).  The gate fails on ANY drift --
+a new entry is a potential boot trap to review; a vanished entry means
+this list is stale.")
+
+(defun check-unbound-value-cells (w)
+  "M3h boot-18 gate: the R2 danger set matches the reviewed
+classification exactly."
+  (let* ((rows (cold-unbound-value-cells w))
+         (new (set-difference rows *cold-reviewed-unbound-value-cells*
+                              :test #'equal))
+         (gone (set-difference *cold-reviewed-unbound-value-cells* rows
+                               :test #'equal)))
+    (cold-check (null new)
+                "R2: no unreviewed referenced-unbound value cells ~
+(~D new: ~S)" (length new) new)
+    (cold-check (null gone)
+                "R2: reviewed unbound-value-cell list is current ~
+(~D stale: ~S)" (length gone) gone)))
+
 (defun check-cold-emit (w tmpdir reference)
   "Finalize the loaded world, emit fresh.ilod with the wired/unwired map
 split, re-read it, and check the boot-critical Qs on the FILE.  Also
@@ -1645,6 +1906,8 @@ prints the R1 unbound-function-cell audit."
         ;; No symbol homed in a package BUILD-INITIAL-PACKAGES won't
         ;; create (M3h boot 17).
         (check-declared-package-homes w)
+        ;; R2: referenced-unbound value cells all reviewed (M3h boot 18).
+        (check-unbound-value-cells w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model
@@ -1838,5 +2101,25 @@ that are still unbound at emit~%;;; (boot stubs from ~
 *COLD-LOAD-FUNCTION-INITIALIZATIONS* excluded).~%")
           (dolist (r rows) (format f "~A~%" r)))
         (format t "R1 audit: ~D unbound referenced function cells -> ~A~%"
-                (length rows) report)))
+                (length rows) report))
+      (let ((rows (cold-unbound-value-cells w))
+            (report (concatenate 'string out ".unbound-vcells.txt")))
+        (with-open-file (f report :direction :output :if-exists :supersede)
+          (format f ";;; R2 audit: value cells the loaded world references ~
+by locative that are still unbound at emit~%;;; (vars the boot's ~
+*COLD-LOAD-VARIABLE-INITIALIZATIONS* loop repairs excluded).~%;;; ~
+Entries marked UNREVIEWED are absent from ~
+*COLD-REVIEWED-UNBOUND-VALUE-CELLS* -- review before booting.~%")
+          (dolist (r rows)
+            (format f "~A~@[  UNREVIEWED~]~%" r
+                    (not (member r *cold-reviewed-unbound-value-cells*
+                                 :test #'equal)))))
+        (format t "R2 audit: ~D referenced unbound value cells (~D ~
+unreviewed) -> ~A~%"
+                (length rows)
+                (count-if-not (lambda (r)
+                                (member r *cold-reviewed-unbound-value-cells*
+                                        :test #'equal))
+                              rows)
+                report)))
     0))

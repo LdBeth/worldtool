@@ -109,6 +109,55 @@ pages on demand."
           collect (cons (cold-region-origin r)
                         (+ (cold-region-origin r) (cold-region-length r)))))
 
+(defun cold-deferred-defvar-parts (form)
+  "Match the BOUNDP-guarded deferred defvar shape COLD-DO-DEFVAR emits,
+\(IF (BOUNDP 'sym) NIL (SET 'sym valform)); returns (values sym valform)
+or NIL.  Plain SETs (defconst/setq deferrals) are deliberately not
+matched: stamping those would double-evaluate side-effecting forms at
+boot, whereas the guarded shape no-ops once the symbol is bound."
+  (flet ((head-p (x name) (and (consp x) (vsym-p (first x))
+                               (string= (vsym-name (first x)) name))))
+    (when (and (head-p form "IF")
+               (= (length form) 4)
+               (head-p (second form) "BOUNDP")
+               (head-p (fourth form) "SET"))
+      (let ((guard-q (second (second form)))
+            (set-form (fourth form)))
+        (when (and (head-p guard-q "QUOTE")
+                   (head-p (second set-form) "QUOTE")
+                   (vsym-p (second (second set-form))))
+          (values (second (second set-form)) (third set-form)))))))
+
+(defun cold-retry-deferred-defvars (w)
+  "M3h boot 18: a cold file's DEFVAR initializer that was unevaluable at
+vbin-load time (AREA-FOR-NEW-SYMBOLS's is SYMBOL-AREA, an area variable
+the machinery pass stamps AFTER the load) deferred a BOUNDP-guarded SET
+-- but MAKE-SYMBOL reads the variable inside BUILD-INITIAL-PACKAGES,
+before the deferred list is MAPCed.  Retry each such form now, post
+machinery: whatever evaluates is stamped, and the still-guarded deferred
+form no-ops at boot.  Returns the number stamped."
+  (let ((stamped 0))
+    (dolist (entry (reverse (cold-world-deferred w)))
+      (destructuring-bind (pkg . form) entry
+        (multiple-value-bind (sym valform) (cold-deferred-defvar-parts form)
+          (when (and sym (not (nth-value 2 (cold-symbol-value-q w sym))))
+            (let ((*cold-default-package* pkg))
+              (multiple-value-bind (tag data) (cold-eval-value w valform)
+                (when tag
+                  (cold-set-symbol-value w sym tag data)
+                  (incf stamped))))))))
+    ;; SI:COLD-LOAD-FUNCTION-PROPERTY-LISTS has no initializer anywhere
+    ;; (fspec.lisp:385), but FUNCTION-SPEC-DEFAULT-HANDLER's cold path
+    ;; reads and PUSHes it whenever *FUNCTION-SPEC-HASH-TABLES* is NIL
+    ;; (fspec.lisp:403,413); it is on the obsolete-after-QLD registry
+    ;; (cold-load.lisp:268), so the genuine cold world shipped it bound.
+    (let ((clfpl (si-vsym "COLD-LOAD-FUNCTION-PROPERTY-LISTS")))
+      (unless (nth-value 2 (cold-symbol-value-q w clfpl))
+        (multiple-value-bind (nt nd) (cold-nil-q w)
+          (cold-set-symbol-value w clfpl nt nd))
+        (incf stamped)))
+    stamped))
+
 (defun cold-finalize (w)
   "Everything between the last vbin and emit (M3f):
 1. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp),
@@ -137,6 +186,7 @@ Returns (values deferred-count patch-count package-count)."
     (let* ((*cold-load-time-eval* #'cold-operand-eval)
            (package-count
              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
+           (revived (cold-retry-deferred-defvars w))
            (patches (reverse (cold-world-patches w)))
            (deferred (reverse (cold-world-deferred w)))
            (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
@@ -189,6 +239,9 @@ the deferred list"
       ;;    Done last: the PKGDCL pass and the deferred-list
       ;;    materialization above both intern keywords.
       (cold-forward-all-keywords w)
+      (when (plusp revived)
+        (format t "~&  ~D deferred defvar value~:P stamped at finalize~%"
+                revived))
       (values (length entries) (length patches) package-count))))
 
 (defun cold-build-world (w &key reference)
