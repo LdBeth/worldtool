@@ -1407,6 +1407,30 @@ installs at FSET time)"))
                     "LISP:FORMAT function cell carries the CLCP ~
 wrapper")))))
 
+(defun check-nil-t-stamp (w)
+  "M3h boot-16 gate: the architectural NIL/T blocks carry real pnames,
+NIL plists, and \"LISP\" home-package strings (the skeleton's zero
+placeholders trap in BUILD-INITIAL-PACKAGES's hand FIXUP-SYMBOL-PACKAGE
+of T/NIL, package.lisp:2412; dist homes both in LISP)."
+  (let ((dtp-header-p (cold-dtp w "HEADER-P"))
+        (dtp-string (cold-dtp w "STRING")))
+    (loop for (vma pname) in (list (list (cold-world-nil-vma w) "NIL")
+                                   (list (cold-world-t-vma w) "T"))
+          do (multiple-value-bind (tag data) (cw-ref w vma)
+               (cold-check (and (= (tag-type tag) dtp-header-p)
+                                (plusp data)
+                                (equal (cold-read-string w data) pname))
+                           "~A+0 pname is ~S" pname pname))
+             (multiple-value-bind (tag data) (cw-ref w (+ vma 3))
+               (cold-check (cold-q-nil-p w tag data)
+                           "~A+3 plist is NIL" pname))
+             (multiple-value-bind (tag data) (cw-ref w (+ vma 4))
+               (cold-check (and (= (tag-type tag) dtp-string)
+                                (plusp data)
+                                (equal (cold-read-string w data) "LISP"))
+                           "~A+4 package is the \"LISP\" name string"
+                           pname)))))
+
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
 and the periodic timer call pre-banner are real compiled functions (not
@@ -1599,6 +1623,8 @@ prints the R1 unbound-function-cell audit."
         ;; Dialect-split symbols (GLOBAL:FORMAT vs LISP:FORMAT) resolve
         ;; through the pkgdcl package graph (M3h boot 15).
         (check-split-symbol-resolution w)
+        ;; NIL/T architectural blocks fully stamped (M3h boot 16).
+        (check-nil-t-stamp w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model

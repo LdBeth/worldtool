@@ -68,6 +68,24 @@ package.  Pname, plist and package cells start as placeholders."
   "The Q representing NIL as a value."
   (values (tag 0 (cold-dtp w "NIL")) (cold-world-nil-vma w)))
 
+(defun cold-stamp-nil-t (w)
+  "Fill the NIL/T cells COLD-BUILD-SYMBOL-BLOCK left as zero placeholders:
+pname, plist (NIL), home-package name string.  BUILD-INITIAL-PACKAGES's
+IMach branch FIXUP-SYMBOL-PACKAGEs T and NIL by hand (package.lisp:2412)
+before the SYMBOL-AREA sweep: SYMBOL-PACKAGE must yield the home name
+string -- the dist homes both in LISP -- and FIND-SYMBOL-LOCAL GET-PNAMEs
+them (M3h boot 16).  Needs the heap regions (PNAME-AREA), so it cannot
+run in MAKE-SKELETON-WORLD."
+  (let ((dtp-header-p (cold-dtp w "HEADER-P"))
+        (dtp-string (cold-dtp w "STRING"))
+        (lisp-name (cold-pname w "LISP")))
+    (loop for (vma pname) in (list (list (cold-world-nil-vma w) "NIL")
+                                   (list (cold-world-t-vma w) "T"))
+          do (cw-set w vma (tag 0 dtp-header-p) (cold-pname w pname))
+             (multiple-value-bind (ntag ndata) (cold-nil-q w)
+               (cw-set w (+ vma 3) ntag ndata))
+             (cw-set w (+ vma 4) (tag 0 dtp-string) lisp-name))))
+
 (defun cold-build-nil-t (w)
   "NIL and T at their architectural addresses (the emulator hard-sets its
 NIL/T registers to these).  The wired region's allocation pointer resumes

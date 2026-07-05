@@ -951,6 +951,7 @@ compiler-side and have no cold definition or boot effect.")
   "Load all cold-set vbins in order, then run fixups to quiescence.
 Returns the number of fixups that never resolved (their errors are
 collected into *COLD-EVAL-STATS* under \"fixup failures\")."
+  (cold-stamp-nil-t w)
   (with-cold-materializer (w)
     (let ((*cold-load-time-eval* #'cold-operand-eval))
       (dolist (spec *cold-load-order*)
