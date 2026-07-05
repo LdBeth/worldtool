@@ -813,11 +813,12 @@ starts (cold-wired.lisp:51-52)."
 (defparameter *cold-array-null-element-chars* '(16 20))
 
 (defun cold-build-array-meta (w)
-  "SYS:*ARRAY-TYPES* / *ARRAY-NULL-WORD* / *ARRAY-NULL-ELEMENT*
-(safeguarded, ldata.lisp): the type-code -> name-symbol map (known
-names at their codes, %ARRAY-TYPE-~O filler like the distribution) and
-the per-type null Qs.  *ARRAY-ELEMENTS-PER-Q* / *ARRAY-BITS-PER-ELEMENT*
-stay unbound -- they are unbound in the distribution too."
+  "SYS:*ARRAY-TYPES* / *ARRAY-NULL-WORD* / *ARRAY-NULL-ELEMENT* /
+*VALID-ARRAY-TYPE-CODES* (safeguarded, ldata.lisp): the type-code ->
+name-symbol map (known names at their codes, %ARRAY-TYPE-~O filler like
+the distribution), the per-type null Qs, and the defined-type bitmap.
+*ARRAY-ELEMENTS-PER-Q* / *ARRAY-BITS-PER-ELEMENT* stay unbound -- they
+are unbound in the distribution too."
   (let ((fixnum (cold-dtp w "FIXNUM"))
         (array (cold-dtp w "ARRAY"))
         (char (cold-dtp w "CHARACTER")))
@@ -848,7 +849,24 @@ stay unbound -- they are unbound in the distribution too."
                         (cw-set w vma (tag 0 fixnum) 0))
                        ((member i *cold-array-null-element-chars*)
                         (cw-set w vma (tag 0 char) 0))
-                       (t (cw-set w vma ntag ndata)))))))))
+                       (t (cw-set w vma ntag ndata)))))
+        ;; *VALID-ARRAY-TYPE-CODES*: an ART-BOOLEAN 64-bitmap with a bit set
+        ;; for every defined array type code (SIMPLE-MAKE-ARRAY-TYPE-AREA
+        ;; icons.lisp:1597 truth-tests (AREF ... TYPE)).  The dist header is
+        ;; 43:A8000040 and its two data words 00110555/00030400 are exactly
+        ;; the *cold-array-type-codes* set, so compute the bitmap from it.
+        (let* ((bits (reduce (lambda (v pair) (logior v (ash 1 (cdr pair))))
+                             *cold-array-type-codes* :initial-value 0))
+               (arr (make-varray (list 64)
+                                 (list (make-vsym "KEYWORD" "TYPE")
+                                       (make-vsym "SYSTEM" "ART-BOOLEAN")))))
+          (setf (varray-words arr)
+                (make-array 4 :initial-contents
+                            (list (ldb (byte 16 0) bits) (ldb (byte 16 16) bits)
+                                  (ldb (byte 16 32) bits) (ldb (byte 16 48) bits))))
+          (cold-set-symbol-value
+           w (make-vsym "SYSTEM" "*VALID-ARRAY-TYPE-CODES*")
+           (tag 0 array) (cold-array w arr "SAFEGUARDED-OBJECTS-AREA")))))))
 
 ;;; ---------------- System disk events ----------------
 

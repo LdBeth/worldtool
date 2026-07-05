@@ -1180,7 +1180,19 @@ generator contract; dist-verified for all 22, M3h boot-11)."
                                (cw-ref w (+ types 1 code))
                              (and (= (tag-type et) (tag-type st))
                                   (= ed sd))))))
-       "*ARRAY-TYPES* maps every known code to its symbol"))))
+       "*ARRAY-TYPES* maps every known code to its symbol"))
+    ;; *VALID-ARRAY-TYPE-CODES*: ART-BOOLEAN bitmap, one bit per defined
+    ;; type code (icons.lisp:1597).  Two packed data words = the low/high
+    ;; halves of the *cold-array-type-codes* bitmap.
+    (let ((vatc (nth-value 1 (cold-symbol-value-q
+                              w (make-vsym "SYSTEM" "*VALID-ARRAY-TYPE-CODES*"))))
+          (bits (reduce (lambda (v pair) (logior v (ash 1 (cdr pair))))
+                        *cold-array-type-codes* :initial-value 0)))
+      (cold-check
+       (and vatc
+            (= (nth-value 1 (cw-ref w (+ vatc 1))) (ldb (byte 32 0) bits))
+            (= (nth-value 1 (cw-ref w (+ vatc 2))) (ldb (byte 32 32) bits)))
+       "*VALID-ARRAY-TYPE-CODES* marks every defined array type code"))))
 
 (defun check-area-list (w)
   "M3h gate: SI:AREA-LIST is the cdr-coded area-name table data
