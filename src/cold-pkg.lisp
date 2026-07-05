@@ -285,3 +285,64 @@ finalize to defer.  Returns the number of packages."
       (cold-set-symbol-value
        w (make-vsym "SYSTEM-INTERNALS" "BUILD-INITIAL-PACKAGES") tag data))
     (length calls)))
+
+(defun cold-build-package-graph (path)
+  "Fill *COLD-PACKAGE-USES* / *COLD-PACKAGE-IMPORTS* from PKGDCL for
+COLD-RESOLVE-HOME's graph walk (cold-object.lisp), and fold pkgdcl
+nicknames/prefix-names into *COLD-PACKAGE-ALIASES*.  Must run before any
+vbin loads -- symbol interning depends on it.  A DEFPACKAGE without :USE
+defaults to GLOBAL (package.lisp:503).  Returns the package count."
+  (let ((uses (make-hash-table :test #'equal))
+        (imports (make-hash-table :test #'equal))
+        (count 0))
+    (dolist (form (read-genera-source path))
+      (destructuring-bind (head name . clauses) form
+        (unless (and (vsym-p head) (string= (vsym-name head) "DEFPACKAGE"))
+          (error "PKGDCL contains a non-DEFPACKAGE form: ~S" head))
+        (incf count)
+        (let ((pkg (pkgdcl-string name))
+              (use-seen nil))
+          (dolist (clause clauses)
+            (multiple-value-bind (kw args)
+                (if (consp clause)
+                    (values (first clause) (rest clause))
+                    (values clause nil))
+              (let ((kwname (vsym-name kw)))
+                (cond ((string= kwname "USE")
+                       (setf use-seen t
+                             (gethash pkg uses)
+                             (mapcar #'pkgdcl-string args)))
+                      ((string= kwname "IMPORT-FROM")
+                       (let ((groups (if (consp (first args))
+                                         args
+                                         (list args))))
+                         (dolist (g groups)
+                           (let ((src (pkgdcl-string (first g))))
+                             (dolist (s (rest g))
+                               (setf (gethash (cons pkg (pkgdcl-string s))
+                                              imports)
+                                     src))))))
+                      ((or (string= kwname "IMPORT")
+                           (string= kwname "SHADOWING-IMPORT"))
+                       ;; Explicitly qualified symbols; the vsym's own
+                       ;; package is the source.
+                       (dolist (s args)
+                         (when (vsym-p s)
+                           (let ((p (vsym-package s)))
+                             (unless (member p '(:default :uninterned))
+                               (setf (gethash (cons pkg (vsym-name s))
+                                              imports)
+                                     (canonical-package-name p)))))))
+                      ((or (string= kwname "NICKNAMES")
+                           (string= kwname "PREFIX-NAME"))
+                       (when *cold-package-aliases*
+                         (dolist (n args)
+                           (let ((nn (pkgdcl-string n)))
+                             (unless (gethash nn *cold-package-aliases*)
+                               (setf (gethash nn *cold-package-aliases*)
+                                     pkg))))))))))
+          (unless use-seen
+            (setf (gethash pkg uses) (list "GLOBAL"))))))
+    (setf *cold-package-uses* uses
+          *cold-package-imports* imports)
+    count))

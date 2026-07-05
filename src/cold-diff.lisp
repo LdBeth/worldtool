@@ -498,7 +498,11 @@ points to (1C:F8046C44 in genera-8-5-wired.txt)."
 (defparameter *cold-boot-stub-functions*
   '("SPECIAL-LOAD" "DEFCONSTANT-LOAD-2" "DEFGENERIC-INTERNAL"
     "REDEFINE-FORMAT-DIRECTIVE" "MAKE-VARIABLE-OBSOLETE" "SUBTYPEP"
-    "WARN" "FERROR" "ERROR" "MAKE-INSTANCE" "FIND-PACKAGE" "FIND-CLASS")
+    "WARN" "FERROR" "ERROR" "MAKE-INSTANCE" "FIND-PACKAGE" "FIND-CLASS"
+    ;; GLOBAL:FORMAT is unbound by design since the boot-15 dialect
+    ;; split (LISP:FORMAT carries the CLCP wrapper); FORMAT-COLD-LOAD
+    ;; installs on it at FSET time.
+    "FORMAT")
   "Stubbed by *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131).")
 
 (defparameter *cold-known-pending-functions*
@@ -1231,7 +1235,8 @@ and is only correct while no link form has been loaded."
                       "*LINKED-SYMBOL-CELLS* is NIL (no links recorded)")
           (let ((dtp-list (cold-dtp w "LIST"))
                 (n 0)
-                (bad 0))
+                (bad 0)
+                (selfs nil))
             (cold-check (and boundp (= (tag-type tag) dtp-list))
                         "*LINKED-SYMBOL-CELLS* is a list (~2,'0X:~8,'0X)"
                         tag data)
@@ -1248,6 +1253,14 @@ and is only correct while no link form has been loaded."
                                            (cold-vsym w to)
                                            (cold-vsym w kind)))
                                (got nil))
+                           ;; A collapsed FROM/TO pair (same-pname symbols
+                           ;; coalesced across packages, e.g. CL:/ and
+                           ;; ZL:/) would make BOOTSTRAP-FORWARD-SYMBOL-
+                           ;; CELLS forward a cell onto itself at boot.
+                           (when (= (first want) (second want))
+                             (push (list (vsym-package from) (vsym-name from)
+                                         (vsym-package to) (vsym-name to))
+                                   selfs))
                            (cold-map-list
                             w (tag 0 dtp-list) ed
                             (lambda (st sd svma)
@@ -1259,6 +1272,9 @@ and is only correct while no link form has been loaded."
                              (incf bad))))
                        (incf bad))
                    nil))))
+            (cold-check (null selfs)
+                        "no self-links among the linked-cell records ~
+(~D found: ~S)" (length selfs) selfs)
             (cold-check (and (zerop bad) (null records))
                         "~D linked-cell record~:P mirror the load pass ~
 (~D bad, ~D missing)"
@@ -1359,6 +1375,37 @@ I-LISP-COMPILER (I GLOBAL) and NETBOOT (WT WORLD-TOOLS)."
       (cold-check (= found (length triples))
                   "~D deferred SI:PKG-ADD-RELATIVE-NAME form~:P (~D ~
 withheld)" found (length triples)))))
+
+(defun check-split-symbol-resolution (w)
+  "M3h boot-15 gate: Genera's dialect-split pnames stay split.  FORMAT is
+the witness: GLOBAL exports its own (pkgdcl.lisp:6614) while SCL/FCL
+import theirs from LISP (pkgdcl.lisp:3172, \"string incompatibility\"),
+so CLCP iofns' wrapper (calls warm FORMAT:FORMAT-INTERNAL) must land on
+LISP:FORMAT and leave GLOBAL:FORMAT unbound for the FBOUNDP-guarded
+FORMAT-COLD-LOAD stub (cold-load.lisp:530,156).  aarray.lisp's
+SORT-AARRAY-PROGRESS-NOTE FORMATs during BUILD-INITIAL-PACKAGES."
+  (cold-check (string= (cold-resolve-home "FORMAT" "COMMON-LISP-INTERNALS")
+                       "LISP")
+              "CLI context resolves FORMAT to LISP (SCL imports it)")
+  (cold-check (string= (cold-resolve-home "FORMAT" "SYSTEM-INTERNALS")
+                       "GLOBAL")
+              "SI context resolves FORMAT to GLOBAL")
+  (let ((zl (gethash (cons "FORMAT" "GLOBAL") (cold-world-symbols w)))
+        (cl (gethash (cons "FORMAT" "LISP") (cold-world-symbols w)))
+        (dtp-null (cold-dtp w "NULL")))
+    (cold-check (and zl cl (/= zl cl))
+                "GLOBAL:FORMAT and LISP:FORMAT are distinct symbols")
+    (when (and zl cl (/= zl cl))
+      (multiple-value-bind (tag data) (cw-ref w (+ zl 2))
+        (declare (ignore data))
+        (cold-check (= (tag-type tag) dtp-null)
+                    "GLOBAL:FORMAT function cell is unbound (boot stub ~
+installs at FSET time)"))
+      (multiple-value-bind (tag data) (cw-ref w (+ cl 2))
+        (declare (ignore data))
+        (cold-check (/= (tag-type tag) dtp-null)
+                    "LISP:FORMAT function cell carries the CLCP ~
+wrapper")))))
 
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
@@ -1549,6 +1596,9 @@ prints the R1 unbound-function-cell audit."
         ;; :RELATIVE-NAMES withheld from the package calls, deferred as
         ;; SI:PKG-ADD-RELATIVE-NAME forms (M3h boot 14).
         (check-relative-name-deferral w)
+        ;; Dialect-split symbols (GLOBAL:FORMAT vs LISP:FORMAT) resolve
+        ;; through the pkgdcl package graph (M3h boot 15).
+        (check-split-symbol-resolution w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model
@@ -1655,6 +1705,9 @@ number of failed stages (0 = success)."
         (setup-sys-host (if (char= (char sysdir (1- (length sysdir))) #\/)
                             sysdir
                             (concatenate 'string sysdir "/")))
+        (format t "~&package graph: ~D pkgdcl packages~%"
+                (cold-build-package-graph
+                 (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
         (let ((w3 (make-skeleton-world layout)))
           (cold-add-heap-regions w3)
           (unless (check-vbin-census w3 (sys-pathname "SYS: IO; RDDEFS"))
@@ -1707,6 +1760,9 @@ oracle and the IFEP vector grafts come from the reference.  Returns 0."
     (setup-sys-host (if (char= (char sysdir (1- (length sysdir))) #\/)
                         sysdir
                         (concatenate 'string sysdir "/")))
+    (format t "~&package graph: ~D pkgdcl packages~%"
+            (cold-build-package-graph
+             (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
     (let ((w (make-skeleton-world layout))
           (*cold-eval-stats* (make-hash-table :test #'equal)))
       (multiple-value-bind (ndeferred npatches npackages)

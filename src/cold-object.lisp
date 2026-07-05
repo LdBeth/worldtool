@@ -210,6 +210,8 @@ dotted (\"syntax\" . \"name\") pairs fold to the name."
 ;;; when it is loaded, references resolve through it.
 (defvar *cold-symbol-homes* nil)     ; pname -> list of home package names
 (defvar *cold-package-aliases* nil)  ; package name/nickname -> primary name
+(defvar *cold-package-uses* nil)     ; pkgdcl: primary name -> :USE list
+(defvar *cold-package-imports* nil)  ; pkgdcl: (primary . pname) -> source pkg
 
 (defparameter *cold-home-priority*
   '("GLOBAL" "LISP" "SYSTEM" "SYMBOLICS-COMMON-LISP" "SYSTEM-INTERNALS"
@@ -217,18 +219,56 @@ dotted (\"syntax\" . \"name\") pairs fold to the name."
   "Tie-break order for pnames with several homes when the referencing
 package is not itself one of them: the widely-inherited packages first.")
 
+(defun cold-package-primary (name)
+  (or (and *cold-package-aliases* (gethash name *cold-package-aliases*))
+      name))
+
+(defun cold-resolve-through-imports (pname ctx homes)
+  "Resolve PNAME's home from CTX through the pkgdcl graph: a package with
+an :IMPORT-FROM/:IMPORT entry for PNAME means the source package's symbol;
+a package that is itself a home of PNAME claims it; otherwise the search
+descends the :USE list breadth-first.  NIL when the graph has no answer
+\(the caller falls back to the priority heuristic).  This is what keeps
+Genera's dialect-split symbols split: SCL and FCL import FORMAT from LISP
+\(pkgdcl.lisp:3172, \"string incompatibility\") while GLOBAL exports its
+own, so CLCP code reaches LISP:FORMAT and ZL code GLOBAL:FORMAT.
+Coalescing them by flat priority let iofns' CL wrapper occupy the one
+FORMAT and suppress the FBOUNDP-guarded FORMAT-COLD-LOAD boot stub
+\(cold-load.lisp:530) -- M3h boot 15."
+  (when (and *cold-package-uses* *cold-package-imports*)
+    (let ((queue (list (cold-package-primary ctx)))
+          (seen nil))
+      (loop while queue
+            for pkg = (pop queue)
+            unless (member pkg seen :test #'string=)
+              do (push pkg seen)
+                 (let ((src (gethash (cons pkg pname)
+                                     *cold-package-imports*)))
+                   (cond (src
+                          (setf queue
+                                (nconc queue
+                                       (list (cold-package-primary src)))))
+                         ((member pkg homes :test #'string=)
+                          (return pkg))
+                         (t
+                          (setf queue
+                                (nconc queue
+                                       (mapcar #'cold-package-primary
+                                               (gethash pkg
+                                                        *cold-package-uses*)))))))
+            finally (return nil)))))
+
 (defun cold-resolve-home (pname context-package)
   "Home package PNAME should intern under, seen from CONTEXT-PACKAGE."
-  (let* ((ctx (or (and *cold-package-aliases*
-                       (gethash context-package *cold-package-aliases*))
-                  context-package))
+  (let* ((ctx (cold-package-primary context-package))
          (homes (and *cold-symbol-homes*
                      (gethash pname *cold-symbol-homes*))))
     (cond ((null homes) ctx)
           ((null (rest homes)) (first homes))
           ;; A package's own symbol shadows inherited ones.
           ((member ctx homes :test #'string=) ctx)
-          (t (or (loop for p in *cold-home-priority*
+          (t (or (cold-resolve-through-imports pname ctx homes)
+                 (loop for p in *cold-home-priority*
                        when (member p homes :test #'string=) return p)
                  (first homes))))))
 

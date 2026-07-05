@@ -864,11 +864,22 @@ compiler-side and have no cold definition or boot effect.")
              (to (quoted (second args))))
          (unless (and (vsym-p from) (vsym-p to))
            (error "Unsupported ~A arguments ~S" head args))
-         (push (list from to
-                     (if (string= head "LINK-SYMBOL-VALUE-CELLS")
-                         (make-vsym "KEYWORD" "VARIABLE")
-                         (make-vsym "KEYWORD" "FUNCTION")))
-               (cold-world-linked-cells w))))
+         ;; Resolve under THIS file's package context.  The records
+         ;; materialize at finalize, where a :DEFAULT refname would
+         ;; re-resolve under the wrong package: permanent-links' bare
+         ;; CL:ROOM / CL:/ (accessible in CLI via SCL's import from
+         ;; LISP) would collapse onto the GLOBAL symbol and the link
+         ;; would forward a cell onto itself at boot (M3h boot 15).
+         (flet ((resolved (v)
+                  (make-vsym (cold-resolve-home
+                              (vsym-name v)
+                              (canonical-package-name (vsym-package v)))
+                             (vsym-name v))))
+           (push (list (resolved from) (resolved to)
+                       (if (string= head "LINK-SYMBOL-VALUE-CELLS")
+                           (make-vsym "KEYWORD" "VARIABLE")
+                           (make-vsym "KEYWORD" "FUNCTION")))
+                 (cold-world-linked-cells w)))))
       ((member head *cold-noop-heads* :test #'string=)
        (cold-note (format nil "noop ~A" head)))
       ((member head *cold-defer-heads* :test #'string=)
