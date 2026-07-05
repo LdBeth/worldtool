@@ -1431,6 +1431,23 @@ of T/NIL, package.lisp:2412; dist homes both in LISP)."
                            "~A+4 package is the \"LISP\" name string"
                            pname)))))
 
+(defun check-declared-package-homes (w)
+  "M3h boot-17 gate: every cold symbol's home package is one PKGDCL
+declares, i.e. one BUILD-INITIAL-PACKAGES will create before the
+FIXUP-SYMBOL-PACKAGE sweep PKG-FIND-PACKAGEs each symbol's package-slot
+string (package.lisp:2398).  An undeclared home (CLTL-INTERNALS) makes
+that sweep SIGNAL PACKAGE-NOT-FOUND pre-banner."
+  (let ((bad nil))
+    (maphash (lambda (key vma)
+               (declare (ignore vma))
+               (let ((pkg (cdr key)))
+                 (when (and pkg (not (cold-declared-package-p pkg)))
+                   (pushnew pkg bad :test #'string=))))
+             (cold-world-symbols w))
+    (cold-check (null bad)
+                "every symbol home is a PKGDCL-declared package ~
+(undeclared: ~S)" bad)))
+
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
 and the periodic timer call pre-banner are real compiled functions (not
@@ -1625,6 +1642,9 @@ prints the R1 unbound-function-cell audit."
         (check-split-symbol-resolution w)
         ;; NIL/T architectural blocks fully stamped (M3h boot 16).
         (check-nil-t-stamp w)
+        ;; No symbol homed in a package BUILD-INITIAL-PACKAGES won't
+        ;; create (M3h boot 17).
+        (check-declared-package-homes w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model

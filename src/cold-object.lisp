@@ -258,11 +258,23 @@ FORMAT and suppress the FBOUNDP-guarded FORMAT-COLD-LOAD boot stub
                                                         *cold-package-uses*)))))))
             finally (return nil)))))
 
+(defun cold-declared-package-p (name)
+  "Does PKGDCL declare NAME, so BUILD-INITIAL-PACKAGES will create it at
+first boot?  With no graph loaded every name passes."
+  (or (null *cold-package-uses*)
+      (nth-value 1 (gethash name *cold-package-uses*))))
+
 (defun cold-resolve-home (pname context-package)
-  "Home package PNAME should intern under, seen from CONTEXT-PACKAGE."
+  "Home package PNAME should intern under, seen from CONTEXT-PACKAGE.
+Dist homes that PKGDCL never declares (CLTL-INTERNALS: created by a
+later system, present in the dist world) are not candidates -- a cold
+symbol whose package slot names one would make the FIXUP-SYMBOL-PACKAGE
+sweep SIGNAL PACKAGE-NOT-FOUND pre-banner (M3h boot 17); such
+references intern under the file's own package instead."
   (let* ((ctx (cold-package-primary context-package))
-         (homes (and *cold-symbol-homes*
-                     (gethash pname *cold-symbol-homes*))))
+         (homes (remove-if-not #'cold-declared-package-p
+                               (and *cold-symbol-homes*
+                                    (gethash pname *cold-symbol-homes*)))))
     (cond ((null homes) ctx)
           ((null (rest homes)) (first homes))
           ;; A package's own symbol shadows inherited ones.
