@@ -1220,26 +1220,74 @@ cdr-nil so the list ends at the area count."
       (cold-check (= (ldb (byte 2 6) tag) 0)
                   "penultimate area Q is cdr-next (~2,'0X)" tag))))
 
+(defun cold-boot-init-forms (w)
+  "Symbol vma -> raw init-form Q (tag . data) from the world's
+SI:*COLD-LOAD-VARIABLE-INITIALIZATIONS*.  LISP-INITIALIZE-FIRST-TIME
+does (SET VAR VAL) with VAL *unevaluated* for every listed variable
+still unbound at first boot (sys/cold-load.lisp:527-528), BEFORE the
+symbol-cell link pass -- so for the link invariant, an unbound value
+cell whose symbol has an init row is effectively bound to the raw form
+\(M3h boot 22: DEFAULT-CONS-AREA got the symbol WORKING-STORAGE-AREA)."
+  (let ((map (make-hash-table))
+        (dtp-list (cold-dtp w "LIST"))
+        (dtp-symbol (cold-dtp w "SYMBOL")))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q
+         w (make-vsym "SYSTEM-INTERNALS"
+                      "*COLD-LOAD-VARIABLE-INITIALIZATIONS*"))
+      (when boundp
+        (cold-map-list
+         w tag data
+         (lambda (et ed evma)
+           (declare (ignore evma))
+           (when (= (tag-type et) dtp-list)
+             (let ((row nil))
+               (cold-map-list w et ed
+                              (lambda (it id ivma)
+                                (declare (ignore ivma))
+                                (push (cons it id) row)
+                                nil))
+               (setf row (nreverse row))
+               (when (and (= (length row) 2)
+                          (= (tag-type (car (first row))) dtp-symbol))
+                 (setf (gethash (cdr (first row)) map) (second row)))))
+           nil))))
+    map))
+
 (defun check-bootstrap-link-invariant (w)
   "M3h boot 21 gate: BOOTSTRAP-LINK-SYMBOL-CELLS walks the
 *LINKED-SYMBOL-CELLS* records at first boot and FERRORs \"Can't link two
 cells with different values.\" when a record's two cells are both bound
 with non-EQ contents (sys2/memory-cold.lisp:421-426).  Every record's
 pair -- value cells for :VARIABLE, function cells for :FUNCTION -- must
-leave the build with at most one bound side, or two EQ ones (boot 21:
-LDATA's eager DEFVAR *READTABLE* stamp vs rdtbl's SETQ READTABLE)."
+reach the link pass with at most one bound side, or two EQ ones (boot 21:
+LDATA's eager DEFVAR *READTABLE* stamp vs rdtbl's SETQ READTABLE).
+Boot 22 extension: the invariant holds at BOOT, after the init loop has
+raw-SET every still-unbound listed variable, so an unbound value cell
+with an init row counts as bound to that raw form.  (The FSET stub loop
+at cold-load.lisp:530 is the function-cell analog, but no stub name is a
+link record, so function cells compare as built.)"
   (let ((bad nil)
         (n 0)
-        (dtp-null (cold-dtp w "NULL")))
+        (dtp-null (cold-dtp w "NULL"))
+        (inits (cold-boot-init-forms w)))
     (dolist (rec (cold-world-linked-cells w))
       (destructuring-bind (from to type) rec
         (incf n)
-        (let ((off (if (string= (vsym-name type) "FUNCTION") 2 1)))
-          (flet ((cell-q (vsym)
-                   (cw-ref w (cold-follow-cell
-                              w (+ off (cold-vsym w vsym))))))
-            (multiple-value-bind (ft fd) (cell-q from)
-              (multiple-value-bind (tt td) (cell-q to)
+        (let* ((funp (string= (vsym-name type) "FUNCTION"))
+               (off (if funp 2 1)))
+          (flet ((effective-q (vsym)
+                   (multiple-value-bind (tag data)
+                       (cw-ref w (cold-follow-cell
+                                  w (+ off (cold-vsym w vsym))))
+                     (let ((init (and (= (tag-type tag) dtp-null)
+                                      (not funp)
+                                      (gethash (cold-vsym w vsym) inits))))
+                       (if init
+                           (values (car init) (cdr init))
+                           (values tag data))))))
+            (multiple-value-bind (ft fd) (effective-q from)
+              (multiple-value-bind (tt td) (effective-q to)
                 (when (and (/= (tag-type ft) dtp-null)
                            (/= (tag-type tt) dtp-null)
                            (not (cold-q-eq ft fd tt td)))

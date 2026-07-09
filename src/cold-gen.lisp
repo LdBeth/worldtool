@@ -128,19 +128,6 @@ boot, whereas the guarded shape no-ops once the symbol is bound."
                    (vsym-p (second (second set-form))))
           (values (second (second set-form)) (third set-form)))))))
 
-(defun cold-linked-variable-vmas (w)
-  "Symbol vmas on either side of a :VARIABLE record in LINKED-CELLS.
-BOOTSTRAP-FORWARD-SYMBOL-CELLS binds the unbound side of every value
-link by copying the bound side (sys2/memory-cold.lisp:427-430) BEFORE
-the deferred MAPC runs, so these cells need no build-time stamp -- and
-stamping one whose partner is bound differently is the exact state
-BOOTSTRAP-LINK-SYMBOL-CELLS FERRORs on (M3h boot 21)."
-  (let ((set (make-hash-table)))
-    (dolist (rec (cold-world-linked-cells w) set)
-      (when (string= (vsym-name (third rec)) "VARIABLE")
-        (setf (gethash (cold-vsym w (first rec)) set) t
-              (gethash (cold-vsym w (second rec)) set) t)))))
-
 (defun cold-reconcile-linked-defvars (w)
   "M3h boot 21: BOOTSTRAP-LINK-SYMBOL-CELLS FERRORs \"Can't link two
 cells with different values.\" when a permanent-links record's cells are
@@ -177,14 +164,18 @@ bound with different values and neither is a defvar stamp"
                     (cw-set w (cold-value-cell w victim)
                             (tag 0 (cold-dtp w "NULL"))
                             (cold-vsym w victim))
-                    (let ((*cold-default-package* "SYSTEM-INTERNALS"))
-                      (cold-defer w (list (si-vsym "IF")
-                                          (list (si-vsym "BOUNDP")
-                                                (list (si-vsym "QUOTE")
-                                                      victim))
-                                          nil
-                                          set-form)
-                                  "linked defvar re-deferred"))
+                    ;; A retry-pass stamp's BOUNDP-guarded original is
+                    ;; still on the deferred list; only eager
+                    ;; COLD-DO-DEFVAR stamps need their SET re-deferred.
+                    (unless (eq set-form :already-deferred)
+                      (let ((*cold-default-package* "SYSTEM-INTERNALS"))
+                        (cold-defer w (list (si-vsym "IF")
+                                            (list (si-vsym "BOUNDP")
+                                                  (list (si-vsym "QUOTE")
+                                                        victim))
+                                            nil
+                                            set-form)
+                                    "linked defvar re-deferred")))
                     (incf fixed)))))))))))
 
 (defun cold-retry-deferred-defvars (w)
@@ -194,23 +185,28 @@ the machinery pass stamps AFTER the load) deferred a BOUNDP-guarded SET
 -- but MAKE-SYMBOL reads the variable inside BUILD-INITIAL-PACKAGES,
 before the deferred list is MAPCed.  Retry each such form now, post
 machinery: whatever evaluates is stamped, and the still-guarded deferred
-form no-ops at boot.  Returns the number stamped."
-  (let ((stamped 0)
-        (linked (cold-linked-variable-vmas w)))
+form no-ops at boot.  Value-linked symbols are stamped like any other --
+LISP-INITIALIZE-FIRST-TIME's init loop SETs every still-unbound listed
+variable to its RAW init form before the link pass
+\(sys/cold-load.lisp:527-528), so leaving DEFAULT-CONS-AREA unbound
+shipped it the symbol WORKING-STORAGE-AREA against *DEFAULT-CONS-AREA*'s
+8, the exact both-bound-different FERROR the boot-21 blanket skip meant
+to prevent (M3h boot 22).  Each stamp records provenance so the
+reconcile pass running next can revert it if it does conflict.
+Returns the number stamped."
+  (let ((stamped 0))
     (dolist (entry (reverse (cold-world-deferred w)))
       (destructuring-bind (pkg . form) entry
         (multiple-value-bind (sym valform) (cold-deferred-defvar-parts form)
           (when (and sym
-                     ;; Value-linked cells get bound by the boot link
-                     ;; pass itself, before the deferred MAPC; stamping
-                     ;; one here risks the both-bound-different FERROR
-                     ;; (M3h boot 21).
-                     (not (gethash (cold-vsym w sym) linked))
                      (not (nth-value 2 (cold-symbol-value-q w sym))))
             (let ((*cold-default-package* pkg))
               (multiple-value-bind (tag data) (cold-eval-value w valform)
                 (when tag
                   (cold-set-symbol-value w sym tag data)
+                  (setf (gethash (cold-vsym w sym)
+                                 (cold-world-defvar-stamps w))
+                        :already-deferred)
                   (incf stamped))))))))
     ;; SI:COLD-LOAD-FUNCTION-PROPERTY-LISTS has no initializer anywhere
     ;; (fspec.lisp:385), but FUNCTION-SPEC-DEFAULT-HANDLER's cold path
