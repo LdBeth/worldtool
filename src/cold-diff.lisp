@@ -1475,7 +1475,173 @@ CLASS-OF belongs to FUTURE-COMMON-LISP (pkgdcl.lisp:1849), never CLOS
               "CLASS-OF resolves to FUTURE-COMMON-LISP")
   (cold-check (null (gethash (cons "CLASS-OF" "CLOS")
                              (cold-world-symbols w)))
-              "no cold symbol CLOS:CLASS-OF"))
+              "no cold symbol CLOS:CLASS-OF")
+  ;; M3h boot 20: SCL :IMPORT-FROMs *PRINT-READABLY* out of
+  ;; FUTURE-COMMON-LISP (pkgdcl.lisp:3620) -- a cold symbol homed in SCL
+  ;; makes IMPORT-INTERNAL signal NAME-CONFLICT-IN-IMPORT.
+  (cold-check (string= (cold-resolve-home "*PRINT-READABLY*"
+                                          "SYMBOLICS-COMMON-LISP")
+                       "FUTURE-COMMON-LISP")
+              "*PRINT-READABLY* resolves to FUTURE-COMMON-LISP")
+  (cold-check (null (gethash (cons "*PRINT-READABLY*"
+                                   "SYMBOLICS-COMMON-LISP")
+                             (cold-world-symbols w)))
+              "no cold symbol SCL:*PRINT-READABLY*"))
+
+(defun check-package-boot-simulation (w)
+  "M3h boot-20 gate: symbolically run BUILD-INITIAL-PACKAGES
+\(package.lisp:2358) over the emitted symbol table and the PKGDCL clause
+set -- the FIXUP-SYMBOL-PACKAGE sweep in address order, the shadow pass,
+the import-export pass in pkgdcl order, and the safeguarded-symbol
+check.  Any would-be signal is fatal pre-banner (SIGNAL-COLD-LOAD prints
+to unbound *TERMINAL-IO*, cold-load.lisp:345): NAME-CONFLICT-IN-EXPORT
+from EXPORT-INTERNAL's used-by loop or PKG-NEW-SYMBOL's fresh-external
+path (package.lisp:1473/1080), NAME-CONFLICT-IN-IMPORT from
+IMPORT-INTERNAL (package.lisp:1515), PACKAGE-LOCKED from a fresh intern
+into a locked (:EXTERNAL-ONLY) source outside its own WITH-PACKAGE-LOCK
+\(package.lisp:1097), and the \"didn't get safeguarded\" ERROR
+\(package.lisp:2437).  Symbol identity = (pname . home) cold keys;
+fresh boot interns get (pname :FRESH pkg) identities.  Visibility is
+CL:FIND-SYMBOL's: present, else the EXTERNALs of the DIRECT use list."
+  (unless *cold-package-defs*
+    (return-from check-package-boot-simulation))
+  (let ((present (make-hash-table :test #'equal))  ; (pkg . pname) -> (id . code)
+        (shadowsets (make-hash-table :test #'equal)) ; pkg -> id list
+        (uses (make-hash-table :test #'equal))       ; pkg -> primary use list
+        (users (make-hash-table :test #'equal))      ; pkg -> direct users
+        (extonly *cold-package-external-only*)
+        (fails nil))
+    (dolist (def *cold-package-defs*)
+      (setf (gethash (getf def :pkg) uses)
+            (mapcar #'cold-package-primary
+                    (gethash (getf def :pkg) *cold-package-uses*))))
+    (dolist (def *cold-package-defs*)
+      (dolist (u (gethash (getf def :pkg) uses))
+        (push (getf def :pkg) (gethash u users))))
+    (labels ((fail (fmt &rest args)
+               (push (apply #'format nil fmt args) fails))
+             (visible (pname pkg)
+               (let ((own (gethash (cons pkg pname) present)))
+                 (if own
+                     (car own)
+                     (loop for q in (gethash pkg uses)
+                           for e = (gethash (cons q pname) present)
+                           when (and e (eq (cdr e) :external))
+                             return (car e)))))
+             (shadowed-p (id pkg)
+               (member id (gethash pkg shadowsets) :test #'equal))
+             (add (pkg pname id code where)
+               ;; PKG-NEW-SYMBOL: a symbol becoming external is checked
+               ;; against everything visible in the direct users.
+               (when (eq code :external)
+                 (dolist (u (gethash pkg users))
+                   (let ((v (visible pname u)))
+                     (when (and v (not (equal v id))
+                                (not (shadowed-p v u)))
+                       (fail "~A: ~A:~A external conflicts with ~S in user ~A"
+                             where pkg pname v u)))))
+               (setf (gethash (cons pkg pname) present) (cons id code)))
+             (new-code (pkg)
+               (if (gethash pkg extonly) :external :internal))
+             (cl-intern (pname pkg unlocked where)
+               ;; CL:INTERN: visible symbol, else a fresh present one.
+               (or (visible pname pkg)
+                   (let ((id (list pname :fresh pkg)))
+                     (when (and (gethash pkg extonly) (not unlocked))
+                       (fail "~A: fresh intern of ~A into locked ~A ~
+(PACKAGE-LOCKED signal)" where pname pkg))
+                     (add pkg pname id (new-code pkg) where)
+                     id)))
+             (import-1 (s pname pkg where)
+               ;; IMPORT-INTERNAL: conflict against anything visible.
+               (let ((v (visible pname pkg)))
+                 (cond ((null v) (add pkg pname s (new-code pkg) where))
+                       ((not (equal v s))
+                        (fail "~A: NAME-CONFLICT-IN-IMPORT of ~A into ~A ~
+against ~S" where pname pkg v))
+                       ((not (gethash (cons pkg pname) present))
+                        (add pkg pname s (new-code pkg) where))))))
+      ;; FIXUP-SYMBOL-PACKAGE sweep: T and NIL by hand (homed LISP), then
+      ;; the cold symbols in address = interning order.
+      (let ((syms nil))
+        (maphash (lambda (key vma) (push (cons vma key) syms))
+                 (cold-world-symbols w))
+        (setf syms (sort syms #'< :key #'car))
+        (dolist (nt '("T" "NIL"))
+          (add "LISP" nt (cons nt "LISP") (new-code "LISP") "sweep"))
+        (loop for (nil . key) in syms
+              do (add (cdr key) (car key) key (new-code (cdr key))
+                      "sweep")))
+      ;; Shadow pass (PKG-BOOTSTRAP-SHADOW, MAKE-PACKAGE-SHADOW):
+      ;; :SHADOWING-IMPORT, then :SHADOW inside :IMPORT-FROM = shadowing
+      ;; import from the source, then plain :SHADOW.
+      (dolist (def *cold-package-defs*)
+        (let* ((pkg (getf def :pkg))
+               (shadow (getf def :shadow)))
+          (flet ((note-shadowing-import (s pname)
+                   (setf (gethash (cons pkg pname) present)
+                         (cons s :internal))
+                   (pushnew s (gethash pkg shadowsets) :test #'equal)))
+            (loop for (src . pname) in (getf def :shadowing-import)
+                  do (note-shadowing-import
+                      (cl-intern pname (cold-package-primary src) nil
+                                 "shadow pass")
+                      pname))
+            (dolist (grp (getf def :import-from))
+              (destructuring-bind (src . names) grp
+                (dolist (n names)
+                  (when (member n shadow :test #'string=)
+                    (note-shadowing-import
+                     (cl-intern n (cold-package-primary src) nil
+                                "shadow pass")
+                     n)))))
+            (dolist (n shadow)
+              (let ((own (gethash (cons pkg n) present)))
+                (unless own
+                  (setf own (cons (list n :fresh pkg) :internal)
+                        (gethash (cons pkg n) present) own))
+                (pushnew (car own) (gethash pkg shadowsets)
+                         :test #'equal))))))
+      ;; Import-export pass (PKG-BOOTSTRAP-IMPORT-EXPORT), pkgdcl order;
+      ;; each package unlocked for its own clauses (WITH-PACKAGE-LOCK).
+      (dolist (def *cold-package-defs*)
+        (let ((pkg (getf def :pkg)))
+          (loop for (src . pname) in (getf def :import)
+                do (import-1 (cl-intern pname (cold-package-primary src)
+                                        nil "import")
+                             pname pkg "import"))
+          (dolist (grp (getf def :import-from))
+            (destructuring-bind (src . names) grp
+              (let ((srcp (cold-package-primary src)))
+                (dolist (n names)
+                  (import-1 (cl-intern n srcp (string= srcp pkg)
+                                       "import-from")
+                            n pkg "import-from")))))
+          (dolist (n (getf def :export))
+            (let ((s (cl-intern n pkg t "export")))
+              (dolist (u (gethash pkg users))
+                (let ((v (visible n u)))
+                  (when (and v (not (equal v s)) (not (shadowed-p v u)))
+                    (fail "export: NAME-CONFLICT-IN-EXPORT of ~A from ~A ~
+against ~S in user ~A" n pkg v u))))
+              (setf (gethash (cons pkg n) present) (cons s :external))))))
+      ;; Safeguarded check: present via INTERN-LOCAL-SOFT and in a
+      ;; wired/safeguarded zone (IMach ACTUAL-STORAGE-CATEGORY = vma zone).
+      (dolist (def *cold-package-defs*)
+        (let ((pkg (getf def :pkg)))
+          (dolist (n (getf def :safeguarded))
+            (cond ((member n '("NIL" "T") :test #'string=)) ; wired blocks
+                  ((not (gethash (cons pkg n) present))
+                   (fail "safeguard: ~A not present in ~A" n pkg))
+                  (t
+                   (let ((vma (gethash (cons n pkg)
+                                       (cold-world-symbols w))))
+                     (unless (and vma (>= vma #xF0000000))
+                       (fail "safeguard: ~A:~A at ~:[no vma~;#x~:*~X~] ~
+is not in a safeguarded/wired zone" pkg n vma)))))))))
+    (cold-check (null fails)
+                "package boot simulation clean (~D failures~@[; first: ~A~])"
+                (length fails) (first (last fails)))))
 
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
@@ -1940,6 +2106,17 @@ prints the R1 unbound-function-cell audit."
         ;; No symbol homed below a pkgdcl exporter of its pname
         ;; (M3h boot 19).
         (check-export-home-conflicts w)
+        ;; Full BUILD-INITIAL-PACKAGES simulation: sweep + shadow +
+        ;; import-export + safeguarded, exact package.lisp conflict
+        ;; predicates (M3h boot 20).
+        (check-package-boot-simulation w)
+        ;; The safeguarded pre-intern block mirrors the dist: KEYWORD's
+        ;; clause first at #xF0001054, right after the storage tables.
+        (cold-check (eql (gethash (cons "OBS" "KEYWORD")
+                                  (cold-world-symbols w))
+                         #xF0001054)
+                    "safeguarded symbol block starts at KEYWORD:OBS ~
+#xF0001054 (dist ground truth)")
         ;; R2: referenced-unbound value cells all reviewed (M3h boot 18).
         (check-unbound-value-cells w)
         ;; Emit with the map split and re-read.

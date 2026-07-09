@@ -289,15 +289,19 @@ finalize to defer.  Returns the number of packages."
 (defun cold-build-package-graph (path)
   "Fill *COLD-PACKAGE-USES* / *COLD-PACKAGE-IMPORTS* from PKGDCL for
 COLD-RESOLVE-HOME's graph walk (cold-object.lisp), *COLD-PACKAGE-EXPORTS*
-/ *COLD-PACKAGE-SHADOWS* for COLD-ADJUST-HOME-FOR-EXPORTS, and fold
-pkgdcl nicknames/prefix-names into *COLD-PACKAGE-ALIASES*.  Must run
-before any vbin loads -- symbol interning depends on it.  A DEFPACKAGE
-without :USE defaults to GLOBAL (package.lisp:503).  Returns the
-package count."
+/ *COLD-PACKAGE-SHADOWS* / *COLD-PACKAGE-EXTERNAL-ONLY* for
+COLD-ADJUST-HOME-FOR-EXPORTS, fold pkgdcl nicknames/prefix-names into
+*COLD-PACKAGE-ALIASES*, and keep the full ordered clause set in
+*COLD-PACKAGE-DEFS* for the boot simulation gate and the safeguarded
+symbol pre-intern.  Must run before any vbin loads -- symbol interning
+depends on it.  A DEFPACKAGE without :USE defaults to GLOBAL
+\(package.lisp:503).  Returns the package count."
   (let ((uses (make-hash-table :test #'equal))
         (imports (make-hash-table :test #'equal))
         (exports (make-hash-table :test #'equal))
         (shadows (make-hash-table :test #'equal))
+        (external-only (make-hash-table :test #'equal))
+        (defs nil)
         (count 0))
     (dolist (form (read-genera-source path))
       (destructuring-bind (head name . clauses) form
@@ -305,7 +309,10 @@ package count."
           (error "PKGDCL contains a non-DEFPACKAGE form: ~S" head))
         (incf count)
         (let ((pkg (pkgdcl-string name))
-              (use-seen nil))
+              (use-seen nil)
+              (d-shadow nil) (d-shadowing nil) (d-import nil)
+              (d-import-from nil) (d-export nil) (d-safeguarded nil)
+              (d-ext nil))
           (dolist (clause clauses)
             (multiple-value-bind (kw args)
                 (if (consp clause)
@@ -321,11 +328,15 @@ package count."
                                          args
                                          (list args))))
                          (dolist (g groups)
-                           (let ((src (pkgdcl-string (first g))))
+                           (let ((src (pkgdcl-string (first g)))
+                                 (names nil))
                              (dolist (s (rest g))
-                               (setf (gethash (cons pkg (pkgdcl-string s))
-                                              imports)
-                                     src))))))
+                               (let ((n (pkgdcl-string s)))
+                                 (push n names)
+                                 (setf (gethash (cons pkg n) imports)
+                                       src)))
+                             (push (cons src (nreverse names))
+                                   d-import-from)))))
                       ((or (string= kwname "IMPORT")
                            (string= kwname "SHADOWING-IMPORT"))
                        ;; Explicitly qualified symbols; the vsym's own
@@ -338,21 +349,40 @@ package count."
                                    t))
                            (let ((p (vsym-package s)))
                              (unless (member p '(:default :uninterned))
-                               (setf (gethash (cons pkg (vsym-name s))
-                                              imports)
-                                     (canonical-package-name p)))))))
+                               (let ((src (canonical-package-name p)))
+                                 (setf (gethash (cons pkg (vsym-name s))
+                                                imports)
+                                       src)
+                                 (if (string= kwname "SHADOWING-IMPORT")
+                                     (push (cons src (vsym-name s))
+                                           d-shadowing)
+                                     (push (cons src (vsym-name s))
+                                           d-import))))))))
                       ((string= kwname "EXPORT")
                        (dolist (s args)
                          (when (or (stringp s) (vsym-p s))
+                           (push (pkgdcl-string s) d-export)
                            (pushnew pkg
                                     (gethash (pkgdcl-string s) exports)
                                     :test #'string=))))
                       ((string= kwname "SHADOW")
                        (dolist (s args)
                          (when (or (stringp s) (vsym-p s))
+                           (push (pkgdcl-string s) d-shadow)
                            (setf (gethash (cons pkg (pkgdcl-string s))
                                           shadows)
                                  t))))
+                      ((string= kwname "EXTERNAL-ONLY")
+                       ;; (:EXTERNAL-ONLY T) or the bare keyword; also
+                       ;; locks the package (MAKE-PACKAGE, package.lisp:610).
+                       (setf d-ext (not (and args (vsym-p (first args))
+                                             (string= (vsym-name (first args))
+                                                      "NIL"))))
+                       (when d-ext (setf (gethash pkg external-only) t)))
+                      ((string= kwname "SAFEGUARDED")
+                       (dolist (s args)
+                         (when (or (stringp s) (vsym-p s))
+                           (push (pkgdcl-string s) d-safeguarded))))
                       ((or (string= kwname "NICKNAMES")
                            (string= kwname "PREFIX-NAME"))
                        (when *cold-package-aliases*
@@ -362,9 +392,53 @@ package count."
                                (setf (gethash nn *cold-package-aliases*)
                                      pkg))))))))))
           (unless use-seen
-            (setf (gethash pkg uses) (list "GLOBAL"))))))
+            (setf (gethash pkg uses) (list "GLOBAL")))
+          (push (list :pkg pkg
+                      :shadow (nreverse d-shadow)
+                      :shadowing-import (nreverse d-shadowing)
+                      :import (nreverse d-import)
+                      :import-from (nreverse d-import-from)
+                      :export (nreverse d-export)
+                      :external-only d-ext
+                      :safeguarded (nreverse d-safeguarded))
+                defs))))
+    ;; KEYWORD's PKG-NEW-KEYWORD-SYMBOL makes every intern external
+    ;; (package.lisp:1128) -- external-only for conflict purposes.
+    (setf (gethash "KEYWORD" external-only) t)
     (setf *cold-package-uses* uses
           *cold-package-imports* imports
           *cold-package-exports* exports
-          *cold-package-shadows* shadows)
+          *cold-package-shadows* shadows
+          *cold-package-external-only* external-only
+          *cold-package-defs* (nreverse defs))
+    count))
+
+(defun cold-intern-safeguarded-symbols (w)
+  "Pre-intern the PKGDCL :SAFEGUARDED symbols in SAFEGUARDED-OBJECTS-AREA
+\(zone F0) before any vbin reference interns them elsewhere.
+BUILD-INITIAL-PACKAGES' final step INTERN-LOCAL-SOFTs each name and
+ERRORs \"didn't get safeguarded\" unless the symbol is present in its
+package with a non-:UNSAFEGUARDED ACTUAL-STORAGE-CATEGORY -- on IMach
+that category is literally the symbol's vma zone
+\(sys2/storage-categories.lisp:89).  NIL and T are the architectural
+wired-zone blocks and are skipped.  The dist block sits at #xF0001054
+right after the reserved storage tables: KEYWORD's clause first, then
+pkgdcl order; allocating in that order here reproduces those addresses.
+Returns the count (dist ground truth: 50)."
+  (let ((count 0))
+    (flet ((intern-clause (def)
+             (let ((pkg (getf def :pkg)))
+               (dolist (n (getf def :safeguarded))
+                 (unless (member n '("NIL" "T") :test #'string=)
+                   (let ((home (cold-resolve-home n pkg)))
+                     (unless (string= home pkg)
+                       (error "Safeguarded ~A of ~A resolves to home ~A"
+                              n pkg home)))
+                   (cold-symbol w n pkg :area "SAFEGUARDED-OBJECTS-AREA")
+                   (incf count))))))
+      (let ((kw (find "KEYWORD" *cold-package-defs*
+                      :key (lambda (d) (getf d :pkg)) :test #'string=)))
+        (when kw (intern-clause kw))
+        (dolist (def *cold-package-defs*)
+          (unless (eq def kw) (intern-clause def)))))
     count))

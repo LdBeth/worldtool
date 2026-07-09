@@ -952,6 +952,10 @@ compiler-side and have no cold definition or boot effect.")
 Returns the number of fixups that never resolved (their errors are
 collected into *COLD-EVAL-STATS* under \"fixup failures\")."
   (cold-stamp-nil-t w)
+  ;; PKGDCL :SAFEGUARDED symbols go to SAFEGUARDED-OBJECTS-AREA before
+  ;; any vbin reference interns them in SYMBOL-AREA (M3h boot 20).
+  (when *cold-package-defs*
+    (cold-intern-safeguarded-symbols w))
   (with-cold-materializer (w)
     (let ((*cold-load-time-eval* #'cold-operand-eval))
       (dolist (spec *cold-load-order*)

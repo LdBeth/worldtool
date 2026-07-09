@@ -214,6 +214,8 @@ dotted (\"syntax\" . \"name\") pairs fold to the name."
 (defvar *cold-package-imports* nil)  ; pkgdcl: (primary . pname) -> source pkg
 (defvar *cold-package-exports* nil)  ; pkgdcl: pname -> list of exporting pkgs
 (defvar *cold-package-shadows* nil)  ; pkgdcl: (primary . pname) -> T
+(defvar *cold-package-external-only* nil) ; pkgdcl: primary -> T (locked; interns external)
+(defvar *cold-package-defs* nil)     ; pkgdcl: ordered per-package clause plists
 
 (defparameter *cold-home-priority*
   '("GLOBAL" "LISP" "SYSTEM" "SYMBOLICS-COMMON-LISP" "SYSTEM-INTERNALS"
@@ -266,53 +268,55 @@ first boot?  With no graph loaded every name passes."
   (or (null *cold-package-uses*)
       (nth-value 1 (gethash name *cold-package-uses*))))
 
-(defun cold-package-uses-p (user provider)
-  "Is PROVIDER on USER's transitive pkgdcl :USE list (strictly below it)?"
-  (when *cold-package-uses*
-    (let ((queue (mapcar #'cold-package-primary
-                         (gethash (cold-package-primary user)
-                                  *cold-package-uses*)))
-          (seen nil))
-      (loop while queue
-            for pkg = (pop queue)
-            unless (member pkg seen :test #'string=)
-              do (push pkg seen)
-                 (when (string= pkg provider) (return t))
-                 (setf queue (nconc queue
-                                    (mapcar #'cold-package-primary
-                                            (gethash pkg
-                                                     *cold-package-uses*))))
-            finally (return nil)))))
+(defun cold-use-provider-of (pname pkg)
+  "The first directly-:USEd package whose PKGDCL :EXPORT lists PNAME.
+This is CL:FIND-SYMBOL's inheritance reach (package.lisp:906): present
+symbols, then the EXTERNALs of the DIRECT use list only -- never
+transitive.  Deeper chains resolve stepwise, and only through packages
+that re-export the pname themselves."
+  (when (and *cold-package-uses* *cold-package-exports*)
+    (let ((exporters (gethash pname *cold-package-exports*)))
+      (when exporters
+        (loop for q in (gethash pkg *cold-package-uses*)
+              for qq = (cold-package-primary q)
+              when (member qq exporters :test #'string=)
+                return qq)))))
 
 (defun cold-adjust-home-for-exports (pname home)
-  "Re-home PNAME onto its root exporter when HOME inherits from a package
-whose PKGDCL :EXPORT lists PNAME.  BUILD-INITIAL-PACKAGES' import-export
-pass EXPORTs each such pname from the exporting package P; if the cold
-symbol lives in a package that :USEs P, that export INTERNs a fresh
-symbol in P and then signals NAME-CONFLICT-IN-EXPORT against the cold
-one (package.lisp PKG-NEW-SYMBOL) -- the dist's home is the warm
-post-ADJUST-HOME-PACKAGES state, not what the boot tolerates.  CLASS-OF
-is the witness: dist homes it in CLOS, but FUTURE-COMMON-LISP exports it
-\(pkgdcl.lisp:1849) and CLOS (:USE FUTURE-COMMON-LISP) -- M3h boot 19.
-An exporter that itself imports the pname redirects to the import
-source; a HOME that pkgdcl :SHADOWs keeps its own symbol."
-  (if (or (null *cold-package-exports*) (null home))
+  "Re-home PNAME from HOME (the dist's warm state -- ADJUST-HOME-PACKAGES,
+package.lisp:2474, re-homes CLOS/CONDITIONS externals and an explicit
+SCL/FCL list after the boot) onto the package whose symbol PNAME must
+already be at first boot.  Two relations, followed to a fixed point:
+\(a) HOME has a pkgdcl :IMPORT-FROM entry for PNAME -- its symbol IS the
+source package's; a cold symbol homed at HOME instead makes the import
+pass signal NAME-CONFLICT-IN-IMPORT against the fresh symbol INTERN
+creates in the source (*PRINT-READABLY*: dist homes it in SCL, but SCL
+imports it from FUTURE-COMMON-LISP, pkgdcl.lisp:3620 -- M3h boot 20).
+\(b) a package HOME directly :USEs has PNAME in its :EXPORT -- that
+export INTERNs a fresh symbol there and signals NAME-CONFLICT-IN-EXPORT
+against the cold one presented by HOME (EXPORT-INTERNAL's used-by loop,
+package.lisp:1473; CLASS-OF: dist homes it in CLOS, but
+FUTURE-COMMON-LISP exports it, pkgdcl.lisp:1849, and CLOS
+\(:USE FUTURE-COMMON-LISP) -- M3h boot 19).  Direct use only: conflict
+checks reach exactly one :USE level, so a distinct symbol two levels
+down is legitimate and must NOT be merged.  A HOME that pkgdcl :SHADOWs
+keeps its own symbol against (b); (a) still applies (:SHADOW after
+:IMPORT-FROM is Genera's spelling of :SHADOWING-IMPORT, pkgdcl.lisp:62
+-- the symbol is still the source's)."
+  (if (null home)
       home
       (loop with cur = (cold-package-primary home)
             repeat 8
-            for exp = (and (not (gethash (cons cur pname)
-                                         *cold-package-shadows*))
-                           (find-if (lambda (p)
-                                      (and (not (string= p cur))
-                                           (cold-package-uses-p cur p)))
-                                    (gethash pname *cold-package-exports*)))
-            while exp
-            do (loop repeat 8
-                     for src = (gethash (cons exp pname)
-                                        *cold-package-imports*)
-                     while src
-                     do (setf exp (cold-package-primary src)))
-               (setf cur exp)
+            for next = (or (let ((src (and *cold-package-imports*
+                                           (gethash (cons cur pname)
+                                                    *cold-package-imports*))))
+                             (and src (cold-package-primary src)))
+                           (and (not (and *cold-package-shadows*
+                                          (gethash (cons cur pname)
+                                                   *cold-package-shadows*)))
+                                (cold-use-provider-of pname cur)))
+            while (and next (not (string= next cur)))
+            do (setf cur next)
             finally (return cur))))
 
 (defun cold-resolve-home (pname context-package)
@@ -339,13 +343,15 @@ symbol (COLD-ADJUST-HOME-FOR-EXPORTS, M3h boot 19)."
                         when (member p homes :test #'string=) return p)
                   (first homes)))))))
 
-(defun cold-symbol (w pname package-name)
-  "Intern (PNAME, home of PACKAGE-NAME); returns the symbol block VMA."
+(defun cold-symbol (w pname package-name &key (area "SYMBOL-AREA"))
+  "Intern (PNAME, home of PACKAGE-NAME); returns the symbol block VMA.
+AREA is SYMBOL-AREA except for the pkgdcl :SAFEGUARDED pre-intern
+\(COLD-INTERN-SAFEGUARDED-SYMBOLS), which must land in zone F0."
   (when package-name
     (setf package-name (cold-resolve-home pname package-name)))
   (let ((key (cons pname package-name)))
     (or (and package-name (gethash key (cold-world-symbols w)))
-        (let* ((vma (cold-alloc w "SYMBOL-AREA" 5))
+        (let* ((vma (cold-alloc w area 5))
                (dtp-null (cold-dtp w "NULL")))
           (when package-name
             (setf (gethash key (cold-world-symbols w)) vma))
