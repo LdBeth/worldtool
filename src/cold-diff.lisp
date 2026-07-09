@@ -1448,6 +1448,35 @@ that sweep SIGNAL PACKAGE-NOT-FOUND pre-banner."
                 "every symbol home is a PKGDCL-declared package ~
 (undeclared: ~S)" bad)))
 
+(defun check-export-home-conflicts (w)
+  "M3h boot-19 gate: no cold symbol is homed in a package that inherits
+\(pkgdcl :USE, transitively) from a package whose :EXPORT lists the same
+pname -- BUILD-INITIAL-PACKAGES' import-export pass would EXPORT the
+pname from the exporter, INTERN a fresh symbol there, and signal
+NAME-CONFLICT-IN-EXPORT against the cold one.  The emitted symbol table
+must be a fixed point of COLD-ADJUST-HOME-FOR-EXPORTS.  Witness:
+CLASS-OF belongs to FUTURE-COMMON-LISP (pkgdcl.lisp:1849), never CLOS
+\(the dist's warm home)."
+  (let ((bad nil))
+    (maphash (lambda (key vma)
+               (declare (ignore vma))
+               (destructuring-bind (pname . home) key
+                 (when (and home
+                            (not (string= (cold-adjust-home-for-exports
+                                           pname home)
+                                          home)))
+                   (push key bad))))
+             (cold-world-symbols w))
+    (cold-check (null bad)
+                "no symbol homed below an exporter of its pname ~
+(~D found: ~S)" (length bad) (subseq bad 0 (min 5 (length bad)))))
+  (cold-check (string= (cold-resolve-home "CLASS-OF" "CLOS-INTERNALS")
+                       "FUTURE-COMMON-LISP")
+              "CLASS-OF resolves to FUTURE-COMMON-LISP")
+  (cold-check (null (gethash (cons "CLASS-OF" "CLOS")
+                             (cold-world-symbols w)))
+              "no cold symbol CLOS:CLASS-OF"))
+
 (defun check-embedded-network-functions (w)
   "M3h gate: the recompiled emb-ethernet-driver entries initialize-disk
 and the periodic timer call pre-banner are real compiled functions (not
@@ -1678,7 +1707,6 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "COMPILER:DEFAULT-WARNING-DEFINITION-TYPE"
     "COMPILER:DEFAULT-WARNING-FUNCTION"
     "COMPILER:QC-FILE-READ-IN-PROGRESS"
-    "CONDITIONS:CONDITION"
     "DEBUGGER:.RESTART.DESCRIPTION."
     "DEBUGGER:*TRAP-DISPATCH-TABLE*"
     "DEBUGGER:REPORT-IGNORED-ERRORS"
@@ -1687,6 +1715,7 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "DYNAMIC-WINDOWS:*ACCEPT-BLIP-CHARS*"
     "DYNAMIC-WINDOWS:*ACCEPT-HELP*"
     "FORMAT:*COMMON-LISP-FORMAT*"
+    "FUTURE-COMMON-LISP:CONDITION"
     "GLOBAL:PKG-GLOBAL-PACKAGE"
     "GLOBAL:PKG-SYSTEM-PACKAGE"
     "GLOBAL:RETURN-LIST"
@@ -1825,7 +1854,9 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "ZWEI:*KILL-HISTORY*"
     "ZWEI:*MODE-LIST-SYNTAX-TABLE*"
     )
-  "R2 danger set as reviewed 2026-07-05 (M3h boot 18).  Every entry was
+  "R2 danger set as reviewed 2026-07-05 (M3h boot 18; boot 19 re-homed
+CONDITIONS:CONDITION to FUTURE-COMMON-LISP, its pkgdcl exporter -- same
+symbol, same warm-only classification).  Every entry was
 classified against its source: bind-before-read (LET/argument binding of
 a special -- SORT-*, XR-*, SETSYNTAX-*, *PRINT-ERROR*, IGNORE-ERRORS'
 DBG:REPORT-IGNORED-ERRORS, METERING's flag, FORMAT:*COMMON-LISP-FORMAT*),
@@ -1906,6 +1937,9 @@ prints the R1 unbound-function-cell audit."
         ;; No symbol homed in a package BUILD-INITIAL-PACKAGES won't
         ;; create (M3h boot 17).
         (check-declared-package-homes w)
+        ;; No symbol homed below a pkgdcl exporter of its pname
+        ;; (M3h boot 19).
+        (check-export-home-conflicts w)
         ;; R2: referenced-unbound value cells all reviewed (M3h boot 18).
         (check-unbound-value-cells w)
         ;; Emit with the map split and re-read.

@@ -288,12 +288,16 @@ finalize to defer.  Returns the number of packages."
 
 (defun cold-build-package-graph (path)
   "Fill *COLD-PACKAGE-USES* / *COLD-PACKAGE-IMPORTS* from PKGDCL for
-COLD-RESOLVE-HOME's graph walk (cold-object.lisp), and fold pkgdcl
-nicknames/prefix-names into *COLD-PACKAGE-ALIASES*.  Must run before any
-vbin loads -- symbol interning depends on it.  A DEFPACKAGE without :USE
-defaults to GLOBAL (package.lisp:503).  Returns the package count."
+COLD-RESOLVE-HOME's graph walk (cold-object.lisp), *COLD-PACKAGE-EXPORTS*
+/ *COLD-PACKAGE-SHADOWS* for COLD-ADJUST-HOME-FOR-EXPORTS, and fold
+pkgdcl nicknames/prefix-names into *COLD-PACKAGE-ALIASES*.  Must run
+before any vbin loads -- symbol interning depends on it.  A DEFPACKAGE
+without :USE defaults to GLOBAL (package.lisp:503).  Returns the
+package count."
   (let ((uses (make-hash-table :test #'equal))
         (imports (make-hash-table :test #'equal))
+        (exports (make-hash-table :test #'equal))
+        (shadows (make-hash-table :test #'equal))
         (count 0))
     (dolist (form (read-genera-source path))
       (destructuring-bind (head name . clauses) form
@@ -328,11 +332,27 @@ defaults to GLOBAL (package.lisp:503).  Returns the package count."
                        ;; package is the source.
                        (dolist (s args)
                          (when (vsym-p s)
+                           (when (string= kwname "SHADOWING-IMPORT")
+                             (setf (gethash (cons pkg (vsym-name s))
+                                            shadows)
+                                   t))
                            (let ((p (vsym-package s)))
                              (unless (member p '(:default :uninterned))
                                (setf (gethash (cons pkg (vsym-name s))
                                               imports)
                                      (canonical-package-name p)))))))
+                      ((string= kwname "EXPORT")
+                       (dolist (s args)
+                         (when (or (stringp s) (vsym-p s))
+                           (pushnew pkg
+                                    (gethash (pkgdcl-string s) exports)
+                                    :test #'string=))))
+                      ((string= kwname "SHADOW")
+                       (dolist (s args)
+                         (when (or (stringp s) (vsym-p s))
+                           (setf (gethash (cons pkg (pkgdcl-string s))
+                                          shadows)
+                                 t))))
                       ((or (string= kwname "NICKNAMES")
                            (string= kwname "PREFIX-NAME"))
                        (when *cold-package-aliases*
@@ -344,5 +364,7 @@ defaults to GLOBAL (package.lisp:503).  Returns the package count."
           (unless use-seen
             (setf (gethash pkg uses) (list "GLOBAL"))))))
     (setf *cold-package-uses* uses
-          *cold-package-imports* imports)
+          *cold-package-imports* imports
+          *cold-package-exports* exports
+          *cold-package-shadows* shadows)
     count))
