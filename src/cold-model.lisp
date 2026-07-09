@@ -36,6 +36,13 @@
   (plists (make-hash-table :test #'equal))  ; symbol key -> build-time plist
   (deferred nil)                            ; reversed *COLD-LOAD-DEFERRED-FORMS*,
                                             ; entries (package-string . host-form)
+  (defvar-stamps (make-hash-table))         ; symbol vma -> boot (SET 'sym form)
+                                            ; for value cells COLD-DO-DEFVAR
+                                            ; stamped eagerly; the finalize
+                                            ; reconcile consults it when a
+                                            ; permanent-links value link finds
+                                            ; both cells bound with different
+                                            ; values (M3h boot 21)
   (linked-cells nil)                        ; reversed SI:*LINKED-SYMBOL-CELLS*,
                                             ; entries (from-vsym to-vsym :variable/
                                             ; :function) recorded from permanent-links'

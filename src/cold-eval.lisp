@@ -313,7 +313,18 @@ An unevaluable value defers a boot-time (SET 'sym form)."
           (if (eq value-kind :form)
               (cold-eval-value w value)
               (cold-value-of-object w value))
-        (cond ((and tag store) (cold-set-symbol-value w sym tag data))
+        (cond ((and tag store)
+               (cold-set-symbol-value w sym tag data)
+               ;; Remember eager :defvar stamps with their boot SET form:
+               ;; if permanent-links later links this cell to one bound
+               ;; differently, the finalize reconcile reverts the stamp
+               ;; and re-defers the guarded SET (M3h boot 21).
+               (when (eq kind :defvar)
+                 (setf (gethash (cold-vsym w sym)
+                                (cold-world-defvar-stamps w))
+                       (list (si-vsym "SET")
+                             (list (si-vsym "QUOTE") sym)
+                             (if (veval-p value) (veval-form value) value)))))
               (tag nil)                 ; defvar of an already-bound symbol
               (t
            (cold-note "deferred values")

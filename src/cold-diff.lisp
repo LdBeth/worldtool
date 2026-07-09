@@ -1220,6 +1220,37 @@ cdr-nil so the list ends at the area count."
       (cold-check (= (ldb (byte 2 6) tag) 0)
                   "penultimate area Q is cdr-next (~2,'0X)" tag))))
 
+(defun check-bootstrap-link-invariant (w)
+  "M3h boot 21 gate: BOOTSTRAP-LINK-SYMBOL-CELLS walks the
+*LINKED-SYMBOL-CELLS* records at first boot and FERRORs \"Can't link two
+cells with different values.\" when a record's two cells are both bound
+with non-EQ contents (sys2/memory-cold.lisp:421-426).  Every record's
+pair -- value cells for :VARIABLE, function cells for :FUNCTION -- must
+leave the build with at most one bound side, or two EQ ones (boot 21:
+LDATA's eager DEFVAR *READTABLE* stamp vs rdtbl's SETQ READTABLE)."
+  (let ((bad nil)
+        (n 0)
+        (dtp-null (cold-dtp w "NULL")))
+    (dolist (rec (cold-world-linked-cells w))
+      (destructuring-bind (from to type) rec
+        (incf n)
+        (let ((off (if (string= (vsym-name type) "FUNCTION") 2 1)))
+          (flet ((cell-q (vsym)
+                   (cw-ref w (cold-follow-cell
+                              w (+ off (cold-vsym w vsym))))))
+            (multiple-value-bind (ft fd) (cell-q from)
+              (multiple-value-bind (tt td) (cell-q to)
+                (when (and (/= (tag-type ft) dtp-null)
+                           (/= (tag-type tt) dtp-null)
+                           (not (cold-q-eq ft fd tt td)))
+                  (push (format nil "~A ~A - ~A (~2,'0X:~8,'0X vs ~2,'0X:~8,'0X)"
+                                (vsym-name type) (vsym-name from)
+                                (vsym-name to) ft fd tt td)
+                        bad))))))))
+    (cold-check (null bad)
+                "bootstrap link invariant over ~D record~:P~@[; conflict: ~A~]"
+                n (first bad))))
+
 (defun check-linked-symbol-cells (w)
   "M3h gate: SI:*LINKED-SYMBOL-CELLS* carries the (from to type) records
 that permanent-links' SI:LINK-SYMBOL-*-CELLS load forms accumulated, in
@@ -1889,6 +1920,7 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "LISP:*DEBUG-IO*"
     "LISP:*ERROR-OUTPUT*"
     "LISP:*QUERY-IO*"
+    "LISP:*READTABLE*"
     "LISP:*STANDARD-INPUT*"
     "LISP:*STANDARD-OUTPUT*"
     "LISP:*TERMINAL-IO*"
@@ -2030,7 +2062,10 @@ VARIABLE-BOUNDP-guarded (FDEFINE-FILE-DEFINITIONS, *INSTANT-PACKAGE-DWIM-*,
 SYS:SYN-TERMINAL-IO), write-before-read on the boot path
 (BUILD-INITIAL-PACKAGES' SETQs, BOOTSTRAP-FORWARD-SYMBOL-CELLS' tables,
 RESET-COLD-BOOT-HISTORY, TV:KBD-LAST-ACTIVITY-TIME),
-forwarded-then-set (LISP:*TERMINAL-IO* et al. via permanent-links),
+forwarded-then-set (LISP:*TERMINAL-IO* et al. via permanent-links;
+boot 21 added LISP:*READTABLE* -- its eager LDATA defvar stamp is now
+reverted so BOOTSTRAP-LINK-SYMBOL-CELLS can copy READTABLE's value in,
+and nothing READs before that link pass),
 deferred-covered (*COLD-LOAD-STREAM-RUBOUT-HANDLER-BUFFER*), warm-only
 (ZWEI/TV/DW/MINI/QLD/compiler/CLOS...), or wired/embedding registers that
 trap handlers and the init code boots 1-18 already exercised write before
@@ -2090,6 +2125,9 @@ prints the R1 unbound-function-cell audit."
         ;; *LINKED-SYMBOL-CELLS* mirrors the permanent-links load pass;
         ;; runs here because finalize materializes it just above.
         (check-linked-symbol-cells w)
+        ;; ... and no record may ship two bound-but-different cells, or
+        ;; BOOTSTRAP-LINK-SYMBOL-CELLS FERRORs at first boot (M3h boot 21).
+        (check-bootstrap-link-invariant w)
         ;; Keyword self-evaluation forwarding, also materialized by finalize.
         (check-keyword-self-eval w)
         ;; :RELATIVE-NAMES withheld from the package calls, deferred as

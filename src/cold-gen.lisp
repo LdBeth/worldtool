@@ -128,6 +128,65 @@ boot, whereas the guarded shape no-ops once the symbol is bound."
                    (vsym-p (second (second set-form))))
           (values (second (second set-form)) (third set-form)))))))
 
+(defun cold-linked-variable-vmas (w)
+  "Symbol vmas on either side of a :VARIABLE record in LINKED-CELLS.
+BOOTSTRAP-FORWARD-SYMBOL-CELLS binds the unbound side of every value
+link by copying the bound side (sys2/memory-cold.lisp:427-430) BEFORE
+the deferred MAPC runs, so these cells need no build-time stamp -- and
+stamping one whose partner is bound differently is the exact state
+BOOTSTRAP-LINK-SYMBOL-CELLS FERRORs on (M3h boot 21)."
+  (let ((set (make-hash-table)))
+    (dolist (rec (cold-world-linked-cells w) set)
+      (when (string= (vsym-name (third rec)) "VARIABLE")
+        (setf (gethash (cold-vsym w (first rec)) set) t
+              (gethash (cold-vsym w (second rec)) set) t)))))
+
+(defun cold-reconcile-linked-defvars (w)
+  "M3h boot 21: BOOTSTRAP-LINK-SYMBOL-CELLS FERRORs \"Can't link two
+cells with different values.\" when a permanent-links record's cells are
+both bound with non-EQ contents (sys2/memory-cold.lisp:421-426).  LDATA's
+\(DEFVAR *READTABLE* *COMMON-LISP-READTABLE*) loads before permanent-links
+records the *READTABLE* - READTABLE value link (rdtbl's SETQ made
+READTABLE the ZL readtable), so the eager defvar stamp shipped exactly
+that fatal state.  The genuine first boot never evaluates the init: the
+link pass copies the bound side into the unbound one first, and the
+deferred DEFVAR-1 no-ops on the now-bound cell.  Revert the
+defvar-stamped side to unbound and re-defer its guarded SET; a conflict
+this can't attribute to exactly one defvar stamp is a generator bug.
+Returns the number reverted."
+  (let ((fixed 0)
+        (stamps (cold-world-defvar-stamps w)))
+    (dolist (rec (reverse (cold-world-linked-cells w)) fixed)
+      (destructuring-bind (from to type) rec
+        (when (string= (vsym-name type) "VARIABLE")
+          (multiple-value-bind (ft fd fb) (cold-symbol-value-q w from)
+            (multiple-value-bind (tt td tb) (cold-symbol-value-q w to)
+              (when (and fb tb (not (cold-q-eq ft fd tt td)))
+                (let ((fs (gethash (cold-vsym w from) stamps))
+                      (ts (gethash (cold-vsym w to) stamps)))
+                  (multiple-value-bind (victim set-form)
+                      (cond ((and fs ts)
+                             (error "Value link ~A - ~A: both sides are ~
+defvar-stamped with different values"
+                                    (vsym-name from) (vsym-name to)))
+                            (fs (values from fs))
+                            (ts (values to ts))
+                            (t (error "Value link ~A - ~A: both cells ~
+bound with different values and neither is a defvar stamp"
+                                      (vsym-name from) (vsym-name to))))
+                    (cw-set w (cold-value-cell w victim)
+                            (tag 0 (cold-dtp w "NULL"))
+                            (cold-vsym w victim))
+                    (let ((*cold-default-package* "SYSTEM-INTERNALS"))
+                      (cold-defer w (list (si-vsym "IF")
+                                          (list (si-vsym "BOUNDP")
+                                                (list (si-vsym "QUOTE")
+                                                      victim))
+                                          nil
+                                          set-form)
+                                  "linked defvar re-deferred"))
+                    (incf fixed)))))))))))
+
 (defun cold-retry-deferred-defvars (w)
   "M3h boot 18: a cold file's DEFVAR initializer that was unevaluable at
 vbin-load time (AREA-FOR-NEW-SYMBOLS's is SYMBOL-AREA, an area variable
@@ -136,11 +195,18 @@ the machinery pass stamps AFTER the load) deferred a BOUNDP-guarded SET
 before the deferred list is MAPCed.  Retry each such form now, post
 machinery: whatever evaluates is stamped, and the still-guarded deferred
 form no-ops at boot.  Returns the number stamped."
-  (let ((stamped 0))
+  (let ((stamped 0)
+        (linked (cold-linked-variable-vmas w)))
     (dolist (entry (reverse (cold-world-deferred w)))
       (destructuring-bind (pkg . form) entry
         (multiple-value-bind (sym valform) (cold-deferred-defvar-parts form)
-          (when (and sym (not (nth-value 2 (cold-symbol-value-q w sym))))
+          (when (and sym
+                     ;; Value-linked cells get bound by the boot link
+                     ;; pass itself, before the deferred MAPC; stamping
+                     ;; one here risks the both-bound-different FERROR
+                     ;; (M3h boot 21).
+                     (not (gethash (cold-vsym w sym) linked))
+                     (not (nth-value 2 (cold-symbol-value-q w sym))))
             (let ((*cold-default-package* pkg))
               (multiple-value-bind (tag data) (cold-eval-value w valform)
                 (when tag
@@ -187,6 +253,7 @@ Returns (values deferred-count patch-count package-count)."
            (package-count
              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
            (revived (cold-retry-deferred-defvars w))
+           (reconciled (cold-reconcile-linked-defvars w))
            (patches (reverse (cold-world-patches w)))
            (deferred (reverse (cold-world-deferred w)))
            (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
@@ -242,6 +309,9 @@ the deferred list"
       (when (plusp revived)
         (format t "~&  ~D deferred defvar value~:P stamped at finalize~%"
                 revived))
+      (when (plusp reconciled)
+        (format t "~&  ~D linked defvar stamp~:P reverted to unbound~%"
+                reconciled))
       (values (length entries) (length patches) package-count))))
 
 (defun cold-build-world (w &key reference)
