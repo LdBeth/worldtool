@@ -1299,6 +1299,85 @@ link record, so function cells compare as built.)"
                 "bootstrap link invariant over ~D record~:P~@[; conflict: ~A~]"
                 n (first bad))))
 
+(defun cold-extent-size (w vma)
+  "(values size kind) of the object at VMA under %FIND-STRUCTURE-EXTENT's
+IMach rules (sys/objects.lisp:123-342), or (values nil reason) when the
+Q there is not a recognizable object header."
+  (multiple-value-bind (tag data) (cw-ref w vma)
+    (let ((type (tag-type tag))
+          (htype (ldb (byte 2 6) tag)))
+      (flet ((array-size (hdr-data hdr-vma)
+               ;; Qs from the header on: leader excluded.
+               (let ((epq (ash 1 (ldb (byte 3 27) hdr-data))))
+                 (if (logbitp 23 hdr-data)      ; long prefix
+                     (multiple-value-bind (lt llen) (cw-ref w (1+ hdr-vma))
+                       (declare (ignore lt))
+                       (+ 4 (* 2 (ldb (byte 3 0) hdr-data))
+                          (if (logbitp 14 hdr-data) 0  ; displaced
+                              (ceiling llen epq))))
+                     (+ 1 (ceiling (ldb (byte 15 0) hdr-data) epq))))))
+        (cond
+          ((= type (cold-dtp w "HEADER-P"))
+           (case htype
+             (0 (values 5 :symbol))
+             (1 (multiple-value-bind (st sd) (cw-ref w (1- data))
+                  (declare (ignore st))          ; instance: size Q sits
+                  (values sd :instance)))        ; before the flavor
+             (2 (multiple-value-bind (at ad) (cw-ref w data)
+                  (if (and (= (tag-type at) (cold-dtp w "HEADER-I"))
+                           (= (ldb (byte 2 6) at) 1))
+                      (values (+ (- data vma) (array-size ad data))
+                              :leader-array)
+                      (values nil :leader-without-array))))
+             (t (values nil :header-p-type-3))))
+          ((= type (cold-dtp w "HEADER-I"))
+           (case htype
+             (0 (values (ldb (byte 18 0) data) :compiled-function))
+             (1 (values (array-size data vma) :array))
+             (2 (values (+ 1 (ldb (byte 27 0) data)) :bignum))
+             (t (values nil :header-i-type-3))))
+          (t (values nil :not-a-header)))))))
+
+(defun check-boot-object-walk (w)
+  "M3h boot 24 gate: BOOTSTRAP-FORWARD-SYMBOL-CELLS object-walks
+SYMBOL-AREA and SAFEGUARDED-OBJECTS-AREA (pass 0) then
+WIRED-CONTROL-TABLES, SAFEGUARDED-OBJECTS-AREA and COMPILED-FUNCTION-AREA
+\(MAP-COMPILED-FUNCTIONS passes 1-2), applying %FIND-STRUCTURE-EXTENT at
+every object boundary from the region origin (wired: from NIL,
+objects.lisp:661-665) to the free pointer.  Any Q run the extent parser
+cannot parse -- an unwritten gap, a headerless code block -- kills the
+first boot with \"Found non-enclosing structure\", whose reporting path
+is itself the unbound TRANSPORT-ERROR-ADDITIONAL-INFO trap."
+  (let ((bad nil)
+        (objects 0))
+    (dolist (area-name '("SYMBOL-AREA" "SAFEGUARDED-OBJECTS-AREA"
+                         "WIRED-CONTROL-TABLES" "COMPILED-FUNCTION-AREA"))
+      (let ((area (cold-area w area-name)))
+        (dolist (rn (cold-area-regions area))
+          (let* ((region (aref (cold-world-regions w) rn))
+                 (vma (if (string= area-name "WIRED-CONTROL-TABLES")
+                          (cold-world-nil-vma w)
+                          (cold-region-origin region)))
+                 (limit (cold-region-free region)))
+            (loop while (< vma limit)
+                  do (multiple-value-bind (size kind) (cold-extent-size w vma)
+                       (cond ((null size)
+                              (multiple-value-bind (tag data) (cw-ref w vma)
+                                (push (format nil "~A: ~A at ~8,'0X ~
+(Q ~2,'0X:~8,'0X)" area-name kind vma tag data)
+                                      bad))
+                              (return))
+                             ((or (<= size 0) (> size (- limit vma)))
+                              (push (format nil "~A: ~A at ~8,'0X has size ~
+~D (region ends at ~8,'0X)" area-name kind vma size limit)
+                                    bad)
+                              (return))
+                             (t (incf objects)
+                                (incf vma size)))))))))
+    (cold-check (null bad)
+                "boot object walk parses ~D object~:P~@[; first: ~A~]"
+                objects (first bad))))
+
 (defun check-plist-termination (w)
   "M3h boot 23 gate: every interned symbol's plist must be a
 NIL-terminated cdr-coded chain.  cold-prepend-property builds
@@ -2241,6 +2320,9 @@ prints the R1 unbound-function-cell audit."
         ;; symbols additionally NULL-free -- DECLARED-STORAGE-CATEGORY
         ;; GETs their plists at first boot (M3h boot 23).
         (check-plist-termination w)
+        ;; The boot's region object walks must parse every Q up to each
+        ;; free pointer (M3h boot 24).
+        (check-boot-object-walk w)
         ;; Keyword self-evaluation forwarding, also materialized by finalize.
         (check-keyword-self-eval w)
         ;; :RELATIVE-NAMES withheld from the package calls, deferred as

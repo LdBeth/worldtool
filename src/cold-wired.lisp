@@ -102,6 +102,18 @@ is *REGION-FREE-POINTER*'s header at NIL+#xD."
     (cold-build-symbol-block w t-vma
                              :value-tag (tag 0 (cold-dtp w "SYMBOL"))
                              :value-data t-vma)
+    ;; The 3-Q gap between NIL's block and T holds the distribution's
+    ;; "Benson" string: MAP-OVER-OBJECTS-IN-REGION starts its wired walk
+    ;; at NIL and %FIND-STRUCTURE-EXTENT must parse every Q up to the
+    ;; free pointer -- unwritten NULLs here backscan to NIL's header and
+    ;; die "Found non-enclosing structure" (M3h boot 24).
+    (cw-set w (+ nil-vma 5)
+            (tag (layout-value (cold-world-layout w)
+                               "SYSTEM:%HEADER-TYPE-ARRAY")
+                 (cold-dtp w "HEADER-I"))
+            #x50000006)
+    (cw-set w (+ nil-vma 6) (tag 0 (cold-dtp w "FIXNUM")) #x736E6542) ; "Bens"
+    (cw-set w (+ nil-vma 7) (tag 0 (cold-dtp w "FIXNUM")) #x00006E6F) ; "on"
     ;; The trap page and comm pages below NIL are stored with cw-set
     ;; directly; allocation starts after T.
     (setf (cold-region-free region) (+ t-vma 5)))
@@ -171,15 +183,28 @@ plist; contents are written by COLD-FILL-STORAGE-TABLES after the load."
     (reserve :oblast-free-size     "SAFEGUARDED-OBJECTS-AREA" "ART-8B" 2048)))
 
 (defun cold-build-catch-all (w)
-  "A two-Q instruction block: packed (halt, halt) then end-of-code.  Every
-trap vector points here until the cold set installs real handlers, so any
-stray trap halts the machine with a PC that names the vector."
-  (let ((vma (cold-alloc w "WIRED-CONTROL-TABLES" 2)))
+  "A minimal CCA whose two instruction Qs are packed (halt, halt) then
+end-of-code.  Every trap vector points at its entry until the cold set
+installs real handlers, so any stray trap halts the machine with a PC
+that names the vector.  Wrapped as a well-formed compiled function:
+ITRAP-DISPATCH's entry-T sweep retires it during the load, but the dead
+block stays in the wired region and BOOTSTRAP-FORWARD-SYMBOL-CELLS'
+MAP-COMPILED-FUNCTIONS walk must still %FIND-STRUCTURE-EXTENT past it
+(M3h boot 24)."
+  (let ((cca (cold-alloc w "WIRED-CONTROL-TABLES" 4)))
+    ;; CCA header: suffix-size 0, total-size 4 (cold-fun's layout).
+    (cw-set w cca
+            (tag (layout-value (cold-world-layout w)
+                               "SYSTEM:%HEADER-TYPE-COMPILED-FUNCTION")
+                 (cold-dtp w "HEADER-I"))
+            4)
+    (cw-set w (+ cca 1) (tag 0 (cold-dtp w "COMPILED-FUNCTION")) (+ cca 2))
     ;; Packed-instruction-62 carries two 18-bit halfwords: (halt 0, halt 0).
-    (cw-set w vma (tag 0 (cold-dtp w "PACKED-INSTRUCTION-62")) #xF000BC00)
+    (cw-set w (+ cca 2) (tag 0 (cold-dtp w "PACKED-INSTRUCTION-62"))
+            #xF000BC00)
     ;; End of compiled code: cdr 1, dtp-null, 0 (stub/idispat.c DoICacheFill).
-    (cw-set w (+ vma 1) (tag 1 (cold-dtp w "NULL")) 0)
-    (setf (cold-world-catch-all-pc w) vma)))
+    (cw-set w (+ cca 3) (tag 1 (cold-dtp w "NULL")) 0)
+    (setf (cold-world-catch-all-pc w) (+ cca 2))))
 
 (defun cold-build-trap-vectors (w)
   "Fill all %TRAP-VECTOR-LENGTH slots with the catch-all, trap mode 0.
