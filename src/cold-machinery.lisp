@@ -73,19 +73,15 @@
 ;;; +cold-area-count+ (= 22, the areas above) lives in cold-model.lisp:
 ;;; the mini-eval's MAKE-AREA arm needs it and cold-eval loads first.
 
-(defparameter *cold-synthesized-boot-areas* '(22 23 24)
+(defparameter *cold-synthesized-boot-areas* '(24)
   "Boot areas registered from the layout + reference rows because their
-creating MAKE-AREA files are not (yet) in the cold set.  22
-NETWORK-CONS-AREA and 23 ETHER-BUFFER-AREA belong to SYS: NETWORK; PKTS
-(pkts.lisp:117/:123) -- band-proven cold (dist GET-SUB-PACKET fcell
-forwards into 05:8820F587, the cold CCA band) but its .vbin is lost;
-compile it in a running Genera and add it to *cold-load-order* to make
-these two organic.  24 BIG-PACKET-CONS-AREA has NO creator anywhere in
-the rel-8-5 sources (a pre-8.5 vintage survivor); it stays synthesized.
-Nothing pre-banner calls pkts functions (the cold emb-ethernet driver
-is self-contained), so only the area REGISTRATION is boot-critical:
-unregistered numbers shift every later area and (N-AREAS) rejects them
-(M3h boot 31).")
+creating MAKE-AREA files are not in the cold set.  24
+BIG-PACKET-CONS-AREA has NO creator anywhere in the rel-8-5 sources (a
+pre-8.5 vintage survivor); it stays synthesized so the ARRAY-PUSH
+numbering of everything after it holds.  22/23 were synthesized until
+SYS: NETWORK; PKTS rejoined the cold set (its .vbin recompiled
+2026-07-10); unregistered numbers shift every later area and (N-AREAS)
+rejects them at first cons (M3h boot 31).")
 
 (defun cold-live-boot-areas (w)
   "Sorted (area-number . name-vsym) of every area beyond the generator's

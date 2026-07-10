@@ -98,6 +98,12 @@
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
     "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"
+    ;; In the original cold set (band oracle: dist GET-SUB-PACKET fcell
+    ;; forwards into 05:8820F587) but the .vbin was lost; recompiled in
+    ;; the user's Genera 8.5 2026-07-10.  Its MAKE-AREAs create
+    ;; NETWORK-CONS-AREA (22) and ETHER-BUFFER-AREA (23) -- the first
+    ;; two boot-created areas, ahead of the flavor areas (M3h boot 31).
+    "SYS: NETWORK; PKTS"
     ;; In the original cold set (dist has its functions wired) but the
     ;; .vbin was lost; recompiled from source in the user's Genera 8.5
     ;; 2026-07-04.  initialize-disk's VLM branch calls

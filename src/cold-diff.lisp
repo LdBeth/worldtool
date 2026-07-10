@@ -1001,13 +1001,13 @@ tables (same vmas in both worlds)."
          (rlist-tbl (cold-machinery w :area-region-list))
          (recorded (cold-live-boot-areas w))
          (live (+ +cold-area-count+ (length recorded))))
-    ;; The flavor areas are the known boot-critical members: flavor
-    ;; composition conses structs and lists there in the deferred MAPC.
-    ;; They must come from actual MAKE-AREA records (cold flavor files),
-    ;; not the synthesized allowlist.
-    (dolist (must '(25 26))
+    ;; The network areas (pkts, cold since its .vbin was recompiled)
+    ;; and the flavor areas (flavor composition conses there in the
+    ;; deferred MAPC) must come from actual MAKE-AREA records in cold
+    ;; files, not the synthesized allowlist.
+    (dolist (must '(22 23 25 26))
       (cold-check (assoc must (cold-world-boot-areas w))
-                  "boot area ~D (a flavor area) recorded via MAKE-AREA"
+                  "boot area ~D recorded via a cold file's MAKE-AREA"
                   must))
     (dolist (key '(:area-name :area-maximum-quantum-size
                    :area-region-quantum-size :area-region-list
@@ -2592,8 +2592,12 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "METERING:WIRED-METERING-AREA"
     "NETWORK-INTERNALS:*EMB-ETHERNET-INTERFACES*"
     "NETWORK-INTERNALS:*N-EMB-ETHERNET-INTERFACES*"
-    "NETWORK-INTERNALS:*PKTS-ALLOCATED*"
-    "NETWORK-INTERNALS:%ETHER-BUFFER-AREA-REGION"
+    ;; %NET-FREE-LIST: DEFWIREDVAR with no initializer (pkts.lisp:63);
+    ;; read only by the packet-buffer allocation path, warm.  pkts
+    ;; rejoined the cold set M3h boot 32 -- *PKTS-ALLOCATED* (meter,
+    ;; stamped 0 by RESET-PACKET-ALLOCATION-METERS) and
+    ;; %ETHER-BUFFER-AREA-REGION (DEFWIREDVAR NIL) left this list then.
+    "NETWORK-INTERNALS:%NET-FREE-LIST"
     "STORAGE:*ACTIVE-STACK-GROUPS-HEAD*"
     "STORAGE:*ACTIVE-STACK-GROUPS-TAIL*"
     "STORAGE:*COUNT-ACTIVE-STACK-GROUPS*"

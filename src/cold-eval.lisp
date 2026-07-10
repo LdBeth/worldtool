@@ -1068,6 +1068,28 @@ compiler-side and have no cold definition or boot effect.")
          (cold-do-define-magic-locations w parsed)))
       ((string= head "INITIALIZE-POINTER-TYPE-P-ARRAY")
        (cold-do-initialize-pointer-type-p-array w))
+      ((string= head "RESET-PACKET-ALLOCATION-METERS")
+       ;; pkts.lisp:112 top level: (DOLIST (SYM *PACKET-ALLOCATION-
+       ;; METERS*) (SET SYM 0)) over the DEFCONST list just above it.
+       ;; Run natively, like the original generator: deferring would
+       ;; leave ~20 meter cells unbound at build and churn the R2
+       ;; audit for nothing (M3h boot 32, pkts rejoins the cold set).
+       (cold-note "reset-packet-allocation-meters")
+       (multiple-value-bind (tag data boundp)
+           (cold-symbol-value-q
+            w (make-vsym "NETWORK-INTERNALS" "*PACKET-ALLOCATION-METERS*"))
+         (unless (and boundp (= (tag-type tag) (cold-dtp w "LIST")))
+           (error "RESET-PACKET-ALLOCATION-METERS before its DEFCONST"))
+         (let ((fixnum (cold-dtp w "FIXNUM")))
+           (cold-map-list
+            w tag data
+            (lambda (ct cd vma)
+              (declare (ignore vma))
+              (unless (= (tag-type ct) (cold-dtp w "SYMBOL"))
+                (error "Non-symbol ~2,'0X:~8,'0X in the meter list"
+                       ct cd))
+              (cw-set w (cold-follow-cell w (1+ cd)) (tag 0 fixnum) 0)
+              nil)))))
       ((or (string= head "LINK-SYMBOL-VALUE-CELLS")
            (string= head "LINK-SYMBOL-FUNCTION-CELLS"))
        ;; clcp/permanent-links.lisp: "These functions are actually
