@@ -66,6 +66,12 @@
                                             ; itself happens at load time)
   (machinery nil)                           ; plist: reserved wired/storage-table
                                             ; header vmas + :initial-stack-group
+  (boot-areas nil)                          ; (area-number . name-vsym) for areas
+                                            ; the cold set creates via MAKE-AREA
+                                            ; (layout numbers >= +cold-area-count+);
+                                            ; cold-fill-storage-tables registers
+                                            ; their table rows or (N-AREAS) rejects
+                                            ; them at first cons (M3h boot 31)
   ;; DECLARE-STORAGE-CATEGORY-LOAD wired-cell forwarding (cold-eval):
   (wired-cell-table 0)                      ; FORWARDED-SYMBOL-CELL-TABLE header vma
   (wired-cell-fill 0)                       ; its fill pointer
@@ -122,6 +128,11 @@
         (values 0 0 nil))))
 
 ;;; Areas
+
+(defconstant +cold-area-count+ 22
+  "Areas the generator materializes itself (*cold-area-config*,
+cold-machinery.lisp).  Areas the cold set creates at load time get
+numbers from here up (cold-world-boot-areas).")
 
 (defun cold-init-areas (w)
   "Create the cold-load area set from the layout :AREAS section."

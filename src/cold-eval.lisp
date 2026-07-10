@@ -241,8 +241,19 @@ it pre-built (array header 43:C0800002 at #xF0003597, structs
               (error "MAKE-AREA without :NAME in ~S" form))
             ;; Area numbers are architectural facts in the layout's
             ;; :AREAS section (M2 exported all 67).
-            (values (tag 0 (cold-dtp w "FIXNUM"))
-                    (cold-area-number (cold-area w (vsym-name name))))))
+            (let ((n (cold-area-number (cold-area w (vsym-name name)))))
+              ;; Beyond the generator's own areas, MAKE-AREA's side
+              ;; effect matters too: the five ARRAY-PUSHes into the area
+              ;; tables (allocate-common.lisp:647).  Record the area so
+              ;; cold-fill-storage-tables registers its rows -- else
+              ;; (N-AREAS), the *AREA-NAME* fill pointer, rejects it at
+              ;; first cons and the %ALLOCATE-*-BLOCK escape handler
+              ;; FERRORs recursively pre-banner (M3h boot 31).
+              (when (and (>= n +cold-area-count+)
+                         (not (assoc n (cold-world-boot-areas w))))
+                (cold-note "make-area registered")
+                (push (cons n name) (cold-world-boot-areas w)))
+              (values (tag 0 (cold-dtp w "FIXNUM")) n))))
          ((string= head "%MAKE-PC")
           ;; (%MAKE-PC function offset), sys/lcode.lisp:1060: offset in
           ;; halfword instructions; even/odd tag from its parity.

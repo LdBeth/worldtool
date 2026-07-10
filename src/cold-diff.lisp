@@ -927,6 +927,137 @@ independent reconstruction."
                   "wired region free #x~8,'0X exceeds #x~8,'0X"
                   (cold-region-free wired) +wired-zone-limit+))))
 
+(defun check-stack-grower (w)
+  "M3h boot-31 gate: DBG:STACK-GROWER is a bound, well-formed, unpreset
+stack group.  The wired control-stack-overflow handler STACK-GROUP-CALLs
+it (istack.lisp:1761); with the cell unbound, any pre-warm overflow
+trap-71s inside the trap handler and double-faults to SI:AUX-HALT."
+  (let* ((layout (cold-world-layout w))
+         (sg (cold-machinery w :stack-grower))
+         (locative (cold-dtp w "LOCATIVE")))
+    (flet ((field (name)
+             (multiple-value-bind (tag data)
+                 (cw-ref w (+ sg (cold-sg-field-word layout name)))
+               (values (tag-type tag) data))))
+      (multiple-value-bind (tag data boundp)
+          (cold-symbol-value-q w (make-vsym "DEBUGGER" "STACK-GROWER"))
+        (cold-check (and boundp (= (tag-type tag) (cold-dtp w "ARRAY"))
+                         (= data sg))
+                    "DBG:STACK-GROWER bound to the built grower SG"))
+      (multiple-value-bind (tag data) (cw-ref w sg)
+        (cold-check (and (= (tag-type tag) (cold-dtp w "HEADER-I"))
+                         (logbitp 25 data)
+                         (= (ldb (byte 15 0) data) 63))
+                    "grower header named-structure ART-Q 63, ~
+got ~2,'0X:~8,'0X" tag data))
+      (multiple-value-bind (tag data) (cw-ref w (+ sg 1))
+        (declare (ignore data))
+        (cold-check (= (tag-type tag) (cold-dtp w "SYMBOL"))
+                    "grower element 0 holds the STACK-GROUP symbol"))
+      (multiple-value-bind (type data) (field "SG-STATUS-BITS")
+        (declare (ignore type))
+        (cold-check (= data +cold-sg-status+)
+                    "grower status uninitialized+safe, got #x~X" data))
+      (multiple-value-bind (type low) (field "SG-CONTROL-STACK-LOW")
+        (cold-check (= type locative) "grower control-stack-low a locative")
+        (multiple-value-bind (type2 sp) (field "SG-STACK-POINTER")
+          (cold-check (and (= type2 locative) (= sp low))
+                      "grower stack pointer at stack low (unpreset)"))
+        (multiple-value-bind (type2 limit) (field "SG-CONTROL-STACK-LIMIT")
+          (cold-check
+           (and (= type2 locative)
+                (= limit
+                   (- (+ low #x3000)
+                      (layout-value layout "CONTROL-STACK-OVERFLOW-MARGIN")
+                      (layout-value layout "CONTROL-STACK-MAX-FRAME-SIZE"))))
+           "grower control-stack-limit #x~8,'0X" limit))
+        (cold-check (nth-value 2 (cw-ref w low))
+                    "grower control stack pages present"))
+      (multiple-value-bind (type low) (field "SG-BINDING-STACK-LOW")
+        (cold-check (= type locative) "grower binding-stack-low a locative")
+        (multiple-value-bind (type2 bp) (field "SG-BINDING-STACK-POINTER")
+          (cold-check (and (= type2 locative) (= bp (1+ low)))
+                      "grower binding-stack-pointer at low+1"))
+        (multiple-value-bind (type2 limit) (field "SG-BINDING-STACK-LIMIT")
+          (cold-check (and (= type2 locative) (= limit (+ low #x800 -1)))
+                      "grower binding-stack-limit #x~8,'0X" limit))
+        (cold-check (nth-value 2 (cw-ref w low))
+                    "grower binding stack pages present"))
+      (multiple-value-bind (type data) (field "SG-NAME")
+        (declare (ignore type))
+        (cold-check (string= (cold-read-string w data) "Stack grower")
+                    "grower SG-NAME reads \"Stack grower\"")))))
+
+(defun check-boot-area-registration (w reference)
+  "M3h boot-31 gate: every area a cold file creates via MAKE-AREA is
+registered in the area tables and counted by the *AREA-NAME* fill
+pointer (= (N-AREAS), sys2/macro.lisp:983).  Unregistered, the
+%ALLOCATE-*-BLOCK escape handler FERRORs 'not a valid area' at the
+area's first cons and the FERROR's own consing into the same area
+recurses to a control-stack overflow (boot 31: FLAVOR:*FLAVOR-AREA* =
+25 under DEFFLAVOR-INTERNAL).  Rows must match the reference world's
+tables (same vmas in both worlds)."
+  (let* ((name-tbl (cold-machinery w :area-name))
+         (rlist-tbl (cold-machinery w :area-region-list))
+         (recorded (cold-live-boot-areas w))
+         (live (+ +cold-area-count+ (length recorded))))
+    ;; The flavor areas are the known boot-critical members: flavor
+    ;; composition conses structs and lists there in the deferred MAPC.
+    ;; They must come from actual MAKE-AREA records (cold flavor files),
+    ;; not the synthesized allowlist.
+    (dolist (must '(25 26))
+      (cold-check (assoc must (cold-world-boot-areas w))
+                  "boot area ~D (a flavor area) recorded via MAKE-AREA"
+                  must))
+    (dolist (key '(:area-name :area-maximum-quantum-size
+                   :area-region-quantum-size :area-region-list
+                   :area-region-bits))
+      (let ((tbl (cold-machinery w key)))
+        (multiple-value-bind (tag data) (cw-ref w (- tbl 1))
+          (declare (ignore tag))
+          (cold-check (= data live)
+                      "~S fill pointer ~D (~D live areas)" key data live))))
+    (loop for (n . name) in recorded
+          do (multiple-value-bind (tag data) (cw-ref w (+ name-tbl 1 n))
+               (cold-check (and (= (tag-type tag) (cold-dtp w "SYMBOL"))
+                                (string= (cold-symbol-pname-at w data)
+                                         (vsym-name name)))
+                           "area ~D name row is ~A" n (vsym-name name)))
+             (cold-check (= (cold-table-ref16 w rlist-tbl n) #xFFFF)
+                         "area ~D region list -1 (no regions yet)" n)
+             (when reference
+               (dolist (key '(:area-maximum-quantum-size
+                              :area-region-quantum-size
+                              :area-region-bits))
+                 (let ((tbl (cold-machinery w key)))
+                   (multiple-value-bind (otag ours) (cw-ref w (+ tbl 1 n))
+                     (declare (ignore otag))
+                     (multiple-value-bind (rtag ref) (world-q reference
+                                                              (+ tbl 1 n))
+                       (declare (ignore rtag))
+                       (cold-check (eql ours ref)
+                                   "area ~D ~S row #x~8,'0X = dist #x~8,'0X"
+                                   n key ours ref))))))
+             ;; Level must be in the static band our zone/level tables
+             ;; allocate (UPDATE-ZONE-AND-DEMILEVEL-TABLES invariant); an
+             ;; ephemeral level here would be warm dist state leaking in.
+             (let ((tbl (cold-machinery w :area-region-bits)))
+               (multiple-value-bind (tag bits) (cw-ref w (+ tbl 1 n))
+                 (declare (ignore tag))
+                 (cold-check (<= 32 (ldb (byte 6 18) bits) 40)
+                             "area ~D region-bits level ~D static-band"
+                             n (ldb (byte 6 18) bits)))))
+    ;; AREA-LIST: the name table data is the list -- live symbol
+    ;; elements cdr-next, the last cdr-nil.
+    (loop for i below live
+          for vma = (+ name-tbl 1 i)
+          do (multiple-value-bind (tag data) (cw-ref w vma)
+               (declare (ignore data))
+               (cold-check (= (tag-type tag) (cold-dtp w "SYMBOL"))
+                           "AREA-LIST element ~D is a symbol" i)
+               (cold-check (= (ldb (byte 2 6) tag) (if (= i (1- live)) 1 0))
+                           "AREA-LIST cdr code at element ~D" i)))))
+
 (defun check-initial-stack-group (w)
   (let* ((layout (cold-world-layout w))
          (sg (cold-machinery w :initial-stack-group))
@@ -1314,16 +1445,19 @@ cdr-nil so the list ends at the area count."
                        (= data (+ name-tbl 1)))
                   "AREA-LIST is the area-name table data (~@[~2,'0X:~8,'0X~])"
                   tag data))
-    (multiple-value-bind (tag data)
-        (cw-ref w (+ name-tbl +cold-area-count+))
-      (declare (ignore data))
-      (cold-check (= (ldb (byte 2 6) tag) 1)
-                  "last live area Q is cdr-nil (~2,'0X)" tag))
-    (multiple-value-bind (tag data)
-        (cw-ref w (+ name-tbl +cold-area-count+ -1))
-      (declare (ignore data))
-      (cold-check (= (ldb (byte 2 6) tag) 0)
-                  "penultimate area Q is cdr-next (~2,'0X)" tag))))
+    ;; Boot-created areas extend the list past the generator's own 22
+    ;; (M3h boot 31); the cdr-nil rides on the last LIVE area.
+    (let ((live (+ +cold-area-count+ (length (cold-live-boot-areas w)))))
+      (multiple-value-bind (tag data)
+          (cw-ref w (+ name-tbl live))
+        (declare (ignore data))
+        (cold-check (= (ldb (byte 2 6) tag) 1)
+                    "last live area Q is cdr-nil (~2,'0X)" tag))
+      (multiple-value-bind (tag data)
+          (cw-ref w (+ name-tbl live -1))
+        (declare (ignore data))
+        (cold-check (= (ldb (byte 2 6) tag) 0)
+                    "penultimate area Q is cdr-next (~2,'0X)" tag)))))
 
 (defun cold-boot-init-forms (w)
   "Symbol vma -> raw init-form Q (tag . data) from the world's
@@ -2281,6 +2415,10 @@ page fully reconciled against the reference."
       (check-syscom-slots w #xF8041100)
       (check-machinery-region-tables w)
       (check-initial-stack-group w)
+      ;; The stack grower SG + boot-created area registration (M3h
+      ;; boot 31).
+      (check-stack-grower w)
+      (check-boot-area-registration w reference)
       ;; No magic symbol may also sit in the wired symbol-cell table: its
       ;; boot-time re-forwarding would undo the comm-slot forward.
       (let ((magic-cells (make-hash-table)))

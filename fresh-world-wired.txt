@@ -1,5 +1,5 @@
 fresh.ilod: annotated wired dump (layout: cold-layout.sexp)
-wired map: 4 entries, 56,064 Qs
+wired map: 4 entries, 70,400 Qs
 
 Trap vectors  #xF8040000..#xF8040FFF (zero Qs omitted):
   #xF8040000 26:F80431FE x3  %ARITHMETIC-INSTRUCTION-EXCEPTION-VECTOR

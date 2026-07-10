@@ -70,7 +70,36 @@
     (20 "DISK-ARRAY-AREA"           #x02840049 #x04)
     (21 "SOURCE-LOCATOR-AREA"       #x028C0049 #x20)))
 
-(defconstant +cold-area-count+ 22)
+;;; +cold-area-count+ (= 22, the areas above) lives in cold-model.lisp:
+;;; the mini-eval's MAKE-AREA arm needs it and cold-eval loads first.
+
+(defparameter *cold-synthesized-boot-areas* '(22 23 24)
+  "Boot areas registered from the layout + reference rows because their
+creating MAKE-AREA files are not (yet) in the cold set.  22
+NETWORK-CONS-AREA and 23 ETHER-BUFFER-AREA belong to SYS: NETWORK; PKTS
+(pkts.lisp:117/:123) -- band-proven cold (dist GET-SUB-PACKET fcell
+forwards into 05:8820F587, the cold CCA band) but its .vbin is lost;
+compile it in a running Genera and add it to *cold-load-order* to make
+these two organic.  24 BIG-PACKET-CONS-AREA has NO creator anywhere in
+the rel-8-5 sources (a pre-8.5 vintage survivor); it stays synthesized.
+Nothing pre-banner calls pkts functions (the cold emb-ethernet driver
+is self-contained), so only the area REGISTRATION is boot-critical:
+unregistered numbers shift every later area and (N-AREAS) rejects them
+(M3h boot 31).")
+
+(defun cold-live-boot-areas (w)
+  "Sorted (area-number . name-vsym) of every area beyond the generator's
+own that must be registered in the area tables: the cold set's MAKE-AREA
+records plus the synthesized allowlist."
+  (sort (append
+         (loop for n in *cold-synthesized-boot-areas*
+               unless (assoc n (cold-world-boot-areas w))
+                 collect (let* ((full (cold-area-name (cold-area w n)))
+                                (colon (position #\: full)))
+                           (cons n (make-vsym (subseq full 0 colon)
+                                              (subseq full (1+ colon))))))
+         (copy-list (cold-world-boot-areas w)))
+        #'< :key #'car))
 
 ;;; Distribution REGION-BITS for the architectural regions 0-5 (probe).
 (defparameter *cold-architectural-region-bits*
@@ -228,9 +257,10 @@ address space like PAGE-TABLE-AREA have none.)"
           below (cold-region-free region) by +ivory-page-size-qs+
         thereis (nth-value 2 (cw-ref w vma))))
 
-(defun cold-fill-storage-tables (w)
+(defun cold-fill-storage-tables (w &key reference)
   "Write the wired region tables and safeguarded area/oblast tables from
-this world's areas and regions."
+this world's areas and regions.  REFERENCE supplies the qsize/maxq/bits
+rows of the areas the cold set itself creates via MAKE-AREA (boot 31)."
   (let ((fixnum (cold-dtp w "FIXNUM"))
         (regions (cold-world-regions w))
         (layout (cold-world-layout w)))
@@ -261,17 +291,59 @@ this world's areas and regions."
                                                     (subseq full-name (1+ colon))))
                     (cold-table-set w name-tbl a st sd)))
                 (cold-table-set w name-tbl a ntag ndata))))
-        (dolist (tbl (list name-tbl maxq-tbl rqsz-tbl rlist-tbl abits-tbl))
-          (cold-set-fill-pointer w tbl +cold-area-count+))
-        ;; The name table doubles as the generator-owned SI:AREA-LIST
-        ;; (ldata.lisp:201; M3h boot-8 trap): it is ART-Q-LIST, cdr-next
-        ;; through the live areas with cdr-nil on the last (dist element
-        ;; 66 tag 58), and AREA-LIST references its data verbatim.
-        (multiple-value-bind (tag data)
-            (cw-ref w (+ name-tbl +cold-area-count+))
-          (cw-set w (+ name-tbl +cold-area-count+) (logior #x40 tag) data))
-        (cold-set-symbol-value w (make-vsym "SYSTEM-INTERNALS" "AREA-LIST")
-                               (tag 0 (cold-dtp w "LIST")) (+ name-tbl 1)))
+        ;; --- Areas the cold set creates at load time (MAKE-AREA in a
+        ;; cold file; the mini-eval assigned their layout numbers and
+        ;; recorded them on the world).  Register the rows MAKE-AREA's
+        ;; ARRAY-PUSHes would have written (allocate-common.lisp:647):
+        ;; without them (N-AREAS) -- the *AREA-NAME* fill pointer --
+        ;; rejects the area at its first cons, and the %ALLOCATE-*-BLOCK
+        ;; escape handler's FERROR conses into the same area, recursing
+        ;; to a stack overflow pre-banner (M3h boot 31,
+        ;; FLAVOR:*FLAVOR-AREA* = 25 under DEFFLAVOR-INTERNAL).  The
+        ;; qsize/maxq/bits rows are the deterministic output of
+        ;; MAKE-AREA's keyword parse; rather than replicate that
+        ;; ~200-line parse we copy the reference world's rows (its
+        ;; tables live at the same vmas; rows 22..66 all carry
+        ;; static-band levels 33-36, so no warm ephemeral-level state
+        ;; leaks in).  REGION-LIST stays -1: a boot-created area owns no
+        ;; regions until its first cons allocates one.
+        (let ((recorded (cold-live-boot-areas w)))
+          (when (and recorded (not reference))
+            (error "~D boot-created area~:P but no reference world"
+                   (length recorded)))
+          (loop for (n . name) in recorded
+                for expect from +cold-area-count+
+                do (unless (= n expect)
+                     ;; ARRAY-PUSH numbering was contiguous in the
+                     ;; original cold load; a hole means our cold set
+                     ;; diverges from the one that built the dist.
+                     (error "Boot area ~D (~A) breaks contiguity at ~D"
+                            n (vsym-name name) expect))
+                   (multiple-value-bind (st sd) (cold-symbol-ref w name)
+                     (cold-table-set w name-tbl n st sd))
+                   (dolist (tbl (list maxq-tbl rqsz-tbl abits-tbl))
+                     (multiple-value-bind (tag data)
+                         (world-q reference (+ tbl 1 n))
+                       (unless (and tag (= (tag-type tag) fixnum))
+                         (error "Reference area row ~D of table ~
+#x~8,'0X is ~2,'0X:~8,'0X" n tbl (or tag 0) (or data 0)))
+                       (cold-table-set w tbl n (tag 0 fixnum) data))))
+          (let ((live (+ +cold-area-count+ (length recorded))))
+            (dolist (tbl (list name-tbl maxq-tbl rqsz-tbl rlist-tbl
+                               abits-tbl))
+              (cold-set-fill-pointer w tbl live))
+            ;; The name table doubles as the generator-owned
+            ;; SI:AREA-LIST (ldata.lisp:201; M3h boot-8 trap): it is
+            ;; ART-Q-LIST, cdr-next through the live areas with cdr-nil
+            ;; on the last (dist element 66 tag 58), and AREA-LIST
+            ;; references its data verbatim.
+            (multiple-value-bind (tag data)
+                (cw-ref w (+ name-tbl live))
+              (cw-set w (+ name-tbl live) (logior #x40 tag) data))
+            (cold-set-symbol-value w (make-vsym "SYSTEM-INTERNALS"
+                                                "AREA-LIST")
+                                   (tag 0 (cold-dtp w "LIST"))
+                                   (+ name-tbl 1)))))
       ;; --- Region tables (1024 entries).
       (let ((fp-tbl (cold-machinery w :region-free-pointer))
             (gcp-tbl (cold-machinery w :region-gc-pointer))
@@ -347,12 +419,22 @@ this world's areas and regions."
         finally (error "STACK-GROUP field ~A not in layout" field)))
 
 (defun cold-alloc-stack (w area-name size)
-  "Take SIZE Qs from the area's architectural region (must be the region
-start) and make the pages present.  Returns the base vma."
+  "Take SIZE Qs from the tail of the area's architectural region and
+make the pages present.  Returns the base vma.  Stacks pack one after
+another in the single region (%MAKE-STACK's ALLOCATE-OR-EXTEND-MAGIC-
+REGION never makes a second table region -- the dist has exactly one
+region per stack area, the grower's stacks tailing the initial SG's),
+so every stack must be page-aligned and page-granular."
   (let* ((region (cold-area-current-region w area-name))
          (base (cold-region-free region)))
-    (unless (= base (cold-region-origin region))
-      (error "~A stack must be the region's first allocation" area-name))
+    (unless (and (zerop (mod base +ivory-page-size-qs+))
+                 (zerop (mod size +ivory-page-size-qs+)))
+      (error "~A stack at #x~8,'0X size #x~X not page-granular"
+             area-name base size))
+    (unless (<= (+ (- base (cold-region-origin region)) size)
+                (cold-region-length region))
+      (error "~A region full: stack of #x~X Qs at #x~8,'0X" area-name
+             size base))
     (setf (cold-region-free region) (+ base size))
     (loop for vma from base below (+ base size) by +ivory-page-size-qs+
           do (cw-touch w vma))
@@ -419,6 +501,71 @@ and binding stacks and stamps %INITIAL-STACK-GROUP."
     (cold-set-symbol-value w (make-vsym "SYSTEM"
                                         "%CURRENT-STACK-GROUP-STATUS-BITS")
                            (tag 0 fixnum) +cold-sg-status+)
+    sg))
+
+(defun cold-build-stack-grower (w)
+  "DBG:STACK-GROWER = (MAKE-STACK-GROUP \"Stack grower\"),
+debugger/debugger-support.lisp:1531 (defvar-safeguarded; the file is NOT
+cold, so the object is a generator obligation like the initial stack
+group).  The wired control-stack-overflow handler STACK-GROUP-CALLs it
+(istack.lisp:1761); unbound, any pre-warm stack overflow reads the
+unbound cell inside the trap handler and double-faults to SI:AUX-HALT
+(M3h boot 31).  Field semantics = MAKE-STACK-GROUP (istack.lisp:1013):
+a 63-Q named STACK-GROUP array in SAFEGUARDED-OBJECTS-AREA with fresh
+control/binding stacks.  Sizes are the dist grower's (control #x3000,
+binding #x800; its object at dist #xF0006400, stacks tailing the
+initial SG's) -- the rel-8-5 source defaults (30000/4000) postdate the
+dist build.  The SG ships UNPRESET (SG-UNINITIALIZED-BIT set), exactly
+like the original cold world: the warm \"Stack grower preset\" init
+presets it before any recoverable overflow can use it."
+  (let* ((layout (cold-world-layout w))
+         (locative (cold-dtp w "LOCATIVE"))
+         (fixnum (cold-dtp w "FIXNUM"))
+         (cs-size #x3000)
+         (bs-size #x800)
+         (cs-low (cold-alloc-stack w "CONTROL-STACK-AREA" cs-size))
+         (bs-low (cold-alloc-stack w "BINDING-STACK-AREA" bs-size))
+         (sg (cold-reserve-wired-array w "SAFEGUARDED-OBJECTS-AREA"
+                                       "ART-Q" 63 :named-structure t))
+         (float-mode
+           (multiple-value-bind (tag data boundp)
+               (cold-symbol-value-q
+                w (make-vsym "SYSTEM" "*DEFAULT-FLOAT-OPERATING-MODE*"))
+             (if (and boundp (= (tag-type tag) fixnum))
+                 data
+                 #x6C000000))))
+    (setf (getf (cold-world-machinery w) :stack-grower) sg)
+    (flet ((set-field (name tag data)
+             (cw-set w (+ sg (cold-sg-field-word layout name)) tag data)))
+      ;; All slots start NIL (element 0 = named-structure symbol).
+      (multiple-value-bind (ntag ndata) (cold-nil-q w)
+        (loop for i from 1 to 63
+              do (cw-set w (+ sg i) ntag ndata)))
+      (multiple-value-bind (st sd)
+          (cold-symbol-ref w (make-vsym "SYSTEM" "STACK-GROUP"))
+        (cw-set w (+ sg 1) st sd))
+      (set-field "SG-NAME" (tag 0 (cold-dtp w "STRING"))
+                 (cold-string* w "Stack grower" "SAFEGUARDED-OBJECTS-AREA"))
+      (set-field "SG-STATUS-BITS" (tag 0 fixnum) +cold-sg-status+)
+      (set-field "SG-STACK-POINTER" (tag 0 locative) cs-low)
+      (set-field "SG-CONTROL-STACK-LOW" (tag 0 locative) cs-low)
+      (set-field "SG-CONTROL-STACK-LIMIT" (tag 0 locative)
+                 (+ cs-low cs-size
+                    (- (layout-value layout "CONTROL-STACK-OVERFLOW-MARGIN"))
+                    (- (layout-value layout "CONTROL-STACK-MAX-FRAME-SIZE"))))
+      (set-field "SG-BINDING-STACK-POINTER" (tag 0 locative) (+ bs-low 1))
+      (set-field "SG-BINDING-STACK-LOW" (tag 0 locative) bs-low)
+      (set-field "SG-BINDING-STACK-LIMIT" (tag 0 locative)
+                 (+ bs-low bs-size -1))
+      (set-field "SG-FLOAT-OPERATING-MODE" (tag 0 fixnum) float-mode)
+      (set-field "SG-FLOAT-OPERATION-STATUS" (tag 0 fixnum) 0)
+      (set-field "SG-STRUCTURE-STACK-POINTER-COUNT" (tag 0 fixnum) 0)
+      (set-field "SG-ERROR-TRAP-LEVEL" (tag 0 fixnum) 0)
+      (set-field "SG-WIRED-FRAME-DESCRIPTOR" (tag 0 fixnum) 0)
+      (set-field "SG-BAR-2" (tag 0 locative) #x7FE00000)
+      (set-field "SG-BAR-3" (tag 0 locative) #x7FE00000))
+    (cold-set-symbol-value w (make-vsym "DEBUGGER" "STACK-GROWER")
+                           (tag 0 (cold-dtp w "ARRAY")) sg)
     sg))
 
 ;;; ---------------- Generator-owned wired values ----------------
@@ -946,6 +1093,7 @@ generator-owned wired values, fills the storage tables from the final
 region state, and grafts the IFEP trap vectors and FEPComm function
 slots from the reference world."
   (cold-build-initial-stack-group w)
+  (cold-build-stack-grower w)
   (cold-stamp-storage-values w)
   ;; These allocate in WIRED-CONTROL-TABLES / SAFEGUARDED-OBJECTS-AREA
   ;; -- they must precede the table fill so the region free pointers
@@ -955,7 +1103,7 @@ slots from the reference world."
   (cold-build-zone-level w)
   (cold-build-stack-registry w)
   (cold-build-array-meta w)
-  (cold-fill-storage-tables w)
+  (cold-fill-storage-tables w :reference reference)
   (cold-stamp-fepcomm-boot-slots w)
   (when reference
     (cold-graft-ifep-vectors w reference)
