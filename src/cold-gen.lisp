@@ -128,7 +128,20 @@
     ;;     its own comments record cold-load history (Hornig & Dodds
     ;;     10/09/92).  Compiled from source in the user's Genera 8.5.
     "SYS: CLCP; PERMANENT-LINKS" "SYS: CLCP; FUNCTIONS"
-    "SYS: CLCP; LISTFNS" "SYS: CLCP; IOFNS"))
+    "SYS: CLCP; LISTFNS" "SYS: CLCP; IOFNS"
+    ;; The WHOLE CL sequence layer was cold: the dist band scan over
+    ;; #x8821AF00-#x8821C800 (right after ldefsel's helpers) is
+    ;; seqfns.lisp's roster verbatim -- MAKE-SEQUENCE, CONCATENATE, MAP,
+    ;; SOME/EVERY/NOTANY/NOTEVERY, REDUCE, FILL, REPLACE, the
+    ;; SUBSTITUTE/FIND/POSITION/COUNT families.  (Boot 28 read
+    ;; LISP:SUBSTITUTE-IF's 0x8235 fcell as "seqfns = QLD", but that was
+    ;; a warm PATCH redefining a few dispatchers over the cold file: its
+    ;; CLI helpers SUBSTITUTE-TEST et al. stayed in the cold band.  A
+    ;; single function's band does not classify its FILE.)  Trap: the
+    ;; deferred flavor MAPC's PARSE-DEFFLAVOR calls LISP:NREVERSE
+    ;; (defflavor.lisp:557), unbound without this (M3h boot 32); its
+    ;; .vbin ships (QLD's INNER-SYSTEM-FILE-ALIST reloads it warm).
+    "SYS: CLCP; SEQFNS"))
 
 ;;; ---- M3f: finalization and the full pipeline -----------------------------
 

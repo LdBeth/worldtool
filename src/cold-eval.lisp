@@ -956,6 +956,9 @@ and the M2 file list must gain (see plan).")
 
 (defparameter *cold-guarded-heads*
   '("ADD-OPTIMIZER-INTERNAL"
+    ;; seqfns' FILL-FAST-OPTIMIZER registration (M3h boot 32): same
+    ;; compiler-owned class as ADD-OPTIMIZER-INTERNAL.
+    "ADD-COMPILE-ONLY-OPTIMIZER-INTERNAL"
     "ADD-TRANSFORMER"
     "LOOP-ADD-PATH" "ADD-IO-VARIABLE" "ADD-IE-COMMAND"
     "ADD-PROMPT-AND-READ-KEYWORD"
