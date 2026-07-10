@@ -404,10 +404,85 @@ before calling); VALUE is an object or, with :FORM, a source form."
 
 ;;; ---------------- fdefine ----------------
 
+(defparameter *cold-method-fspec-heads*
+  '("METHOD" "WRAPPER" "WHOPPER" "NCWHOPPER" "COMBINED" "DEFUN-IN-FLAVOR"
+    "SHARED-COMBINED")
+  "FLAVOR:*FDEFINABLE-METHOD-TYPES* (flavor/defmethod.lisp:125) plus
+SHARED-COMBINED (combine.lisp:1726): fspec heads whose definitions live
+in flavor-runtime structures, not wayward fdef cells.  The original cold
+loader could not run flavor machinery against the world model, so it
+DEFERRED these fdefines; at first boot the real FDEFINE routes them
+through their FUNCTION-SPEC-HANDLER -- method holders on the
+*UNDEFINED-METHOD-HASH-TABLE* list (drained by flavor/bootstrap.lisp
+during QLD), SHARED-COMBINED array cells -- (M3h boot 26; pass 1's
+'definition form is on *COLD-LOAD-DEFERRED-FORMS*' comment is exactly
+this case, and dribbl's methods are FDEFINEDP-verified in the user's
+warm Genera without QLD ever reloading dribbl).  Both handlers answer
+pass 1's pre-deferred-MAPC FDEFINEDP safely: FIND-METHOD-HOLDER list
+mode, and SHARED-COMBINED's no-array FDEFINEDP arm returns NIL.")
+
+(defun cold-method-fspec-p (fspec)
+  (and (consp fspec) (vsym-p (first fspec))
+       (member (vsym-name (first fspec)) *cold-method-fspec-heads*
+               :test #'string=)
+       t))
+
+(defun cold-blank-cca-name (w fn)
+  "Store NIL over the extra-info name of the CCA whose entry is FN
+\(pass 1 treats a NIL COMPILED-FUNCTION-NAME as not-fdefinable and
+skips).  Preserves the extra-info Q's cdr bits."
+  (let ((cca (- fn 2)))
+    (multiple-value-bind (ht hd) (cw-ref w cca)
+      (unless (= (tag-type ht) (cold-dtp w "HEADER-I"))
+        (error "cold-blank-cca-name: no CCA header at ~8,'0X" cca))
+      (let ((xinfo (+ cca (- (ldb (byte 18 0) hd) (ldb (byte 14 18) hd)))))
+        (multiple-value-bind (xt xd) (cw-ref w xinfo)
+          (unless (= (tag-type xt) (cold-dtp w "LIST"))
+            (error "cold-blank-cca-name: extra-info at ~8,'0X not a list"
+                   xinfo))
+          (multiple-value-bind (nt nd) (cold-nil-q w)
+            (declare (ignore nt))
+            (cold-store-contents w xd (tag 0 (cold-dtp w "NIL")) nd)))))))
+
 (defun cold-do-fdefine (w fspec def &key (def-kind :object))
   "FDEFINE fspec def T (l-bin/load.lisp:584).  DEF is a vfun, a definition
 object (macro cons etc.), or -- in the :FORM case (LOAD-MULTIPLE-DEFINITION
 sub-forms) -- a source form such as (FUNCTION other) or (QUOTE (SPECIAL x))."
+  (when (and (consp fspec) (vsym-p (first fspec))
+             (string= (vsym-name (first fspec)) "STYLE-CHECKER"))
+    ;; (COMPILER:STYLE-CHECKER checker checked) fspecs: the handler lives
+    ;; in compiler/inner.lisp, which has no cold presence at all (the
+    ;; 1992 cold band predates these maclsp checkers; ours come from
+    ;; current sources).  No cold handler can validate the name, so
+    ;; blank it -- pass 1 skips unnamed functions -- and guard the
+    ;; deferred FDEFINE on the handler property so it no-ops pre-banner.
+    ;; KNOWN GAP: the checkers stay unregistered in the fresh lineage
+    ;; (compiler-side style tooling only).
+    (when (vfun-p def)
+      (cold-blank-cca-name w (cold-fun w def)))
+    (cold-defer w (list (si-vsym "IF")
+                        (list (si-vsym "GET")
+                              (list (si-vsym "QUOTE") (first fspec))
+                              (list (si-vsym "QUOTE")
+                                    (si-vsym "FUNCTION-SPEC-HANDLER")))
+                        (list (si-vsym "FDEFINE")
+                              (list (si-vsym "QUOTE") fspec)
+                              (if (eq def-kind :form)
+                                  def
+                                  (list (si-vsym "QUOTE") def))
+                              (si-vsym "T")))
+                "defer style-checker fdefine")
+    (return-from cold-do-fdefine nil))
+  (when (cold-method-fspec-p fspec)
+    ;; Method-family specs cannot be fdefined at build (no flavor world
+    ;; in the model) and must not get wayward fdef cells: defer the whole
+    ;; FDEFINE so the boot-time handler files it as a method holder.
+    (cold-defer w (list (si-vsym "FDEFINE")
+                        (list (si-vsym "QUOTE") fspec)
+                        (if (eq def-kind :form) def (list (si-vsym "QUOTE") def))
+                        (si-vsym "T"))
+                "defer method fdefine")
+    (return-from cold-do-fdefine nil))
   (cold-note "fdefine")
   (let ((cell (cold-follow-cell w (cold-fdefinition-cell w fspec))))
     (flet ((store (tag data) (cold-store-contents w cell tag data))
@@ -749,16 +824,34 @@ for the deferred forms."
     "START-DEFSTRUCT-DEFINITION" "FINISH-DEFSTRUCT-DEFINITION"
     "INITIALIZE-RESOURCE" "REDEFINE-FORMAT-DIRECTIVE"
     "DEFGENERIC-INTERNAL"
+    ;; Inner flavor runtime is cold (M3h boot 26): these run for real at
+    ;; first boot, filing flavors/methods for flavor/bootstrap.lisp's
+    ;; QLD-time drain.
+    "DEFFLAVOR-INTERNAL" "NOTE-SOLITARY-METHOD"
+    "COMPILE-FLAVOR-METHODS-LOAD-TIME"
+    ;; (SETF (NTH n *FLAVOR-FLAGS*) "...") from DEFINE-FLAVOR-FLAG
+    ;; compiles to these iprim primitives; the target defvar's
+    ;; (MAKE-LIST 15) init is itself deferred, so the mutations follow
+    ;; it in deferred order.
+    "RPLACA2" "RPLACD2"
+    ;; combine.lisp DEFINE-SHARED-COMBINED-METHODS pre-unbinds its
+    ;; array cells; the function is cold (sys/lispfn.lisp:109) and the
+    ;; SHARED-COMBINED array putprop defers just ahead of these.
+    "LOCATION-MAKUNBOUND"
     "INITIALIZE-READTABLE-SYNTAX-AND-NAME" "FILL-ASCII-TRANSLATION-TABLES"
-    "SET-SYNTAX-#-MACRO-CHAR" "NREMPROP" "BLOCK")
+    "SET-SYNTAX-#-MACRO-CHAR" "NREMPROP" "BLOCK"
+    ;; DEFINE-METHOD-COMBINATION (ctypes.lisp) expands a REMPROP of the
+    ;; obsolete METHOD-COMBINATION-METHOD-TRANSFORMER indicator before
+    ;; each (:PROPERTY key METHOD-COMBINATION) fdefine: redefinition
+    ;; hygiene, never set in a fresh world, boot no-op.
+    "REMPROP")
   "Heads whose owners are cold files or cold-load stubs: safe to evaluate
 verbatim at first boot, before the banner.  PROCLAIM lives in
 SYS:SYS;LISP-DATABASE-COLD -- which the distribution cold load contained
 and the M2 file list must gain (see plan).")
 
 (defparameter *cold-guarded-heads*
-  '("DEFFLAVOR-INTERNAL" "NOTE-SOLITARY-METHOD"
-    "COMPILE-FLAVOR-METHODS-LOAD-TIME" "ADD-OPTIMIZER-INTERNAL"
+  '("ADD-OPTIMIZER-INTERNAL"
     "ADD-TRANSFORMER"
     "LOOP-ADD-PATH" "ADD-IO-VARIABLE" "ADD-IE-COMMAND"
     "ADD-PROMPT-AND-READ-KEYWORD"
@@ -972,6 +1065,20 @@ collected into *COLD-EVAL-STATS* under \"fixup failures\")."
       (dolist (spec *cold-load-order*)
         (let ((*cold-eval-file* spec))
           (cold-load-vbin w (sys-pathname spec))))
+      ;; DEFINE-FLAVOR-FUNCTION-SPEC-HANDLERS (defmethod.lisp:848)
+      ;; compiles to a BLOCK/TAGBODY DOLIST our router defers -- but
+      ;; pass 1 of BOOTSTRAP-FORWARD-SYMBOL-CELLS FDEFINEDPs every
+      ;; walked CCA name BEFORE the deferred MAPC runs, so the
+      ;; FUNCTION-SPEC-HANDLER properties of the method-type heads must
+      ;; already be stamped in the built world (M3h boot 26).  The
+      ;; deferred form re-putprops the same values at boot, harmlessly.
+      (let ((*cold-default-package* "FLAVOR"))
+        (dolist (head '("METHOD" "WRAPPER" "WHOPPER" "NCWHOPPER"
+                        "COMBINED" "DEFUN-IN-FLAVOR"))
+          (cold-do-putprop w (make-vsym "FLAVOR" head)
+                           (make-vsym "FLAVOR"
+                                      "METHOD-FUNCTION-SPEC-HANDLER")
+                           (make-vsym "FLAVOR" "FUNCTION-SPEC-HANDLER"))))
       ;; Late-bound references: retry until quiescent.
       (let ((failures 0))
         (loop repeat 4

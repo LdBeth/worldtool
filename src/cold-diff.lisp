@@ -1414,6 +1414,137 @@ world: all 5,849 real CCAs are DTP-LIST)."
                 "boot object walk parses ~D object~:P~@[; first: ~A~]"
                 objects (first bad))))
 
+(defun cold-symbol-pname-at (w sym-vma)
+  "Pname string of the symbol block at SYM-VMA, or NIL.  The Q at +0 is
+the symbol's DTP-HEADER-P (header type 0) whose data points at the
+pname string array."
+  (multiple-value-bind (pt pd) (cw-ref w sym-vma)
+    (and pt
+         (member (tag-type pt) (list (cold-dtp w "HEADER-P")
+                                     (cold-dtp w "STRING")
+                                     (cold-dtp w "ARRAY")))
+         (cold-read-string w pd))))
+
+(defun cold-get-property-q (w sym-vma pname)
+  "(values tag data foundp) of the first property on SYM-VMA's plist
+whose indicator symbol's pname is PNAME.  Walks the cdr-coded
+\(ind val . next) chain the way boot GET does."
+  (let ((dtp-list (cold-dtp w "LIST"))
+        (dtp-symbol (cold-dtp w "SYMBOL")))
+    (multiple-value-bind (pt pd) (cw-ref w (+ sym-vma 3))
+      (loop with vma = (and (= (tag-type pt) dtp-list) pd)
+            repeat 4096
+            while vma
+            do (multiple-value-bind (it id) (cw-ref w vma)
+                 (multiple-value-bind (vt vd) (cw-ref w (1+ vma))
+                   (when (and (= (tag-type it) dtp-symbol)
+                              (equal (cold-symbol-pname-at w id) pname))
+                     (return (values vt vd t)))
+                   (ecase (ldb (byte 2 6) vt)
+                     (0 (setf vma (+ vma 2)))
+                     (1 (setf vma nil))
+                     ((2 3) (multiple-value-bind (nt nd)
+                                (cw-ref w (cold-follow-cell w (+ vma 2)))
+                              (setf vma (and (= (tag-type nt) dtp-list)
+                                             nd)))))))
+            finally (return (values nil nil nil))))))
+
+(defun check-pass1-fspec-handlers (w)
+  "M3h boot 26 gate: pass 1 of BOOTSTRAP-FORWARD-SYMBOL-CELLS calls
+FDEFINEDP on every walked CCA's extra-info name.  For a LIST name,
+VALIDATE-FUNCTION-SPEC requires (GET head 'SYS:FUNCTION-SPEC-HANDLER)
+to be a FUNCALLable handler -- the failure arm DBG:CHECK-ARG-1 is
+warm-only, so a single list-named CCA whose head lacks a bound handler
+kills the first boot (boot 26: (FLAVOR:METHOD :TYO DRIBBLE-STREAM),
+the first dribbl method, before the flavor runtime joined the cold
+set).  Replays that read: every list-fspec head among all walked CCA
+names must carry a FUNCTION-SPEC-HANDLER property whose value symbol
+has a compiled function in its function cell."
+  (let ((bad nil)
+        (list-named 0)
+        (head-cache (make-hash-table))
+        (heads nil)
+        (dtp-list (cold-dtp w "LIST"))
+        (dtp-symbol (cold-dtp w "SYMBOL"))
+        (dtp-cf (cold-dtp w "COMPILED-FUNCTION")))
+    (flet ((head-problem (head-vma)
+             "NIL when the head validates, else a reason string."
+             (multiple-value-bind (cached foundp) (gethash head-vma head-cache)
+               (when foundp (return-from head-problem cached)))
+             (setf (gethash head-vma head-cache)
+                   (multiple-value-bind (vt vd foundp)
+                       (cold-get-property-q w head-vma
+                                            "FUNCTION-SPEC-HANDLER")
+                     (cond
+                       ((not foundp) "no FUNCTION-SPEC-HANDLER property")
+                       ;; DEFINE-FUNCTION-SPEC-HANDLER stores the
+                       ;; compiled function itself ((:PROPERTY head
+                       ;; FUNCTION-SPEC-HANDLER) defun);
+                       ;; DEFINE-DERIVED-FUNCTION-TYPE and the flavor
+                       ;; runtime store a symbol to FUNCALL through.
+                       ((= (tag-type vt) dtp-cf) nil)
+                       ((/= (tag-type vt) dtp-symbol)
+                        (format nil "handler Q ~2,'0X:~8,'0X neither ~
+symbol nor compiled function" vt vd))
+                       (t (multiple-value-bind (ft fd)
+                              (cw-ref w (cold-follow-cell w (+ vd 2)))
+                            (declare (ignore fd))
+                            (unless (= (tag-type ft) dtp-cf)
+                              (format nil "handler ~A function cell ~
+unbound (tag ~2,'0X)"
+                                      (cold-symbol-pname-at w vd)
+                                      ft)))))))))
+      (dolist (area-name '("SYMBOL-AREA" "SAFEGUARDED-OBJECTS-AREA"
+                           "WIRED-CONTROL-TABLES" "COMPILED-FUNCTION-AREA"))
+        (let ((area (cold-area w area-name)))
+          (dolist (rn (cold-area-regions area))
+            (let* ((region (aref (cold-world-regions w) rn))
+                   (vma (if (string= area-name "WIRED-CONTROL-TABLES")
+                            (cold-world-nil-vma w)
+                            (cold-region-origin region)))
+                   (limit (cold-region-free region)))
+              (loop while (< vma limit)
+                    do (multiple-value-bind (size kind)
+                           (cold-extent-size w vma)
+                         (unless (and size (plusp size)) (return))
+                         (when (eq kind :compiled-function)
+                           (multiple-value-bind (ht hd) (cw-ref w vma)
+                             (declare (ignore ht))
+                             (let ((xinfo (+ vma (- size
+                                                    (ldb (byte 14 18) hd)))))
+                               (multiple-value-bind (xt xd) (cw-ref w xinfo)
+                                 (when (= (tag-type xt) dtp-list)
+                                   ;; extra-info list; car = the name
+                                   (multiple-value-bind (nt nd) (cw-ref w xd)
+                                     (when (= (tag-type nt) dtp-list)
+                                       (incf list-named)
+                                       (multiple-value-bind (et ed)
+                                           (cw-ref w nd)
+                                         (if (/= (tag-type et) dtp-symbol)
+                                             (push (format nil "CCA ~8,'0X: ~
+list fspec head is not a symbol (~2,'0X:~8,'0X)" vma et ed)
+                                                   bad)
+                                             (let ((problem
+                                                     (head-problem ed))
+                                                   (pname
+                                                     (cold-symbol-pname-at
+                                                      w ed)))
+                                               (when (and problem
+                                                          (not (member
+                                                                pname heads
+                                                                :test
+                                                                #'equal)))
+                                                 (push (format nil "CCA ~
+~8,'0X (head ~A): ~A" vma pname problem)
+                                                       bad))
+                                               (pushnew pname heads
+                                                        :test #'equal)))))))))))
+                         (incf vma size))))))))
+    (cold-check (null bad)
+                "pass-1 fspec handlers: ~D list-named CCA~:P, heads ~
+{~{~A~^ ~}}~@[; problems: ~{~A~^ | ~}~]"
+                list-named heads (reverse bad))))
+
 (defun check-plist-termination (w)
   "M3h boot 23 gate: every interned symbol's plist must be a
 NIL-terminated cdr-coded chain.  cold-prepend-property builds
@@ -2105,6 +2236,15 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
 (defparameter *cold-reviewed-unbound-value-cells*
   '(
     "CLOS-INTERNALS:*DECL-TYPES-INHERITED-FROM-METHOD*"
+    ;; Flavor runtime (M3h boot 26): argless (DEFVAR v) dynamic
+    ;; bindings.  *TRANSFORM-FLAVOR-WARNINGS* is LET-bound by its own
+    ;; wrapper macro (defflavor.lisp:390); the three *COMBINED-METHOD-*
+    ;; specials are MULTIPLE-VALUE-BIND targets during combined-method
+    ;; construction (combine.lisp:850,1091).  Never read unbound.
+    "FLAVOR:*COMBINED-METHOD-APPLY*"
+    "FLAVOR:*COMBINED-METHOD-ARGUMENTS*"
+    "FLAVOR:*COMBINED-METHOD-LAMBDA-LIST*"
+    "FLAVOR:*TRANSFORM-FLAVOR-WARNINGS*"
     "COMMON-LISP-INTERNALS:*ALL-EMB-POOLS*"
     "COMMON-LISP-INTERNALS:*COMM-AREA-NEXT-FREE-OFFSET*"
     "COMMON-LISP-INTERNALS:*COMM-AREA-TOP-OFFSET*"
@@ -2359,6 +2499,7 @@ prints the R1 unbound-function-cell audit."
         ;; The boot's region object walks must parse every Q up to each
         ;; free pointer (M3h boot 24).
         (check-boot-object-walk w)
+        (check-pass1-fspec-handlers w)
         ;; Keyword self-evaluation forwarding, also materialized by finalize.
         (check-keyword-self-eval w)
         ;; :RELATIVE-NAMES withheld from the package calls, deferred as

@@ -26,6 +26,27 @@
     "SYS: METERING; METERING-COLD" "SYS: METERING; METERING-MACROS"
     "SYS: I-SYS; BLOCK-FUNCTIONS" "SYS: SYS; AARRAY" "SYS: SYS2; ADVISE"
     "SYS: SYS; COLD-LOAD" "SYS: SYS; COMMAND-LOOP" "SYS: SYS; EXPAND-DO"
+    ;; Inner flavor runtime (M3h boot 26).  Pass 1 of
+    ;; BOOTSTRAP-FORWARD-SYMBOL-CELLS FDEFINEDPs every walked CCA name;
+    ;; method-family names validate through (GET head
+    ;; 'FUNCTION-SPEC-HANDLER) -> METHOD-FUNCTION-SPEC-HANDLER, whose
+    ;; failure arm CHECK-ARG-1 is warm-only -- so the handler machinery
+    ;; itself was cold.  Proof chain: dribbl is in no QLD mini-alist yet
+    ;; (FDEFINEDP '(FLAVOR:METHOD :TYO SI:DRIBBLE-STREAM)) is T in the
+    ;; user's warm Genera; flavor/bootstrap.lisp converts
+    ;; *UNDEFINED-METHOD-HASH-TABLE* and
+    ;; *STANDARDIZED-GENERIC-FUNCTION-NAMES* FROM LISTS (the pre-banner
+    ;; representations) and verifies pre-compiler "combined method
+    ;; bootstrap guesses" -- composition ran cold too.  QLD's
+    ;; INNER-SYSTEM-FILE-ALIST reloads these on top, like the CLCP
+    ;; pattern.  flavor/make stays warm (FSET stub MAKE-INSTANCE ->
+    ;; MAKE-INSTANCE-COLD is the bridge); bootstrap/other/error/update
+    ;; are QLD-side.  Deferred DEFFLAVOR-INTERNAL of VANILLA-FLAVOR must
+    ;; precede the first deferred composition, hence the whole block
+    ;; loads before DRIBBL.
+    "SYS: FLAVOR; GLOBAL" "SYS: FLAVOR; DEFFLAVOR" "SYS: FLAVOR; DEFGENERIC"
+    "SYS: FLAVOR; DEFMETHOD" "SYS: FLAVOR; COMPOSE" "SYS: FLAVOR; COMBINE"
+    "SYS: FLAVOR; HANDLE" "SYS: FLAVOR; CTYPES" "SYS: FLAVOR; VANILLA"
     "SYS: IO; DRIBBL" "SYS: SYS2; ENCAPS" "SYS: SYS; EVAL"
     "SYS: SYS; LISP-DATABASE-COLD" "SYS: SYS; FSPEC"
     "SYS: SYS2; HASH" "SYS: SYS2; HEAP" "SYS: IO; INTERACTIVE-STREAM"
@@ -250,38 +271,63 @@ Returns (values deferred-count patch-count package-count)."
              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
            (revived (cold-retry-deferred-defvars w))
            (reconciled (cold-reconcile-linked-defvars w))
-           (patches (reverse (cold-world-patches w)))
            (deferred (reverse (cold-world-deferred w)))
            (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
            (loc-tag (tag 0 (cold-dtp w "LOCATIVE")))
            (add-name (make-vsym "SYSTEM-INTERNALS" "PKG-ADD-RELATIVE-NAME"))
-           (entries
-             (append
-              (loop for (vma pkg form) in patches
-                    collect (cons pkg (list store (make-vraw loc-tag vma)
+           (patches nil)
+           (deferred-qs nil))
+      (flet ((materialize (entry)
+               (let ((*cold-default-package* (car entry)))
+                 (multiple-value-bind (ft fd)
+                     (cold-ref w (cdr entry) :area "WORKING-STORAGE-AREA")
+                   (cons ft fd)))))
+        ;; Materialize the deferred forms FIRST: load-time-eval constants
+        ;; inside them (FIND-GENERIC-FUNCTION-AS-CONSTANT etc., heavy in
+        ;; the flavor runtime) mint patches as they materialize.  A new
+        ;; DEFERRAL here would never execute -- still a hard error.
+        (setf deferred-qs (mapcar #'materialize deferred))
+        (unless (= (length (cold-world-deferred w)) (length deferred))
+          (error "~D deferral~:P noted while materializing the deferred list"
+                 (- (length (cold-world-deferred w)) (length deferred))))
+        ;; Drain patches to a fixed point: materializing a patch entry
+        ;; can itself mint another patch (nested veval constants).
+        (loop with done = 0
+              for round from 0
+              for pending = (nthcdr done (reverse (cold-world-patches w)))
+              while pending
+              do (when (> round 100)
+                   (error "Patch materialization did not converge"))
+                 (dolist (p pending)
+                   (destructuring-bind (vma pkg form) p
+                     (push (materialize
+                            (cons pkg (list store (make-vraw loc-tag vma)
                                             form)))
-              deferred
-              (loop for triple in (reverse (cold-world-relative-names w))
-                    collect (cons "SYSTEM-INTERNALS"
-                                  (cons add-name triple))))))
-      (multiple-value-bind (spine-tag spine-data) (cold-nil-q w)
-        (dolist (entry (reverse entries))
-          (let ((*cold-default-package* (car entry)))
-            (multiple-value-bind (ft fd)
-                (cold-ref w (cdr entry) :area "WORKING-STORAGE-AREA")
-              (setf spine-data (cold-cons w ft fd spine-tag spine-data)
-                    spine-tag (tag 0 (cold-dtp w "LIST"))))))
-        (cold-set-symbol-value
-         w (make-vsym "SYSTEM-INTERNALS" "*COLD-LOAD-DEFERRED-FORMS*")
-         spine-tag spine-data))
-      ;; Anything deferred or patched WHILE materializing the list would
-      ;; never execute -- insist the capture was complete.
-      (unless (and (= (length (cold-world-patches w)) (length patches))
-                   (= (length (cold-world-deferred w)) (length deferred)))
-        (error "~D patch~:P / ~D deferral~:P noted while materializing ~
-the deferred list"
-               (- (length (cold-world-patches w)) (length patches))
-               (- (length (cold-world-deferred w)) (length deferred))))
+                           patches)
+                     (incf done)))
+              finally (setf patches (nreverse patches)))
+        (unless (= (length (cold-world-deferred w)) (length deferred))
+          (error "~D deferral~:P noted while materializing patches"
+                 (- (length (cold-world-deferred w)) (length deferred))))
+        ;; Boot order: patches first (they fill Qs the deferred forms'
+        ;; constants reference), then the deferred forms, then the
+        ;; withheld relative names.
+        (let ((qs (append
+                   patches
+                   deferred-qs
+                   (mapcar #'materialize
+                           (loop for triple in (reverse
+                                                (cold-world-relative-names w))
+                                 collect (cons "SYSTEM-INTERNALS"
+                                               (cons add-name triple)))))))
+          (multiple-value-bind (spine-tag spine-data) (cold-nil-q w)
+            (dolist (q (reverse qs))
+              (setf spine-data (cold-cons w (car q) (cdr q)
+                                          spine-tag spine-data)
+                    spine-tag (tag 0 (cold-dtp w "LIST"))))
+            (cold-set-symbol-value
+             w (make-vsym "SYSTEM-INTERNALS" "*COLD-LOAD-DEFERRED-FORMS*")
+             spine-tag spine-data))))
       (multiple-value-bind (nt nd) (cold-nil-q w)
         (cold-set-symbol-value
          w (make-vsym "SYSTEM-INTERNALS" "*VALUE-CELLS-TO-LOCALIZE-FIRST*")
@@ -308,7 +354,9 @@ the deferred list"
       (when (plusp reconciled)
         (format t "~&  ~D linked defvar stamp~:P reverted to unbound~%"
                 reconciled))
-      (values (length entries) (length patches) package-count))))
+      (values (+ (length patches) (length deferred-qs)
+                 (length (cold-world-relative-names w)))
+              (length patches) package-count))))
 
 (defun cold-build-world (w &key reference)
   "The full generator pipeline after MAKE-SKELETON-WORLD: heap regions,
