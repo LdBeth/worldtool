@@ -606,6 +606,18 @@ different packages yields one key."
     (cons (cons (fspec-key (car obj)) (and (cdr obj) (fspec-key (cdr obj)))))
     (t obj)))
 
+(defun cold-store-contents (w vma tag data)
+  "Store TAG:DATA into the Q at VMA preserving the destination's cdr
+code, as %P-STORE-CONTENTS does.  Property value cells live inside
+cdr-coded plist conses whose value Q carries cdr-normal; a raw cw-set
+there zeroes the code, splicing the rest of PROPERTY-LIST-AREA into the
+plist, and GET's walk runs off the allocation frontier into unwritten
+NULL Qs on the first missing-indicator lookup (M3h boot 23: trap 71 in
+GET from DECLARED-STORAGE-CATEGORY on the first :FUNCTION link record)."
+  (multiple-value-bind (old-tag old-data) (cw-ref w vma)
+    (declare (ignore old-data))
+    (cw-set w vma (logior (logand old-tag #xC0) (tag-type tag)) data)))
+
 (defun cold-prepend-property (w sym-vma ind-tag ind-data val-tag val-data)
   "Push an (indicator value) pair onto the plist at SYM-VMA+3; returns the
 VMA of the value cell (= PROPERTY-CELL-LOCATION)."
@@ -643,7 +655,8 @@ are redefined after boot."
                                   w sym it id
                                   (tag 0 (cold-dtp w "NULL")) 0)))
                        ;; Unbound convention: dtp-null pointing at the cell.
-                       (cw-set w cell (tag 0 (cold-dtp w "NULL")) cell)
+                       (cold-store-contents w cell (tag 0 (cold-dtp w "NULL"))
+                                            cell)
                        cell))))
                 ((consp fspec)
                  ;; (fspec-list . cell) block; the locative points at the cell.

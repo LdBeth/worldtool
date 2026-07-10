@@ -1299,6 +1299,67 @@ link record, so function cells compare as built.)"
                 "bootstrap link invariant over ~D record~:P~@[; conflict: ~A~]"
                 n (first bad))))
 
+(defun check-plist-termination (w)
+  "M3h boot 23 gate: every interned symbol's plist must be a
+NIL-terminated cdr-coded chain.  cold-prepend-property builds
+\(ind val . next) triples whose value Q carries cdr-normal; any raw
+cw-set into a property cell zeroes that code and splices the rest of
+PROPERTY-LIST-AREA into the walk, so GET runs off the allocation
+frontier and traps on the first unwritten Q (boot 23: the
+FUNCTION-CELL-STORAGE-CATEGORY miss on CL:< from the first :FUNCTION
+link record).  Symbols on link records must also be NULL-free:
+BOOTSTRAP-LINK-SYMBOL-CELLS GETs their full plists pre-banner and a
+DTP-NULL car is the same trap 71."
+  (let ((bad nil)
+        (nsyms 0)
+        (nqs 0)
+        (null-cells 0)
+        (dtp-null (cold-dtp w "NULL"))
+        (dtp-list (cold-dtp w "LIST"))
+        (linked (make-hash-table)))
+    (dolist (rec (cold-world-linked-cells w))
+      (setf (gethash (cold-vsym w (first rec)) linked) t
+            (gethash (cold-vsym w (second rec)) linked) t))
+    (maphash
+     (lambda (key sym-vma)
+       (incf nsyms)
+       (multiple-value-bind (tag data) (cw-ref w (+ sym-vma 3))
+         (let ((steps 0))
+           (loop
+             (when (cold-q-nil-p w tag data) (return))
+             (unless (= (tag-type tag) dtp-list)
+               (push (format nil "~A: plist cdr is ~2,'0X:~8,'0X"
+                             (car key) tag data)
+                     bad)
+               (return))
+             (when (> (incf steps) 4096)
+               (push (format nil "~A: plist walk did not terminate"
+                             (car key))
+                     bad)
+               (return))
+             (let ((vma (cold-follow-cell w data)))
+               (multiple-value-bind (ct cd) (cw-ref w vma)
+                 (when (= (tag-type ct) dtp-null)
+                   (incf null-cells)
+                   (when (gethash sym-vma linked)
+                     (push (format nil "~A: NULL Q at ~8,'0X on a ~
+link-record symbol" (car key) vma)
+                           bad))
+                   ;; an unbound cell's walk continues normally: the
+                   ;; NULL Q keeps the cdr code the pair was built with
+                   )
+                 (incf nqs)
+                 (ecase (ldb (byte 2 6) ct)
+                   (0 (setf tag (tag 0 dtp-list) data (1+ vma)))
+                   (1 (return))
+                   ((2 3) (multiple-value-setq (tag data)
+                            (cw-ref w (cold-follow-cell w (1+ vma))))))))))))
+     (cold-world-symbols w))
+    (cold-check (null bad)
+                "plists of ~D symbol~:P terminate (~D Qs walked, ~
+~D unbound cell~:P)~@[; first: ~A~]"
+                nsyms nqs null-cells (first bad))))
+
 (defun check-linked-symbol-cells (w)
   "M3h gate: SI:*LINKED-SYMBOL-CELLS* carries the (from to type) records
 that permanent-links' SI:LINK-SYMBOL-*-CELLS load forms accumulated, in
@@ -2176,6 +2237,10 @@ prints the R1 unbound-function-cell audit."
         ;; ... and no record may ship two bound-but-different cells, or
         ;; BOOTSTRAP-LINK-SYMBOL-CELLS FERRORs at first boot (M3h boot 21).
         (check-bootstrap-link-invariant w)
+        ;; Every plist NIL-terminated with intact cdr codes; link-record
+        ;; symbols additionally NULL-free -- DECLARED-STORAGE-CATEGORY
+        ;; GETs their plists at first boot (M3h boot 23).
+        (check-plist-termination w)
         ;; Keyword self-evaluation forwarding, also materialized by finalize.
         (check-keyword-self-eval w)
         ;; :RELATIVE-NAMES withheld from the package calls, deferred as

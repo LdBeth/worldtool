@@ -388,14 +388,14 @@ before calling); VALUE is an object or, with :FORM, a source form."
       (let* ((ind-key (fspec-key indicator))
              (cell (cold-property-cell w sym it id ind-key))
              (value-form (if (veval-p value) (veval-form value) value)))
-        (cond (vt (cw-set w cell vt vd))
+        (cond (vt (cold-store-contents w cell vt vd))
               ((eq vd :patch)
-               (cw-set w cell (tag 0 (cold-dtp w "NULL")) cell)
+               (cold-store-contents w cell (tag 0 (cold-dtp w "NULL")) cell)
                (cold-note-patch w cell value-form))
               (t
                ;; Value exists only at boot: leave the property unbound-null
                ;; and defer the whole putprop (replaces in place at boot).
-               (cw-set w cell (tag 0 (cold-dtp w "NULL")) cell)
+               (cold-store-contents w cell (tag 0 (cold-dtp w "NULL")) cell)
                (cold-defer w (list (si-vsym "PUTPROP")
                                    (list (si-vsym "QUOTE") sym)
                                    value-form
@@ -410,7 +410,7 @@ object (macro cons etc.), or -- in the :FORM case (LOAD-MULTIPLE-DEFINITION
 sub-forms) -- a source form such as (FUNCTION other) or (QUOTE (SPECIAL x))."
   (cold-note "fdefine")
   (let ((cell (cold-follow-cell w (cold-fdefinition-cell w fspec))))
-    (flet ((store (tag data) (cw-set w cell tag data))
+    (flet ((store (tag data) (cold-store-contents w cell tag data))
            (value (thing)
              (if (eq def-kind :form)
                  (cold-eval-value w thing)
@@ -437,7 +437,7 @@ sub-forms) -- a source form such as (FUNCTION other) or (QUOTE (SPECIAL x))."
                                 (unless tag
                                   (error "Unresolved FDEFINE ~S <- ~S"
                                          fspec def))
-                                (cw-set w cell tag data))))
+                                (cold-store-contents w cell tag data))))
                           (cold-world-fixups w))))))))))
   ;; The fdefs table already interned the cell under the fspec key.
   nil)
@@ -668,7 +668,7 @@ them at first boot (sys2/memory-cold.lisp:279)."
                                       (fspec-key (si-vsym prop)))))
         (multiple-value-bind (ct cd)
             (cold-symbol-ref w (make-vsym "KEYWORD" cat))
-          (cw-set w cell ct cd))))
+          (cold-store-contents w cell ct cd))))
     (when (string= cat "WIRED")
       (let ((cell (1+ (cold-vsym w sym))))    ; value cell
         (when (string= ref "FUNCTION-CELL")
