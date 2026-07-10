@@ -1347,9 +1347,21 @@ every object boundary from the region origin (wired: from NIL,
 objects.lisp:661-665) to the free pointer.  Any Q run the extent parser
 cannot parse -- an unwritten gap, a headerless code block -- kills the
 first boot with \"Found non-enclosing structure\", whose reporting path
-is itself the unbound TRANSPORT-ERROR-ADDITIONAL-INFO trap."
+is itself the unbound TRANSPORT-ERROR-ADDITIONAL-INFO trap.
+
+M3h boot 25 extension: pass 1 also calls COMPILED-FUNCTION-NAME on
+every compiled function it walks, which reads CAR of the Q at
+cca + (CCA-TOTAL-SIZE - CCA-SUFFIX-SIZE) (sys2/macro.lisp
+CCA-EXTRA-INFO #+IMACH).  Suffix 0 sends that read one Q past the
+block (boot 25 trapped on the catch-all's neighbor), and a non-list
+extra-info Q either traps or FERRORs in CAR.  Every CCA must have
+suffix >= 1, its extra-info inside the block past the self-pointer,
+and an extra-info Q of type DTP-LIST or DTP-NIL (survey of the built
+world: all 5,849 real CCAs are DTP-LIST)."
   (let ((bad nil)
-        (objects 0))
+        (objects 0)
+        (dtp-list (cold-dtp w "LIST"))
+        (dtp-nil (cold-dtp w "NIL")))
     (dolist (area-name '("SYMBOL-AREA" "SAFEGUARDED-OBJECTS-AREA"
                          "WIRED-CONTROL-TABLES" "COMPILED-FUNCTION-AREA"))
       (let ((area (cold-area w area-name)))
@@ -1372,7 +1384,31 @@ is itself the unbound TRANSPORT-ERROR-ADDITIONAL-INFO trap."
 ~D (region ends at ~8,'0X)" area-name kind vma size limit)
                                     bad)
                               (return))
-                             (t (incf objects)
+                             (t (when (eq kind :compiled-function)
+                                  (multiple-value-bind (ht hd) (cw-ref w vma)
+                                    (declare (ignore ht))
+                                    (let* ((suffix (ldb (byte 14 18) hd))
+                                           (xinfo (+ vma (- size suffix))))
+                                      (if (or (< suffix 1)
+                                              (< (- size suffix) 2))
+                                          (push (format nil "~A: CCA at ~
+~8,'0X extra-info outside block (suffix ~D total ~D)"
+                                                        area-name vma suffix
+                                                        size)
+                                                bad)
+                                          (multiple-value-bind (xt xd)
+                                              (cw-ref w xinfo)
+                                            (declare (ignore xd))
+                                            (unless (member (tag-type xt)
+                                                            (list dtp-list
+                                                                  dtp-nil))
+                                              (push (format nil "~A: CCA at ~
+~8,'0X extra-info Q ~8,'0X has type #x~2,'0X, not list or NIL"
+                                                            area-name vma
+                                                            xinfo
+                                                            (tag-type xt))
+                                                    bad)))))))
+                                (incf objects)
                                 (incf vma size)))))))))
     (cold-check (null bad)
                 "boot object walk parses ~D object~:P~@[; first: ~A~]"

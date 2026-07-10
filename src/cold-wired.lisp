@@ -190,20 +190,26 @@ that names the vector.  Wrapped as a well-formed compiled function:
 ITRAP-DISPATCH's entry-T sweep retires it during the load, but the dead
 block stays in the wired region and BOOTSTRAP-FORWARD-SYMBOL-CELLS'
 MAP-COMPILED-FUNCTIONS walk must still %FIND-STRUCTURE-EXTENT past it
-(M3h boot 24)."
+(M3h boot 24) and CCA-EXTRA-INFO must read inside it: pass 1 takes
+COMPILED-FUNCTION-NAME = (CAR extra-info) where extra-info is the Q at
+cca + (total-size - suffix-size), so suffix-size 0 reads one Q PAST the
+block (M3h boot 25).  Suffix 1 with a NIL extra-info gives name = NIL,
+which FDEFINEDP rejects, and pass 1 skips the block."
   (let ((cca (cold-alloc w "WIRED-CONTROL-TABLES" 4)))
-    ;; CCA header: suffix-size 0, total-size 4 (cold-fun's layout).
+    ;; CCA header: suffix-size 1, total-size 4 (sys2/macro.lisp
+    ;; CCA-EXTRA-INFO #+IMACH: CCA-SUFFIX-SIZE = (byte * 18)).
     (cw-set w cca
             (tag (layout-value (cold-world-layout w)
                                "SYSTEM:%HEADER-TYPE-COMPILED-FUNCTION")
                  (cold-dtp w "HEADER-I"))
-            4)
+            (logior (ash 1 18) 4))
     (cw-set w (+ cca 1) (tag 0 (cold-dtp w "COMPILED-FUNCTION")) (+ cca 2))
     ;; Packed-instruction-62 carries two 18-bit halfwords: (halt 0, halt 0).
     (cw-set w (+ cca 2) (tag 0 (cold-dtp w "PACKED-INSTRUCTION-62"))
             #xF000BC00)
-    ;; End of compiled code: cdr 1, dtp-null, 0 (stub/idispat.c DoICacheFill).
-    (cw-set w (+ cca 3) (tag 1 (cold-dtp w "NULL")) 0)
+    ;; Suffix: the extra-info list, NIL (real CCAs end code the same way,
+    ;; with a cdr-1 suffix Q directly after the last instruction).
+    (cw-set w (+ cca 3) (tag 1 (cold-dtp w "NIL")) (cold-world-nil-vma w))
     (setf (cold-world-catch-all-pc w) (+ cca 2))))
 
 (defun cold-build-trap-vectors (w)
