@@ -58,15 +58,8 @@
 (defun si-vsym (name) (make-vsym "SYSTEM-INTERNALS" name))
 
 ;;; ---------------- Cold memory utilities ----------------
-
-(defun cold-follow-cell (w vma)
-  "Follow one-q-forward chains from VMA; returns the final cell vma."
-  (loop for hops from 0 below 16
-        do (multiple-value-bind (tag data) (cw-ref w vma)
-             (if (= (tag-type tag) (cold-dtp w "ONE-Q-FORWARD"))
-                 (setf vma data)
-                 (return vma)))
-        finally (return vma)))
+;;; (cold-follow-cell lives in cold-object.lisp with the other cold
+;;; memory readers it shares with cold-do-fdefine and the gates.)
 
 (defun cold-value-cell (w vsym)
   (cold-follow-cell w (1+ (cold-vsym w vsym))))
@@ -485,6 +478,48 @@ sub-forms) -- a source form such as (FUNCTION other) or (QUOTE (SPECIAL x))."
     (return-from cold-do-fdefine nil))
   (cold-note "fdefine")
   (let ((cell (cold-follow-cell w (cold-fdefinition-cell w fspec))))
+    ;; Derived function specs -- (CL:SETF f), (FCL:SETF f), (SCL:LOCF f),
+    ;; (COMPILER:COMPILER-MACRO f); DEFINE-DERIVED-FUNCTION-TYPE,
+    ;; fspec.lisp:1752 -- keep their generator cell, but the boot-time
+    ;; DERIVED-FUNCTION-SPEC-HANDLER (fspec.lisp:1583) reaches the
+    ;; definition ONLY through (GET f <head's DERIVED-FUNCTION-PROPERTY>),
+    ;; a locative to the cell (FUNCTION-SPEC-GET; the warm path allocates
+    ;; the cell from a table, but nothing requires table membership).
+    ;; Stamp that property so pass 1's FDEFINEDP and any boot FDEFINITION
+    ;; find the cold definition.  Dist ground truth:
+    ;; RPC:BYTE-SWAPPED-LOCATIVE-REF-32's LT:DERIVED-SETF-FUNCTION
+    ;; property is 19:<cell> (M3h boot 27).
+    (when (and (consp fspec) (null (cddr fspec))
+               (vsym-p (first fspec)) (vsym-p (second fspec)))
+      ;; Resolve both symbols NOW -- the loading file's package context
+      ;; -- never inside the fixup (M3h boot 15 lesson).
+      (let ((head (cold-vsym w (first fspec)))
+            (from (cold-vsym w (second fspec))))
+        (flet ((stamp-derived ()
+                 "T when stamped or already present; NIL when the head
+has no DERIVED-FUNCTION-PROPERTY (yet)."
+                 (multiple-value-bind (dt dd dfound)
+                     (cold-get-property-q w head "DERIVED-FUNCTION-PROPERTY")
+                   (when (and dfound (= (tag-type dt) (cold-dtp w "SYMBOL")))
+                     (multiple-value-bind (xt xd xfound)
+                         (cold-get-property-q w from
+                                              (cold-symbol-pname-at w dd))
+                       (declare (ignore xt xd))
+                       (unless xfound
+                         (cold-note "derived fspec property")
+                         (cold-prepend-property
+                          w from
+                          (tag 0 (cold-dtp w "SYMBOL")) dd
+                          (tag 0 (cold-dtp w "LOCATIVE")) cell)))
+                     t))))
+          (unless (stamp-derived)
+            ;; fspec.lisp defines (FCL:SETF FDEFINITION) at :327, above
+            ;; its own DEFINE-DERIVED-FUNCTION-TYPE DEFPROPs (:1752), so
+            ;; the head's property may not exist yet: retry at the
+            ;; fixup drain, once every file has loaded.  A head that
+            ;; never becomes a derived type (LAMBDA-MACRO ...) makes
+            ;; the retry a no-op.
+            (push #'stamp-derived (cold-world-fixups w))))))
     (flet ((store (tag data) (cold-store-contents w cell tag data))
            (value (thing)
              (if (eq def-kind :form)

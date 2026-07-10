@@ -100,17 +100,8 @@ self-pointer)."
                 "~A at #x~8,'0X: expected ~2,'0X:~8,'0X got ~2,'0X:~8,'0X"
                 what vma tag data atag adata)))
 
-(defun cold-read-string (w vma)
-  "Read back a cold ART-STRING block (test aid)."
-  (multiple-value-bind (tag data) (cw-ref w vma)
-    (declare (ignore tag))
-    (let* ((len (ldb (byte 15 0) data))
-           (s (make-string len)))
-      (dotimes (i len s)
-        (multiple-value-bind (wt wd) (cw-ref w (+ vma 1 (floor i 4)))
-          (declare (ignore wt))
-          (setf (char s i)
-                (code-char (ldb (byte 8 (* 8 (mod i 4))) wd))))))))
+;;; (cold-read-string lives in cold-object.lisp with the other cold
+;;; memory readers.)
 
 (defun check-materializers (w)
   "M3b gate: each object kind materializes and reads back."
@@ -1414,86 +1405,127 @@ world: all 5,849 real CCAs are DTP-LIST)."
                 "boot object walk parses ~D object~:P~@[; first: ~A~]"
                 objects (first bad))))
 
-(defun cold-symbol-pname-at (w sym-vma)
-  "Pname string of the symbol block at SYM-VMA, or NIL.  The Q at +0 is
-the symbol's DTP-HEADER-P (header type 0) whose data points at the
-pname string array."
-  (multiple-value-bind (pt pd) (cw-ref w sym-vma)
-    (and pt
-         (member (tag-type pt) (list (cold-dtp w "HEADER-P")
-                                     (cold-dtp w "STRING")
-                                     (cold-dtp w "ARRAY")))
-         (cold-read-string w pd))))
+;;; (cold-symbol-pname-at / cold-get-property-q live in cold-object.lisp:
+;;; cold-do-fdefine's derived-fspec stamp reads the same properties.)
 
-(defun cold-get-property-q (w sym-vma pname)
-  "(values tag data foundp) of the first property on SYM-VMA's plist
-whose indicator symbol's pname is PNAME.  Walks the cdr-coded
-\(ind val . next) chain the way boot GET does."
-  (let ((dtp-list (cold-dtp w "LIST"))
-        (dtp-symbol (cold-dtp w "SYMBOL")))
-    (multiple-value-bind (pt pd) (cw-ref w (+ sym-vma 3))
-      (loop with vma = (and (= (tag-type pt) dtp-list) pd)
-            repeat 4096
-            while vma
-            do (multiple-value-bind (it id) (cw-ref w vma)
-                 (multiple-value-bind (vt vd) (cw-ref w (1+ vma))
-                   (when (and (= (tag-type it) dtp-symbol)
-                              (equal (cold-symbol-pname-at w id) pname))
-                     (return (values vt vd t)))
-                   (ecase (ldb (byte 2 6) vt)
-                     (0 (setf vma (+ vma 2)))
-                     (1 (setf vma nil))
-                     ((2 3) (multiple-value-bind (nt nd)
-                                (cw-ref w (cold-follow-cell w (+ vma 2)))
-                              (setf vma (and (= (tag-type nt) dtp-list)
-                                             nd)))))))
-            finally (return (values nil nil nil))))))
+(defun cold-list-second-q (w list-vma)
+  "(values tag data) of the second element Q of the cdr-coded list at
+LIST-VMA, or NIL when the list has no second element."
+  (multiple-value-bind (t0 d0) (cw-ref w list-vma)
+    (declare (ignore d0))
+    (case (ldb (byte 2 6) t0)
+      (0 (cw-ref w (1+ list-vma)))          ; cdr-next: element follows
+      (1 (values nil nil))                  ; cdr-nil: single element
+      (t (multiple-value-bind (ct cd)       ; cdr-normal: follow the cdr Q
+             (cw-ref w (1+ list-vma))
+           (if (= (tag-type ct) (cold-dtp w "LIST"))
+               (cw-ref w cd)
+               (values nil nil)))))))
 
 (defun check-pass1-fspec-handlers (w)
-  "M3h boot 26 gate: pass 1 of BOOTSTRAP-FORWARD-SYMBOL-CELLS calls
+  "M3h boot 26/27 gate: pass 1 of BOOTSTRAP-FORWARD-SYMBOL-CELLS calls
 FDEFINEDP on every walked CCA's extra-info name.  For a LIST name,
 VALIDATE-FUNCTION-SPEC requires (GET head 'SYS:FUNCTION-SPEC-HANDLER)
 to be a FUNCALLable handler -- the failure arm DBG:CHECK-ARG-1 is
-warm-only, so a single list-named CCA whose head lacks a bound handler
-kills the first boot (boot 26: (FLAVOR:METHOD :TYO DRIBBLE-STREAM),
-the first dribbl method, before the flavor runtime joined the cold
-set).  Replays that read: every list-fspec head among all walked CCA
-names must carry a FUNCTION-SPEC-HANDLER property whose value symbol
-has a compiled function in its function cell."
+warm-only, so a single list-named CCA whose head fails validation
+kills the first boot (boot 26: (FLAVOR:METHOD :TYO DRIBBLE-STREAM)
+before the flavor runtime joined the cold set; boot 27:
+\(GLOBAL:SETF BYTE-SWAPPED-LOCATIVE-REF-32) -- the resolver had homed
+the head on the one SETF without the derived-type DEFPROPs).  Replays
+that read: every list-fspec head among all walked CCA names must
+carry a FUNCTION-SPEC-HANDLER property whose value symbol has a
+compiled function in its function cell.  When the handler is
+DERIVED-FUNCTION-SPEC-HANDLER (fspec.lisp:1583), validation further
+requires the head's DERIVED-FUNCTION-PROPERTY, and pass 1's FDEFINEDP
+then reads (GET derived-from <that property>) -- which must be a
+locative to a cell holding a compiled function (the cold-do-fdefine
+derived stamp), or the definition silently vanishes at boot."
   (let ((bad nil)
         (list-named 0)
         (head-cache (make-hash-table))
         (heads nil)
         (dtp-list (cold-dtp w "LIST"))
         (dtp-symbol (cold-dtp w "SYMBOL"))
+        (dtp-locative (cold-dtp w "LOCATIVE"))
         (dtp-cf (cold-dtp w "COMPILED-FUNCTION")))
-    (flet ((head-problem (head-vma)
-             "NIL when the head validates, else a reason string."
+    (flet ((head-info (head-vma)
+             "(problem . derived-ind-vma): problem NIL when the head
+validates; derived-ind-vma = the DERIVED-FUNCTION-PROPERTY indicator
+symbol when the head is a derived function-spec type."
              (multiple-value-bind (cached foundp) (gethash head-vma head-cache)
-               (when foundp (return-from head-problem cached)))
+               (when foundp (return-from head-info cached)))
              (setf (gethash head-vma head-cache)
                    (multiple-value-bind (vt vd foundp)
                        (cold-get-property-q w head-vma
                                             "FUNCTION-SPEC-HANDLER")
                      (cond
-                       ((not foundp) "no FUNCTION-SPEC-HANDLER property")
+                       ((not foundp)
+                        (cons "no FUNCTION-SPEC-HANDLER property" nil))
                        ;; DEFINE-FUNCTION-SPEC-HANDLER stores the
                        ;; compiled function itself ((:PROPERTY head
                        ;; FUNCTION-SPEC-HANDLER) defun);
                        ;; DEFINE-DERIVED-FUNCTION-TYPE and the flavor
                        ;; runtime store a symbol to FUNCALL through.
-                       ((= (tag-type vt) dtp-cf) nil)
+                       ((= (tag-type vt) dtp-cf) (cons nil nil))
                        ((/= (tag-type vt) dtp-symbol)
-                        (format nil "handler Q ~2,'0X:~8,'0X neither ~
-symbol nor compiled function" vt vd))
-                       (t (multiple-value-bind (ft fd)
-                              (cw-ref w (cold-follow-cell w (+ vd 2)))
-                            (declare (ignore fd))
-                            (unless (= (tag-type ft) dtp-cf)
-                              (format nil "handler ~A function cell ~
+                        (cons (format nil "handler Q ~2,'0X:~8,'0X neither ~
+symbol nor compiled function" vt vd)
+                              nil))
+                       (t
+                        (multiple-value-bind (ft fd)
+                            (cw-ref w (cold-follow-cell w (+ vd 2)))
+                          (declare (ignore fd))
+                          (cond
+                            ((/= (tag-type ft) dtp-cf)
+                             (cons (format nil "handler ~A function cell ~
 unbound (tag ~2,'0X)"
-                                      (cold-symbol-pname-at w vd)
-                                      ft)))))))))
+                                           (cold-symbol-pname-at w vd)
+                                           ft)
+                                   nil))
+                            ((equal (cold-symbol-pname-at w vd)
+                                    "DERIVED-FUNCTION-SPEC-HANDLER")
+                             (multiple-value-bind (dt dd dfound)
+                                 (cold-get-property-q
+                                  w head-vma "DERIVED-FUNCTION-PROPERTY")
+                               (if (and dfound (= (tag-type dt) dtp-symbol))
+                                   (cons nil dd)
+                                   (cons (concatenate 'string
+                                                      "derived head lacks a "
+                                                      "symbol-valued DERIVED-"
+                                                      "FUNCTION-PROPERTY "
+                                                      "property")
+                                         nil))))
+                            (t (cons nil nil)))))))))
+           (derived-problem (ind-vma name-list-vma)
+             "NIL when (GET derived-from <ind>) is a locative to a cell
+holding a compiled function; else a reason string."
+             (multiple-value-bind (st sd)
+                 (cold-list-second-q w name-list-vma)
+               (cond
+                 ((or (null st) (/= (tag-type st) dtp-symbol))
+                  "second element is not a symbol")
+                 (t
+                  (let ((ind-pname (cold-symbol-pname-at w ind-vma)))
+                    (multiple-value-bind (pt pd pfound)
+                        (cold-get-property-q w sd ind-pname)
+                      (cond
+                        ((not pfound)
+                         (format nil "~A lacks the ~A property"
+                                 (cold-symbol-pname-at w sd) ind-pname))
+                        ((/= (tag-type pt) dtp-locative)
+                         (format nil "~A property of ~A is ~
+~2,'0X:~8,'0X, not a locative"
+                                 ind-pname (cold-symbol-pname-at w sd)
+                                 pt pd))
+                        (t
+                         (multiple-value-bind (ct cd)
+                             (cw-ref w (cold-follow-cell w pd))
+                           (declare (ignore cd))
+                           (unless (= (tag-type ct) dtp-cf)
+                             (format nil "~A derived cell unbound ~
+(tag ~2,'0X)"
+                                     (cold-symbol-pname-at w sd)
+                                     ct))))))))))))
       (dolist (area-name '("SYMBOL-AREA" "SAFEGUARDED-OBJECTS-AREA"
                            "WIRED-CONTROL-TABLES" "COMPILED-FUNCTION-AREA"))
         (let ((area (cold-area w area-name)))
@@ -1524,21 +1556,36 @@ unbound (tag ~2,'0X)"
                                              (push (format nil "CCA ~8,'0X: ~
 list fspec head is not a symbol (~2,'0X:~8,'0X)" vma et ed)
                                                    bad)
-                                             (let ((problem
-                                                     (head-problem ed))
-                                                   (pname
-                                                     (cold-symbol-pname-at
-                                                      w ed)))
-                                               (when (and problem
-                                                          (not (member
-                                                                pname heads
-                                                                :test
-                                                                #'equal)))
-                                                 (push (format nil "CCA ~
+                                             (destructuring-bind
+                                                 (problem . derived-ind)
+                                                 (head-info ed)
+                                               (let ((pname
+                                                       (cold-symbol-pname-at
+                                                        w ed)))
+                                                 (when (and problem
+                                                            (not (member
+                                                                  pname heads
+                                                                  :test
+                                                                  #'equal)))
+                                                   (push (format nil "CCA ~
 ~8,'0X (head ~A): ~A" vma pname problem)
-                                                       bad))
-                                               (pushnew pname heads
-                                                        :test #'equal)))))))))))
+                                                         bad))
+                                                 (pushnew pname heads
+                                                          :test #'equal)
+                                                 ;; Derived spec: FDEFINEDP
+                                                 ;; reads (GET derived-from
+                                                 ;; <indicator>) -- must be
+                                                 ;; a locative to a cell
+                                                 ;; holding a compiled
+                                                 ;; function.
+                                                 (when derived-ind
+                                                   (let ((p (derived-problem
+                                                             derived-ind nd)))
+                                                     (when p
+                                                       (push (format nil
+                                                                     "CCA ~
+~8,'0X (~A spec): ~A" vma pname p)
+                                                             bad)))))))))))))))
                          (incf vma size))))))))
     (cold-check (null bad)
                 "pass-1 fspec handlers: ~D list-named CCA~:P, heads ~

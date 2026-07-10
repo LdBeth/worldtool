@@ -262,6 +262,46 @@ FORMAT and suppress the FBOUNDP-guarded FORMAT-COLD-LOAD boot stub
                                                         *cold-package-uses*)))))))
             finally (return nil)))))
 
+(defun cold-find-visible-home (pname pkg homes &optional seen)
+  "Emulate CL:FIND-SYMBOL's one-level visibility from PKG
+\(PKG-FIND-SYMBOL, package.lisp:906): present symbols first -- an
+:IMPORT-FROM entry means the present symbol IS the source package's,
+and PKG being one of PNAME's dist homes means PNAME is interned there
+-- then the EXTERNALs of the DIRECT :USE list only.  A used package
+provides PNAME if its pkgdcl :EXPORT lists it, or if the package is
+\(:EXTERNAL-ONLY T) (package.lisp:512: every present symbol is
+external -- SCL's ~730 :IMPORT-FROM LISP symbols are all externals)
+and PNAME is present in it.  The provider's symbol is then resolved
+recursively (its own import entry carries the identity onward).
+COLD-RESOLVE-THROUGH-IMPORTS' transitive BFS descends :USE edges
+without any export evidence, so from RPC (:USE SYSTEM SCL) it reached
+GLOBAL:SETF through SYSTEM (:USE GLOBAL) -- a symbol FIND-SYMBOL in
+RPC never sees, and the one SETF that never gets fspec.lisp:1752's
+DEFINE-DERIVED-FUNCTION-TYPE DEFPROPs, so pass 1's FDEFINEDP on
+\(SETF BYTE-SWAPPED-LOCATIVE-REF-32) failed validation and called
+warm-only DBG:CHECK-ARG-1 (M3h boot 27).  NIL when no provider
+answers; the caller falls back to the BFS + priority heuristics."
+  (let ((pkg (cold-package-primary pkg)))
+    (unless (member pkg seen :test #'string=)
+      (push pkg seen)
+      (let ((src (gethash (cons pkg pname) *cold-package-imports*)))
+        (cond
+          (src
+           (or (cold-find-visible-home pname src homes seen)
+               (cold-package-primary src)))
+          ((member pkg homes :test #'string=) pkg)
+          (t
+           (loop for u in (gethash pkg *cold-package-uses*)
+                 for uu = (cold-package-primary u)
+                 when (or (member uu (gethash pname *cold-package-exports*)
+                                  :test #'string=)
+                          (and (gethash uu *cold-package-external-only*)
+                               (or (gethash (cons uu pname)
+                                            *cold-package-imports*)
+                                   (member uu homes :test #'string=))))
+                   return (or (cold-find-visible-home pname uu homes seen)
+                              uu))))))))
+
 (defun cold-declared-package-p (name)
   "Does PKGDCL declare NAME, so BUILD-INITIAL-PACKAGES will create it at
 first boot?  With no graph loaded every name passes."
@@ -338,7 +378,15 @@ symbol (COLD-ADJUST-HOME-FOR-EXPORTS, M3h boot 19)."
            ((null (rest homes)) (first homes))
            ;; A package's own symbol shadows inherited ones.
            ((member ctx homes :test #'string=) ctx)
-           (t (or (cold-resolve-through-imports pname ctx homes)
+           (t (or (let ((strict (and *cold-package-uses*
+                                     *cold-package-imports*
+                                     (cold-find-visible-home pname ctx
+                                                             homes))))
+                    ;; Only trust the strict walk when it lands on a
+                    ;; dist-verified home -- same contract as the BFS.
+                    (and strict (member strict homes :test #'string=)
+                         strict))
+                  (cold-resolve-through-imports pname ctx homes)
                   (loop for p in *cold-home-priority*
                         when (member p homes :test #'string=) return p)
                   (first homes)))))))
@@ -605,6 +653,62 @@ different packages yields one key."
                 (list :uninterned (vsym-name obj)))))
     (cons (cons (fspec-key (car obj)) (and (cdr obj) (fspec-key (cdr obj)))))
     (t obj)))
+
+(defun cold-follow-cell (w vma)
+  "Follow one-q-forward chains from VMA; returns the final cell vma."
+  (loop for hops from 0 below 16
+        do (multiple-value-bind (tag data) (cw-ref w vma)
+             (if (= (tag-type tag) (cold-dtp w "ONE-Q-FORWARD"))
+                 (setf vma data)
+                 (return vma)))
+        finally (return vma)))
+
+(defun cold-read-string (w vma)
+  "Read back a cold ART-STRING block."
+  (multiple-value-bind (tag data) (cw-ref w vma)
+    (declare (ignore tag))
+    (let* ((len (ldb (byte 15 0) data))
+           (s (make-string len)))
+      (dotimes (i len s)
+        (multiple-value-bind (wt wd) (cw-ref w (+ vma 1 (floor i 4)))
+          (declare (ignore wt))
+          (setf (char s i)
+                (code-char (ldb (byte 8 (* 8 (mod i 4))) wd))))))))
+
+(defun cold-symbol-pname-at (w sym-vma)
+  "Pname string of the symbol block at SYM-VMA, or NIL.  The Q at +0 is
+the symbol's DTP-HEADER-P (header type 0) whose data points at the
+pname string array."
+  (multiple-value-bind (pt pd) (cw-ref w sym-vma)
+    (and pt
+         (member (tag-type pt) (list (cold-dtp w "HEADER-P")
+                                     (cold-dtp w "STRING")
+                                     (cold-dtp w "ARRAY")))
+         (cold-read-string w pd))))
+
+(defun cold-get-property-q (w sym-vma pname)
+  "(values tag data foundp) of the first property on SYM-VMA's plist
+whose indicator symbol's pname is PNAME.  Walks the cdr-coded
+\(ind val . next) chain the way boot GET does."
+  (let ((dtp-list (cold-dtp w "LIST"))
+        (dtp-symbol (cold-dtp w "SYMBOL")))
+    (multiple-value-bind (pt pd) (cw-ref w (+ sym-vma 3))
+      (loop with vma = (and (= (tag-type pt) dtp-list) pd)
+            repeat 4096
+            while vma
+            do (multiple-value-bind (it id) (cw-ref w vma)
+                 (multiple-value-bind (vt vd) (cw-ref w (1+ vma))
+                   (when (and (= (tag-type it) dtp-symbol)
+                              (equal (cold-symbol-pname-at w id) pname))
+                     (return (values vt vd t)))
+                   (ecase (ldb (byte 2 6) vt)
+                     (0 (setf vma (+ vma 2)))
+                     (1 (setf vma nil))
+                     ((2 3) (multiple-value-bind (nt nd)
+                                (cw-ref w (cold-follow-cell w (+ vma 2)))
+                              (setf vma (and (= (tag-type nt) dtp-list)
+                                             nd)))))))
+            finally (return (values nil nil nil))))))
 
 (defun cold-store-contents (w vma tag data)
   "Store TAG:DATA into the Q at VMA preserving the destination's cdr
