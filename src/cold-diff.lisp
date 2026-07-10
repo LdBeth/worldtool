@@ -669,6 +669,47 @@ LOAD-MULTIPLE-DEFINITION always passes :START-TYPE-DEFINITION NIL
 DEFSTRUCT without :START-TYPE-DEFINITION would CL:WARN pre-banner ~
 (~A): ~S" pkg form)))))
 
+(defun check-deferred-defvar-hoist (w)
+  "M3h boot-33 gate: both flavor completion-table inits precede the
+first deferred flavor composition.  DEFFLAVOR-INTERNAL (first at ~104,
+from wired-event-defs, file 2 of the load order) reaches
+FLAVOR-COMPLETION -> BOOTSTRAP-FLAVOR-NAMES-AARRAY (defflavor.lisp:1447),
+which reads *ALL-FLAVOR-NAMES-AARRAY* and
+*ALL-GENERIC-FUNCTION-NAMES-AARRAY* -- MAKE-AARRAY defvars from
+flavor/global whose unhoisted deferred inits ran ~3900 forms later:
+trap 71.  Walks the stored deferred list, whose reverse IS the emitted
+*COLD-LOAD-DEFERRED-FORMS* order; patches (which run first at boot)
+never touch the tables -- FIND-GENERIC-FUNCTION-AS-CONSTANT is a pure
+lookup (bootstrap.lisp:65).  Names are deliberately hardcoded: emptying
+*COLD-HOISTED-DEFERRED-DEFVARS* must FAIL here, not pass vacuously."
+  (let ((needed (list "*ALL-FLAVOR-NAMES-AARRAY*"
+                      "*ALL-GENERIC-FUNCTION-NAMES-AARRAY*")))
+    (loop for (pkg . form) in (reverse (cold-world-deferred w))
+          for i from 0
+          do (multiple-value-bind (sym valform)
+                 (cold-deferred-defvar-parts form)
+               (when (and sym (member (vsym-name sym) needed :test #'string=))
+                 (setf needed (remove (vsym-name sym) needed :test #'string=))
+                 (cold-check (and (consp valform) (vsym-p (first valform))
+                                  (string= (vsym-name (first valform))
+                                           "MAKE-AARRAY"))
+                             "hoisted ~A init is the MAKE-AARRAY form (~A): ~S"
+                             (vsym-name sym) pkg valform)))
+             (when (and (consp form) (vsym-p (first form))
+                        (member (vsym-name (first form))
+                                '("DEFFLAVOR-INTERNAL" "DEFGENERIC-INTERNAL")
+                                :test #'string=))
+               (cold-check (null needed)
+                           "completion-table inits precede the first ~
+flavor composition (~A at deferred index ~D; still unbound there: ~
+~{~A~^ ~})" (vsym-name (first form)) i needed)
+               (return)))
+    ;; Reached with NEEDED non-null either when an init is late (loop
+    ;; returned at the composition) or absent entirely.
+    (cold-check (null needed)
+                "both completion-table inits seen before any composition ~
+(unsatisfied: ~{~A~^ ~})" needed)))
+
 (defun check-cold-eval (w reference)
   "M3d gate: full 88-file load with zero unhandled forms and zero
 unresolved fixups; register-map ASETs took; the trap page carries real
@@ -2803,6 +2844,9 @@ prints the R1 unbound-function-cell audit."
         ;; free pointer (M3h boot 24).
         (check-boot-object-walk w)
         (check-pass1-fspec-handlers w)
+        ;; The flavor completion-table inits hoisted ahead of the first
+        ;; deferred DEFFLAVOR-INTERNAL (M3h boot 33).
+        (check-deferred-defvar-hoist w)
         ;; Keyword self-evaluation forwarding, also materialized by finalize.
         (check-keyword-self-eval w)
         ;; :RELATIVE-NAMES withheld from the package calls, deferred as

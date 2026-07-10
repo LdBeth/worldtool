@@ -181,6 +181,44 @@ boot, whereas the guarded shape no-ops once the symbol is bound."
                    (vsym-p (second (second set-form))))
           (values (second (second set-form)) (third set-form)))))))
 
+(defparameter *cold-hoisted-deferred-defvars*
+  '("*ALL-FLAVOR-NAMES-AARRAY*" "*ALL-GENERIC-FUNCTION-NAMES-AARRAY*")
+  "M3h boot 33: deferred defvar inits hoisted to the FRONT of the boot
+deferred list.  The flavor completion tables (flavor/global.lisp:129-138)
+are MAKE-AARRAY calls -- unevaluable at build time, so they defer -- but
+the first deferred DEFFLAVOR-INTERNAL (wired-event-defs.lisp:76, file 2
+of the load order) reaches FLAVOR-COMPLETION ->
+BOOTSTRAP-FLAVOR-NAMES-AARRAY (defflavor.lisp:1434-1451), which reads
+BOTH tables' fill pointers ~3900 forms before flavor/global's own inits
+run.  The genuine build had no inversion: Symbolics' generator consed
+the aarrays at build time (the dist ships both symbols bound,
+DTP-ARRAY).  Modeling MAKE-AARRAY natively is not worth it -- leader
+slot 2 holds a PROCESS:MAKE-LOCK instance, which at boot the FSET stub
+MAKE-LOCK-COLD (cold-load.lisp:239,449) supplies for free.  Everything
+the hoisted forms call is pre-deferred state: MAKE-ARRAY, STRING-APPEND
+and CL:RASSOC are cold fdefines, PERMANENT-STORAGE-AREA and
+*AARRAY-NAME-ALIST* ship bound.  A head belongs here only if its init
+needs NO deferred state and a deferred form EARLIER in load order reads
+the variable.")
+
+(defun cold-hoist-deferred-defvars (w)
+  "Move the *COLD-HOISTED-DEFERRED-DEFVARS* BOUNDP-guarded init entries
+to the front of the emitted deferred list (= tail of the stored reversed
+list).  Errors unless every listed name matches exactly one entry: the
+hoist list must track the deferrals, not rot.  Returns the count moved."
+  (flet ((hoisted-p (entry)
+           (let ((sym (cold-deferred-defvar-parts (cdr entry))))
+             (and sym (member (vsym-name sym) *cold-hoisted-deferred-defvars*
+                              :test #'string=)))))
+    (let* ((stored (cold-world-deferred w))
+           (moved (remove-if-not #'hoisted-p stored)))
+      (unless (= (length moved) (length *cold-hoisted-deferred-defvars*))
+        (error "Hoist list wants ~D deferred defvar init~:P, found ~D"
+               (length *cold-hoisted-deferred-defvars*) (length moved)))
+      (setf (cold-world-deferred w)
+            (append (remove-if #'hoisted-p stored) moved))
+      (length moved))))
+
 (defun cold-reconcile-linked-defvars (w)
   "M3h boot 21: BOOTSTRAP-LINK-SYMBOL-CELLS FERRORs \"Can't link two
 cells with different values.\" when a permanent-links record's cells are
@@ -303,6 +341,7 @@ Returns (values deferred-count patch-count package-count)."
              (cold-load-pkgdcl w (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
            (revived (cold-retry-deferred-defvars w))
            (reconciled (cold-reconcile-linked-defvars w))
+           (hoisted (cold-hoist-deferred-defvars w))
            (deferred (reverse (cold-world-deferred w)))
            (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
            (loc-tag (tag 0 (cold-dtp w "LOCATIVE")))
@@ -398,6 +437,9 @@ Returns (values deferred-count patch-count package-count)."
       (when (plusp reconciled)
         (format t "~&  ~D linked defvar stamp~:P reverted to unbound~%"
                 reconciled))
+      (when (plusp hoisted)
+        (format t "~&  ~D deferred defvar init~:P hoisted to boot front~%"
+                hoisted))
       (values (+ (length patches) (length deferred-qs)
                  (length (cold-world-relative-names w)))
               (length patches) package-count))))
