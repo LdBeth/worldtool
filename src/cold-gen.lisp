@@ -63,7 +63,20 @@
     ;; :readtable-type modules (compiled by SI:RTC-FILE)
     "SYS: IO; RDTBL" "SYS: CLCP; READTABLE" "SYS: CLCP; ANSI-READTABLE"
     "SYS: EMBEDDING; RPC; C-READTABLE"
-    "SYS: SYS; LDATA" "SYS: SYS; LCODE" "SYS: SYS; I-ALLOCATE"
+    "SYS: SYS; LDATA"
+    ;; sysdcl.lisp:320 puts ldefsel right after ldata in l-main.  Its
+    ;; runtime helpers are first-boot obligations: plain-DEFSELECT
+    ;; expansions in cold files leave (DEFSELECT-CONS-WHICH-OPERATIONS
+    ;; 'methods 'tail) eval-at-load-time operands (ldefsel.lisp:143)
+    ;; that materialize as first-boot patches, and the :which-operations
+    ;; dispatch calls DEFSELECT-INVOKE-WHICH-OPERATIONS.  Cold-band
+    ;; proof: dist fcells of both forward into the same 0x882xxxxx band
+    ;; as FDEFINEDP (cold), not SUBSTITUTE-IF's 0x823xxxxx (QLD) --
+    ;; INNER-SYSTEM-FILE-ALIST membership ("Needed by everything in
+    ;; sight") does not exclude coldness, the boot-26 lesson (M3h boot
+    ;; 28).
+    "SYS: SYS2; LDEFSEL"
+    "SYS: SYS; LCODE" "SYS: SYS; I-ALLOCATE"
     "SYS: SYS; ALLOCATE-COMMON" "SYS: SYS; ICONS" "SYS: SYS; OBJECTS"
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
     "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH" "SYS: SYS2; DOUBLE"
@@ -300,10 +313,22 @@ Returns (values deferred-count patch-count package-count)."
                    (error "Patch materialization did not converge"))
                  (dolist (p pending)
                    (destructuring-bind (vma pkg form) p
-                     (push (materialize
-                            (cons pkg (list store (make-vraw loc-tag vma)
-                                            form)))
-                           patches)
+                     (let ((base (list store (make-vraw loc-tag vma) form)))
+                       ;; Warm-only value heads: no-op pre-banner
+                       ;; (*COLD-GUARDED-PATCH-HEADS*, M3h boot 28).
+                       (when (and (consp form) (vsym-p (first form))
+                                  (member (vsym-name (first form))
+                                          *cold-guarded-patch-heads*
+                                          :test #'string=))
+                         (setf base
+                               (list (make-vsym "SYSTEM-INTERNALS" "IF")
+                                     (list (make-vsym "SYSTEM-INTERNALS"
+                                                      "FBOUNDP")
+                                           (list (make-vsym "SYSTEM-INTERNALS"
+                                                            "QUOTE")
+                                                 (first form)))
+                                     base)))
+                       (push (materialize (cons pkg base)) patches))
                      (incf done)))
               finally (setf patches (nreverse patches)))
         (unless (= (length (cold-world-deferred w)) (length deferred))

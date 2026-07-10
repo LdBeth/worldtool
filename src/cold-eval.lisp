@@ -1114,6 +1114,20 @@ collected into *COLD-EVAL-STATS* under \"fixup failures\")."
                            (make-vsym "FLAVOR"
                                       "METHOD-FUNCTION-SPEC-HANDLER")
                            (make-vsym "FLAVOR" "FUNCTION-SPEC-HANDLER"))))
+      ;; SI:*COLD-FIND-GENERIC-FUNCTION-MARKER* (cold-load.lisp:409 --
+      ;; DEFVAR with no initializer anywhere): the FSET stub
+      ;; FIND-GENERIC-FUNCTION-AS-CONSTANT-COLD (cold-load.lisp:203/411)
+      ;; conses (marker name) lists for every generic-function constant
+      ;; patch pre-banner, and QLD's
+      ;; BOOTSTRAP-DEFGENERIC-CONSTANT-REFERENCES EQ-tests the marker to
+      ;; snap them (flavor/bootstrap.lisp:75).  Dist value: an
+      ;; uninterned symbol named COLD-FIND-GENERIC-FUNCTION-MARKER.
+      ;; Same generator obligation as *COLD-MAKE-INSTANCE-MARKER*
+      ;; (M3h boot 28).
+      (let ((marker (cold-symbol w "COLD-FIND-GENERIC-FUNCTION-MARKER" nil))
+            (var (cold-symbol w "*COLD-FIND-GENERIC-FUNCTION-MARKER*"
+                              "SYSTEM-INTERNALS")))
+        (cw-set w (1+ var) (tag 0 (cold-dtp w "SYMBOL")) marker))
       ;; Late-bound references: retry until quiescent.
       (let ((failures 0))
         (loop repeat 4

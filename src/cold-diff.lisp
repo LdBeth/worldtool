@@ -493,7 +493,13 @@ points to (1C:F8046C44 in genera-8-5-wired.txt)."
     ;; GLOBAL:FORMAT is unbound by design since the boot-15 dialect
     ;; split (LISP:FORMAT carries the CLCP wrapper); FORMAT-COLD-LOAD
     ;; installs on it at FSET time.
-    "FORMAT")
+    "FORMAT"
+    ;; FSET alist cold-load.lisp:203: the -COLD stub conses a
+    ;; (*COLD-FIND-GENERIC-FUNCTION-MARKER* name) list that QLD's
+    ;; BOOTSTRAP-DEFGENERIC-CONSTANT-REFERENCES snaps
+    ;; (flavor/bootstrap.lisp:75); the marker symbol is a generator
+    ;; stamp (M3h boot 28).
+    "FIND-GENERIC-FUNCTION-AS-CONSTANT")
   "Stubbed by *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131).")
 
 (defparameter *cold-known-pending-functions*
@@ -511,10 +517,27 @@ load order.")
 cell needed.")
 
 (defun check-deferred-boot-safety (w)
-  "Walk every deferred form; flag call heads that are neither cold-defined,
-stub-backed, FBOUNDP-guarded, nor interpreter special forms."
+  "Walk every deferred form AND every first-boot patch value form; flag
+call heads that are neither cold-defined, stub-backed, FBOUNDP-guarded,
+nor interpreter special forms.  Patches run in the same pre-banner MAPC
+\(spine = patches ++ deferred ++ relative-names), so their value forms
+have exactly the same callability obligation -- boot 28 trapped on a
+patch calling SI:DEFSELECT-CONS-WHICH-OPERATIONS (a plain-DEFSELECT
+eval-at-load-time operand, ldefsel.lisp:143) before ldefsel joined the
+cold set."
   (let ((bad (make-hash-table :test #'equal)))
-    (loop for (pkg . form) in (cold-world-deferred w)
+    (loop for (pkg . form) in
+          (append (cold-world-deferred w)
+                  ;; Guarded-head patches materialize behind
+                  ;; (IF (FBOUNDP ...)) and never run pre-banner --
+                  ;; same exemption GUARDP gives deferred forms.
+                  (loop for p in (cold-world-patches w)
+                        for pform = (third p)
+                        unless (and (consp pform) (vsym-p (first pform))
+                                    (member (vsym-name (first pform))
+                                            *cold-guarded-patch-heads*
+                                            :test #'string=))
+                          collect (cons (second p) pform)))
           do (let ((*cold-default-package* pkg))
                (labels
                    ((callable-p (v)

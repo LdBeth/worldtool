@@ -70,6 +70,20 @@ the Q-store site that consumed the placeholder records a first-boot patch
   "Queue a first-boot %P-STORE-CONTENTS of (eval FORM) into VMA."
   (push (list vma *cold-default-package* form) (cold-world-patches w)))
 
+(defparameter *cold-guarded-patch-heads*
+  '("LOAD-TIME-FIND-FLAVOR")
+  "Patch value heads that are warm-only: the finalize spine wraps these
+patches in (IF (FBOUNDP 'head) ...) so first boot skips them silently,
+and the boot-safety audit exempts them.  LOAD-TIME-FIND-FLAVOR lives in
+flavor/make.lisp:976 -- NOT cold (the MAKE-INSTANCE-COLD bridge exists
+because instantiation is warm), dist fcell forwards into the QLD band.
+Its one patch fills a defflavor constructor constant
+\(unix-translating-streams' 8BIT-BINARY-STREAM-...); constructors never
+run pre-banner (MAKE-INSTANCE = the -COLD marker path), and make.lisp's
+own comment says the constructor 'will be redefined soon, by
+COMPILE-FLAVOR-METHODS-LOAD-TIME'.  KNOWN GAP: the Q stays NIL until
+warm CFM redefines the constructor (M3h boot 28).")
+
 ;;; The vembed dtp-code -> type name (l-bin/defs.lisp embedded constants).
 (defparameter *cold-embed-types*
   #("LIST" "LEXICAL-CLOSURE" "DYNAMIC-CLOSURE" "DOUBLE-FLOAT"
