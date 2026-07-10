@@ -584,6 +584,65 @@ cold set."
       (cold-check (null names)
                   "deferred forms call undefined-at-boot: ~{~A~^ ~}" names))))
 
+(defun check-mouse-char-cache (w)
+  "M3h boot-29 gate: *MOUSE-CHAR-CACHE* is built at world-build time and
+mouse-char constants resolved into it, so no first-boot patch calls
+MAKE-MOUSE-CHAR.  The boot-28 callability audit missed the DATA
+dependency -- the patch's head was cold-defined but read a variable only
+a deferred SET binds, and patches run before the deferred list.  Layout
+checked against the distribution's cache at #xF0003597."
+  (let ((dtp-array (cold-dtp w "ARRAY"))
+        (dtp-fixnum (cold-dtp w "FIXNUM"))
+        (dtp-symbol (cold-dtp w "SYMBOL"))
+        (name-vma (cold-vsym w (si-vsym "MOUSE-CHAR"))))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q w (si-vsym "*MOUSE-CHAR-CACHE*"))
+      (cold-check (and boundp (= (tag-type tag) dtp-array))
+                  "*MOUSE-CHAR-CACHE* bound to a build-time array")
+      (when (and boundp (= (tag-type tag) dtp-array))
+        (multiple-value-bind (ht hd) (cw-ref w data)
+          (declare (ignore ht))
+          (cold-check (= hd #xC0800002)
+                      "mouse-char cache header #xC0800002 (dist layout), ~
+got #x~8,'0X" hd))
+        (loop for button below 3
+              do (loop
+                   for bits below 32
+                   do (multiple-value-bind (et ed)
+                          (cw-ref w (+ data 8 (* button 32) bits))
+                        (unless (cold-check
+                                 (= (tag-type et) dtp-array)
+                                 "mouse-char [~D ~D] is a struct" button bits)
+                          (return))
+                        (multiple-value-bind (sh shd) (cw-ref w ed)
+                          (declare (ignore sh))
+                          (cold-check (= shd #xC2000003)
+                                      "mouse-char [~D ~D] header #xC2000003, ~
+got #x~8,'0X" button bits shd))
+                        (multiple-value-bind (nt nd) (cw-ref w (+ ed 1))
+                          (cold-check (and (= (tag-type nt) dtp-symbol)
+                                           (= nd name-vma))
+                                      "mouse-char [~D ~D] named SI:MOUSE-CHAR"
+                                      button bits))
+                        (multiple-value-bind (bt bd) (cw-ref w (+ ed 2))
+                          (cold-check (and (= (tag-type bt) dtp-fixnum)
+                                           (= bd button))
+                                      "mouse-char [~D ~D] BUTTON slot"
+                                      button bits))
+                        (multiple-value-bind (bt bd) (cw-ref w (+ ed 3))
+                          (cold-check (and (= (tag-type bt) dtp-fixnum)
+                                           (= bd bits))
+                                      "mouse-char [~D ~D] BITS slot"
+                                      button bits)))))))
+    (loop for p in (cold-world-patches w)
+          for form = (third p)
+          do (cold-check (not (and (consp form) (vsym-p (first form))
+                                   (member (vsym-name (first form))
+                                           '("MAKE-MOUSE-CHAR"
+                                             "MAKE-MOUSE-CHAR-CACHE")
+                                           :test #'string=)))
+                         "no first-boot mouse-char patch: ~S" form))))
+
 (defun check-cold-eval (w reference)
   "M3d gate: full 88-file load with zero unhandled forms and zero
 unresolved fixups; register-map ASETs took; the trap page carries real
@@ -612,6 +671,9 @@ SET-TRAP-VECTOR-ENTRY from ITRAP-DISPATCH never ran)")
               (length (cold-world-magic w)))
       (when (null failures)
         (check-deferred-boot-safety w)
+        ;; Mouse-char constants resolved into a build-time cache, no
+        ;; MAKE-MOUSE-CHAR patch left (M3h boot 29).
+        (check-mouse-char-cache w)
         ;; ASET spot check: the readable register map has symbol entries.
         (multiple-value-bind (tag data boundp)
             (cold-symbol-value-q

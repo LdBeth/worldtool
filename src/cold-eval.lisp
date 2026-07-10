@@ -127,10 +127,52 @@ returns that value."
 
 (defparameter *cold-patch-value-heads*
   '("FIND-RESOURCE" "FIND-GENERIC-FUNCTION-AS-CONSTANT"
-    "LOAD-TIME-FIND-FLAVOR" "MAKE-MOUSE-CHAR"
+    "LOAD-TIME-FIND-FLAVOR"
     "DEFSELECT-CONS-WHICH-OPERATIONS")
   "Value forms whose result can only be computed at run time; the Q gets
-NIL now and a first-boot %P-STORE-CONTENTS patch.")
+NIL now and a first-boot %P-STORE-CONTENTS patch.  A head belongs here
+only if the boot-time call needs no state a DEFERRED form establishes:
+patches run before the deferred list (they fill Qs the deferred forms'
+constants reference), so a patch that reads a deferred defvar traps --
+MAKE-MOUSE-CHAR read the still-unbound *MOUSE-CHAR-CACHE* (M3h boot 29)
+and now resolves natively instead.")
+
+(defun cold-mouse-char-cache (w)
+  "Header vma of SI:*MOUSE-CHAR-CACHE*'s cache, building and stamping the
+variable on first use.  MAKE-MOUSE-CHAR-CACHE (sys2/string.lisp:2175) is
+pure construction: a 3 x (* 2 CHAR-BITS-LIMIT) ART-Q array in
+SAFEGUARDED-OBJECTS-AREA whose elements are :NAMED MOUSE-CHAR structs
+[header | SI:MOUSE-CHAR | button | bits].  The distribution world holds
+it pre-built (array header 43:C0800002 at #xF0003597, structs
+43:C2000003 directly after), so nothing about it is run-time at all."
+  (let ((var (si-vsym "*MOUSE-CHAR-CACHE*")))
+    (multiple-value-bind (tag data boundp) (cold-symbol-value-q w var)
+      (declare (ignore tag))
+      (if boundp
+          data
+          (let* ((name (si-vsym "MOUSE-CHAR"))
+                 (art-q (list (make-vsym "KEYWORD" "TYPE")
+                              (make-vsym "SYSTEM" "ART-Q")))
+                 (cache (make-varray '(3 32) art-q)))
+            (setf (varray-contents cache)
+                  (coerce
+                   (loop for button below 3
+                         nconc
+                         (loop for bits below 32
+                               collect
+                               (let ((s (make-varray
+                                         '(3)
+                                         (list* (make-vsym
+                                                 "KEYWORD"
+                                                 "NAMED-STRUCTURE-SYMBOL")
+                                                name art-q))))
+                                 (setf (varray-contents s)
+                                       (vector name button bits))
+                                 s)))
+                   'vector))
+            (let ((vma (cold-array w cache "SAFEGUARDED-OBJECTS-AREA")))
+              (cold-set-symbol-value w var (tag 0 (cold-dtp w "ARRAY")) vma)
+              vma))))))
 
 (defun cold-eval-value (w form &key (area "PERMANENT-STORAGE-AREA"))
   (typecase form
@@ -250,6 +292,22 @@ NIL now and a first-boot %P-STORE-CONTENTS patch.")
             (unless tag (return-from cold-eval-value (values nil data)))
             (cold-set-symbol-value w (first args) tag data)
             (values tag data)))
+         ((string= head "MAKE-MOUSE-CHAR-CACHE")
+          ;; (DEFVAR *MOUSE-CHAR-CACHE* (MAKE-MOUSE-CHAR-CACHE)),
+          ;; sys2/string.lisp:2185: built natively, like the dist.
+          (values (tag 0 (cold-dtp w "ARRAY")) (cold-mouse-char-cache w)))
+         ((string= head "MAKE-MOUSE-CHAR")
+          ;; The :FASD-FORM of a mouse-char constant (string.lisp:2171).
+          ;; CHAR-MOUSE-EQUAL is EQ, so the constant must resolve INTO
+          ;; the cache; a first-boot patch called MAKE-MOUSE-CHAR before
+          ;; the deferred SET bound the cache (M3h boot 29, trap 71).
+          (let ((button (first args))
+                (bits (or (second args) 0)))
+            (unless (and (integerp button) (<= 0 button 2)
+                         (integerp bits) (<= 0 bits 31))
+              (error "Unsupported MAKE-MOUSE-CHAR form ~S" form))
+            (cw-ref w (+ (cold-mouse-char-cache w)
+                         8 (* button 32) bits))))
          ((member head *cold-patch-value-heads* :test #'string=)
           (values nil :patch))
          (t (values nil :defer)))))
