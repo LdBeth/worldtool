@@ -1029,6 +1029,28 @@ got ~2,'0X:~8,'0X" tag data))
         (cold-check (string= (cold-read-string w data) "Stack grower")
                     "grower SG-NAME reads \"Stack grower\"")))))
 
+(defun check-ignore-stubs (w)
+  "M3h boot-33 review gate: the *COLD-IGNORE-STUB-FUNCTIONS* names --
+warm flavor/make.lisp functions the cold flavor runtime calls
+unconditionally pre-banner (WITH-TRANSFORM-FLAVOR-WARNINGS' unwind
+cleanup at the first DEFFLAVOR-INTERNAL; COMPILE-FLAVOR-METHODS-LOAD-
+TIME's initialization + constructor passes) -- are aliased to
+LISP:IGNORE's definition, exactly like the DW rows of Genera's own
+*COLD-LOAD-FUNCTION-INITIALIZATIONS* stub environment.  QLD's
+flavor/make load redefines them warm (dist ships that shadowing)."
+  (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION")))
+    (multiple-value-bind (itag idata)
+        (cw-ref w (cold-follow-cell
+                   w (+ (cold-vsym w (make-vsym "LISP" "IGNORE")) 2)))
+      (cold-check (= (tag-type itag) dtp-cf) "LISP:IGNORE is fbound")
+      (loop for (pkg . name) in *cold-ignore-stub-functions*
+            do (multiple-value-bind (tag data)
+                   (cw-ref w (cold-follow-cell
+                              w (+ (cold-vsym w (make-vsym pkg name)) 2)))
+                 (cold-check (and (= (tag-type tag) dtp-cf) (= data idata))
+                             "~A:~A aliased to IGNORE (~2,'0X:~8,'0X)"
+                             pkg name tag data))))))
+
 (defun check-boot-area-registration (w reference)
   "M3h boot-31 gate: every area a cold file creates via MAKE-AREA is
 registered in the area tables and counted by the *AREA-NAME* fill
@@ -2460,6 +2482,9 @@ page fully reconciled against the reference."
       ;; boot 31).
       (check-stack-grower w)
       (check-boot-area-registration w reference)
+      ;; Warm flavor/make.lisp functions the deferred flavor phase calls
+      ;; unconditionally, aliased to IGNORE (M3h boot-33 review).
+      (check-ignore-stubs w)
       ;; No magic symbol may also sit in the wired symbol-cell table: its
       ;; boot-time re-forwarding would undo the comm-slot forward.
       (let ((magic-cells (make-hash-table)))

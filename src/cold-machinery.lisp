@@ -1049,6 +1049,61 @@ are unbound in the distribution too."
               do (cold-set-symbol-value w (make-vsym "STORAGE" name)
                                         (tag 0 array) hdr))))))
 
+;;; ---------------- pre-banner IGNORE aliases ----------------
+
+(defparameter *cold-ignore-stub-functions*
+  '(("FLAVOR" . "PRINT-FLAVOR-TRANSFORMATION-WARNINGS")
+    ("FLAVOR" . "COMPOSE-INITIALIZATIONS")
+    ("FLAVOR" . "VALIDATE-CONSTRUCTOR-FUNCTIONS"))
+  "M3h boot-33 review: warm flavor/make.lisp functions the COLD flavor
+runtime calls unconditionally during the deferred flavor phase.  Genera's
+own *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131) builds the
+FSET-stub environment QLD loads flavor files in -- DW type-redefinition
+IGNOREs, DEFGENERIC-INTERNAL-COLD, MAKE-INSTANCE-COLD -- but it never
+needed rows for these three because QLD loads SYS: FLAVOR; MAKE near the
+front of INNER-SYSTEM-FILE-ALIST (mini-alists.lisp:91), before any file
+whose defflavors run.  Our deferred list runs every flavor form before
+any QLD, so the gap bites:
+  PRINT-FLAVOR-TRANSFORMATION-WARNINGS -- WITH-TRANSFORM-FLAVOR-WARNINGS'
+    UNWIND-PROTECT cleanup (defflavor.lisp:389-394) calls it from
+    DEFFLAVOR-INTERNAL-1's new-flavor arm; *TRANSFORM-FLAVOR-WARNINGS*
+    is always NIL pre-banner (no instances -> no transforms), so the
+    real function would no-op.
+  COMPOSE-INITIALIZATIONS -- COMPILE-FLAVOR-METHODS-INITIALIZATIONS
+    (compose.lisp:1080) for every non-abstract CFM'd flavor.  Stubbing
+    leaves FLAVOR-INITIALIZATIONS-COMPOSED false, which also keeps the
+    defmethod-side VALIDATE-CONSTRUCTOR-FUNCTIONS guards
+    (defmethod.lisp:1070,1164) false; warm QLD reload / first real
+    instantiation composes lazily.
+  VALIDATE-CONSTRUCTOR-FUNCTIONS -- COMPILE-FLAVOR-METHODS-LOAD-TIME's
+    unconditional constructor pass (compose.lisp:1075); constructors
+    only matter to MAKE-INSTANCE, itself stubbed to marker lists.
+QLD's flavor/make load FDEFINEs the real definitions over these cells,
+the same shadowing the dist shows (its PRINT-FLAVOR-TRANSFORMATION-
+WARNINGS fcell forwards into the QLD band, 05:82201B63).  The graft
+errors out if a name becomes fbound: an entry must be dropped when its
+file joins the cold set (the boot-6 emb-ethernet discipline).")
+
+(defun cold-graft-ignore-stubs (w)
+  (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
+        (dtp-null (cold-dtp w "NULL"))
+        (ignore-cell (cold-follow-cell
+                      w (+ (cold-vsym w (make-vsym "LISP" "IGNORE")) 2))))
+    (multiple-value-bind (itag idata) (cw-ref w ignore-cell)
+      (unless (= (tag-type itag) dtp-cf)
+        (error "LISP:IGNORE is not fbound (~2,'0X:~8,'0X)" itag idata))
+      (loop for (pkg . name) in *cold-ignore-stub-functions*
+            do (let ((cell (cold-follow-cell
+                            w (cold-fdefinition-cell
+                               w (make-vsym pkg name)))))
+                 (multiple-value-bind (tag data) (cw-ref w cell)
+                   (declare (ignore data))
+                   (unless (= (tag-type tag) dtp-null)
+                     (error "~A:~A is defined now -- drop its IGNORE stub"
+                            pkg name))
+                   (cw-set w cell (logior (logand tag #xC0) dtp-cf)
+                           idata)))))))
+
 ;;; ---------------- FEP boot parameters ----------------
 
 ;;; FEPComm slots the FEP populates on real hardware before starting
@@ -1101,6 +1156,7 @@ slots from the reference world."
   (cold-build-array-meta w)
   (cold-fill-storage-tables w :reference reference)
   (cold-stamp-fepcomm-boot-slots w)
+  (cold-graft-ignore-stubs w)
   (when reference
     (cold-graft-ifep-vectors w reference)
     (cold-graft-fepcomm-functions w reference))
