@@ -643,6 +643,32 @@ got #x~8,'0X" button bits shd))
                                            :test #'string=)))
                          "no first-boot mouse-char patch: ~S" form))))
 
+(defun check-record-definition-kludge (w)
+  "M3h boot-30 gate: simulate the interim kludge in
+RECORD-DEFINITION-SOURCE-FILE (fspec.lisp:718) over every deferred call
+to it.  When :START-TYPE-DEFINITION is not supplied and TYPE is
+DEFSTRUCT, the kludge CL:WARNs -- and WARN-COLD-LOAD's PRINT reads
+*STANDARD-OUTPUT*, unbound until the cold-load stream is up, trap 71.
+LOAD-MULTIPLE-DEFINITION always passes :START-TYPE-DEFINITION NIL
+(eval.lisp:2162); our synthesized deferrals must too."
+  (loop for (pkg . form) in (cold-world-deferred w)
+        do (when (and (consp form) (vsym-p (first form))
+                      (string= (vsym-name (first form))
+                               "RECORD-DEFINITION-SOURCE-FILE"))
+             (let* ((args (rest form))
+                    (type (let ((q (second args)))
+                            (and (consp q) (vsym-p (second q)) (second q))))
+                    (keyword-p (loop for a in (cddr args)
+                                     thereis (and (vsym-p a)
+                                                  (string= (vsym-name a)
+                                                           "START-TYPE-DEFINITION")))))
+               (cold-check (or keyword-p
+                               (not (and type (string= (vsym-name type)
+                                                       "DEFSTRUCT"))))
+                           "deferred RECORD-DEFINITION-SOURCE-FILE of a ~
+DEFSTRUCT without :START-TYPE-DEFINITION would CL:WARN pre-banner ~
+(~A): ~S" pkg form)))))
+
 (defun check-cold-eval (w reference)
   "M3d gate: full 88-file load with zero unhandled forms and zero
 unresolved fixups; register-map ASETs took; the trap page carries real
@@ -674,6 +700,9 @@ SET-TRAP-VECTOR-ENTRY from ITRAP-DISPATCH never ran)")
         ;; Mouse-char constants resolved into a build-time cache, no
         ;; MAKE-MOUSE-CHAR patch left (M3h boot 29).
         (check-mouse-char-cache w)
+        ;; No deferred RECORD-DEFINITION-SOURCE-FILE may fire the
+        ;; broken-DEFSTRUCT warning kludge (M3h boot 30).
+        (check-record-definition-kludge w)
         ;; ASET spot check: the readable register map has symbol entries.
         (multiple-value-bind (tag data boundp)
             (cold-symbol-value-q

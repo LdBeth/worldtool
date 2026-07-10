@@ -1028,13 +1028,21 @@ compiler-side and have no cold definition or boot effect.")
       ((string= head "LOAD-MULTIPLE-DEFINITION")
        ;; (LMD 'name 'type 'body env) evaluates the body forms in order
        ;; (sys/eval.lisp:2161); source-file recording is deferred.
+       ;; :START-TYPE-DEFINITION NIL must ride along exactly as LMD
+       ;; passes it (eval.lisp:2162): without the keyword, the interim
+       ;; kludge in RECORD-DEFINITION-SOURCE-FILE (fspec.lisp:718)
+       ;; CL:WARNs on TYPE = DEFSTRUCT, and WARN-COLD-LOAD's PRINT reads
+       ;; unbound *STANDARD-OUTPUT* pre-banner (M3h boot 30, trap 71 on
+       ;; the RDTBL defstruct).
        (cold-note "load-multiple-definition")
        (let ((name (quoted (first args)))
              (type (quoted (second args)))
              (body (quoted (third args))))
          (cold-defer w (list (si-vsym "RECORD-DEFINITION-SOURCE-FILE")
                              (list (si-vsym "QUOTE") name)
-                             (list (si-vsym "QUOTE") type))
+                             (list (si-vsym "QUOTE") type)
+                             (make-vsym "KEYWORD" "START-TYPE-DEFINITION")
+                             (si-vsym "NIL"))
                      "record-definition-source-file")
          (dolist (sub body)
            (cold-eval-toplevel w sub))))
