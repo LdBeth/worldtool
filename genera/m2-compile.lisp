@@ -125,8 +125,13 @@ on the host side by subtracting the QLD alists."
     "SYS: IO; RTC" "SYS: SYS; LDATA" "SYS: SYS; LCODE" "SYS: SYS; I-ALLOCATE"
     "SYS: SYS; ALLOCATE-COMMON" "SYS: SYS; ICONS" "SYS: SYS; OBJECTS"
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
-    "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH" "SYS: SYS2; DOUBLE"
-    "SYS: SYS2; COMPLEX" "SYS: SYS; WIRED" "SYS: I-SYS; WIRED-CONSOLE"
+    ;; Boot 43: SYS2; DOUBLE + cluster sibling SYS2; COMPLEX removed (they
+    ;; were band-audit-proven QLD; DOUBLE's '(:once) ADD-INITIALIZATION eagerly
+    ;; EVALs MAKE-DFLOAT-AND-SCALE-TABLE pre-banner, which calls QLD-warm
+    ;; DFLOAT -> trap 71).  See cold-gen.lisp *cold-load-order* +
+    ;; check-eager-initialization-callees (cold-diff.lisp).
+    "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH"
+    "SYS: SYS; WIRED" "SYS: I-SYS; WIRED-CONSOLE"
     "SYS: I-SYS; WIRED-SCREEN" "SYS: STORAGE; STORAGE" "SYS: STORAGE; USER-STORAGE"
     "SYS: STORAGE; STACK-WIRING" "SYS: STORAGE; DISK-DRIVER"
     "SYS: STORAGE; USER-DISK-DRIVER" "SYS: STORAGE; EMBEDDED-DISK-DRIVER"

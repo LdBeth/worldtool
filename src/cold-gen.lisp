@@ -127,8 +127,24 @@
     "SYS: SYS; LCODE" "SYS: SYS; I-ALLOCATE"
     "SYS: SYS; ALLOCATE-COMMON" "SYS: SYS; ICONS" "SYS: SYS; OBJECTS"
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
-    "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH" "SYS: SYS2; DOUBLE"
-    "SYS: SYS2; COMPLEX" "SYS: SYS; WIRED" "SYS: DEBUGGER; ITRAP-DISPATCH"
+    "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH"
+    ;; Boot 43: SYS2; DOUBLE and its cluster sibling SYS2; COMPLEX removed.
+    ;; DOUBLE carries an eager top-level (ADD-INITIALIZATION "Make
+    ;; *DFLOAT-AND-SCALE-TABLE*" '(setq *dfloat-and-scale-table*
+    ;; (make-dfloat-and-scale-table)) '(:once)) (double.lisp:406).  :once is a
+    ;; WHEN=FIRST keyword, so ADD-INITIALIZATION EVALs the init form
+    ;; IMMEDIATELY at registration (ltop.lisp:363) -- and the deferred MAPC
+    ;; registers it pre-banner.  MAKE-DFLOAT-AND-SCALE-TABLE (double.lisp:390)
+    ;; calls DFLOAT (sys2/lnumer.lisp:468), which is QLD-warm (dist fcell band
+    ;; 0x822, in INNER-SYSTEM-FILE-ALIST, absent from the FSET stub alist) and
+    ;; thus unbound in a fresh cold world -> trap 71 pre-banner.  Band oracle:
+    ;; DOUBLE is 822:7 (QLD) + 882:1 (only DESCRIBE-DOUBLE noise, cold) -- a
+    ;; hygiene-prune candidate, never genuinely cold.  COMPLEX prunes as its
+    ;; cluster sibling: 28 defuns, 0 cold-band, 22 QLD, cleanly QLD-band, no
+    ;; eager add-initialization.  Both are plain arithmetic files (no flavor
+    ;; definitions) so no deferred COMPILE-FLAVOR-METHODS coupling.  See the
+    ;; new check-eager-initialization-callees gate (cold-diff.lisp).
+    "SYS: SYS; WIRED" "SYS: DEBUGGER; ITRAP-DISPATCH"
     ;; The compiled error tables (COMPILE-ERROR-TABLES output; original
     ;; *TRAP-DISPATCH-TABLE-FILE*): SETQs of DBG:*TRAP-DISPATCH-TABLES* /
     ;; *TRAP-ON-EXIT-MICROSTATES* / *TRAP-DISPATCH-TABLE-VERSIONS*, which

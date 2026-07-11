@@ -796,6 +796,153 @@ area variable -- a literal-symbol value must be stored/quoted"
 COLD-LOAD-STREAM-IO (dist parity); got boundp=~A tag=~2,'0X data=~8,'0X ~
 (want #x~X)" boundp (tag-type tag) data io-vma)))))
 
+;;; M3h boot-43: eager-initialization callability.
+
+(defun vfun-function-cell-callees (vf)
+  "Every function-cell reference (a DTP-FUNCTION locative, l-bin op #o41)
+inside VF's compiled words -- the callees VF invokes through their function
+cells.  Returns the vsym targets, de-duplicated by fspec key; list/property
+fspecs are skipped (we only name symbols)."
+  (let ((callees nil))
+    (labels ((visit (v)
+               (typecase v
+                 (vloc (when (eq (vloc-kind v) :function)
+                         (let ((tgt (vloc-target v)))
+                           (when (vsym-p tgt) (push tgt callees))))
+                       (visit (vloc-target v)))
+                 (vop (mapc #'visit (vop-args v)))
+                 (cons (loop for c = v then (cdr c)
+                             while (consp c)
+                             do (visit (car c))
+                             finally (when c (visit c))))
+                 (varray (when (varray-contents v)
+                           (map nil #'visit (varray-contents v)))))))
+      (map nil (lambda (vw) (visit (vword-data vw))) (vfun-words vf)))
+    (delete-duplicates (nreverse callees)
+                       :test (lambda (a b)
+                               (equal (fspec-key a) (fspec-key b))))))
+
+(defun cold-build-fspec-vfun-map ()
+  "fspec-key -> vfun over the whole cold set (first definition wins), so a
+deferred call head can be resolved to the compiled body it names."
+  (let ((map (make-hash-table :test #'equal)))
+    (dolist (spec *cold-load-order*)
+      (let ((vbin (read-vbin (sys-pathname spec))))
+        (dolist (event (vbin-file-events vbin))
+          (walk-vfuns (cdr event)
+                      (lambda (vf)
+                        (let ((fspec (first (vfun-name-and-storage vf))))
+                          (when (vsym-p fspec)
+                            (let ((k (fspec-key fspec)))
+                              (unless (gethash k map)
+                                (setf (gethash k map) vf))))))))))
+    map))
+
+(defun add-initialization-eager-p (keywords)
+  "KEYWORDS is the decoded (unquoted) WHEN list of an ADD-INITIALIZATION.
+True when it carries a WHEN=FIRST/NOW keyword (:ONCE, ONCE-ONLY, :FIRST,
+:NOW -- keyword or SI symbol), the classes ADD-INITIALIZATION EVALs the
+init form for IMMEDIATELY at registration (ltop.lisp:300,363).  A missing
+or non-statically-decodable list is conservatively NOT eager."
+  (and (listp keywords)
+       (loop for k in keywords
+             thereis (and (vsym-p k)
+                          (member (vsym-name k)
+                                  '("ONCE" "ONCE-ONLY" "FIRST" "NOW")
+                                  :test #'string=)))))
+
+(defun eager-init-operators (form)
+  "Operator symbols (car positions) reachable in the init FORM, skipping
+QUOTE/FUNCTION data bodies.  Over-collects (LET vars, etc.) harmlessly --
+bound symbols pass anyway."
+  (let ((ops nil))
+    (labels ((walk (f)
+               (when (consp f)
+                 (let ((head (first f)))
+                   (cond
+                     ((vsym-named-p head "QUOTE"))
+                     ((vsym-named-p head "FUNCTION"))
+                     (t
+                      (when (vsym-p head) (push head ops))
+                      (loop for sub = (rest f) then (cdr sub)
+                            while (consp sub)
+                            do (walk (car sub)))))))))
+      (walk form))
+    (nreverse ops)))
+
+(defun check-eager-initialization-callees (w)
+  "M3h boot-43 gate: no cold-loaded EAGER ADD-INITIALIZATION reaches an
+unbound function pre-banner.  ADD-INITIALIZATION with WHEN=FIRST/NOW (:ONCE,
+ONCE-ONLY, :FIRST, :NOW) EVALs its init form IMMEDIATELY at registration
+(ltop.lisp:363-366), and the deferred MAPC registers it before the banner
+(cold-load.lisp:547) -- so both the init form's own operators AND the direct
+function-cell callees inside each cold-defined operator must be bound (or
+FSET-stubbed / interpreter special forms) at that point.  Boot 43: SYS2;
+DOUBLE's (ADD-INITIALIZATION \"Make *DFLOAT-AND-SCALE-TABLE*\" '(setq ...
+(make-dfloat-and-scale-table)) '(:once)) called MAKE-DFLOAT-AND-SCALE-TABLE,
+whose body calls QLD-warm DFLOAT (unbound in a fresh world) -> trap 71.  The
+shallow operator walk misses it -- MAKE-DFLOAT-AND-SCALE-TABLE is itself
+cold-defined -- so the gate also walks one level into each bound cold
+operator's body and names the offending callee (DFLOAT via
+MAKE-DFLOAT-AND-SCALE-TABLE).  Passes after the DOUBLE/COMPLEX prune."
+  (let ((vmap (cold-build-fspec-vfun-map))
+        (dtp-null (cold-dtp w "NULL"))
+        (bad (make-hash-table :test #'equal)))
+    (labels
+        ((special-p (v)
+           (member (vsym-name v) *cold-interpreter-special-forms*
+                   :test #'string=))
+         (stub-p (v)
+           (or (member (vsym-name v) *cold-boot-stub-functions*
+                       :test #'string=)
+               (member (vsym-name v) *cold-known-pending-functions*
+                       :test #'string=)))
+         (fbound-p (v)
+           (let ((cell (gethash (fspec-key v) (cold-world-fdefs w))))
+             (and cell
+                  (multiple-value-bind (tag data)
+                      (cw-ref w (cold-follow-cell w cell))
+                    (declare (ignore data))
+                    (/= (tag-type tag) dtp-null)))))
+         (bound-callable-p (v)
+           (or (special-p v) (stub-p v) (fbound-p v)))
+         (flag (name pkg callee via)
+           ;; De-dupe identical (init, callee) diagnostics.
+           (let ((key (list name (vsym-name callee) via)))
+             (unless (gethash key bad)
+               (setf (gethash key bad) t)
+               (if via
+                   (cold-check nil
+                               "eager ADD-INITIALIZATION ~S (~A) reaches ~
+unbound callee ~A via ~A" name pkg (vsym-name callee) via)
+                   (cold-check nil
+                               "eager ADD-INITIALIZATION ~S (~A) calls ~
+undefined-at-boot ~A" name pkg (vsym-name callee)))))))
+      (loop for (pkg . form) in (cold-world-deferred w)
+            do (when (and (consp form)
+                          (vsym-named-p (first form) "ADD-INITIALIZATION"))
+                 (let* ((*cold-default-package* pkg)
+                        (name (second form))
+                        (init (quoted (third form)))
+                        (keywords (quoted (fourth form))))
+                   (when (add-initialization-eager-p keywords)
+                     (dolist (op (eager-init-operators init))
+                       (cond
+                         ((special-p op))       ; SETQ/IF/LET/... not a call
+                         ((not (bound-callable-p op))
+                          (flag name pkg op nil))
+                         (t
+                          ;; Bound cold operator: its body runs during the
+                          ;; eager EVAL, so its function-cell callees must be
+                          ;; bound too.
+                          (let ((vf (gethash (fspec-key op) vmap)))
+                            (when vf
+                              (dolist (callee (vfun-function-cell-callees vf))
+                                (unless (bound-callable-p callee)
+                                  (flag name pkg callee
+                                        (vsym-name op)))))))))))))
+      t)))
+
 (defun check-deferred-defvar-hoist (w)
   "M3h boot-33 gate: both flavor completion-table inits precede the
 first deferred flavor composition.  DEFFLAVOR-INTERNAL (first at ~104,
@@ -3635,6 +3782,11 @@ prints the R1 unbound-function-cell audit."
         ;; eagerly instead of deferring an unbound SYMEVAL (M3h boot 42).
         ;; Post-finalize, so the reconcile-re-deferred SETs are included.
         (check-deferred-set-referents w)
+        ;; No cold-loaded eager ADD-INITIALIZATION (:once/:now/:first) may
+        ;; EVAL an init form that reaches an unbound function pre-banner
+        ;; (M3h boot 43: DOUBLE's :once init -> MAKE-DFLOAT-AND-SCALE-TABLE
+        ;; -> QLD-warm DFLOAT, trap 71).
+        (check-eager-initialization-callees w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model
