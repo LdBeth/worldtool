@@ -63,7 +63,24 @@
     ;; standard-values->ERROR, vlm-disk-utilities->DISK-ERROR.  See the new
     ;; check-deferred-flavor-composition gate (cold-diff.lisp) -- the
     ;; systematic detector for this class.
-    "SYS: IO; INPUT-EDITOR" "SYS: IO; ITERATORS" "SYS: SYS2; LET"
+    ;;
+    ;; Boot 39: a sixth file removed -- io/INPUT-EDITOR, interactive-
+    ;; stream's cluster sibling.  Band oracle: its functions are uniformly
+    ;; 0x8223 QLD-band in the dist (WITH-IE-TYPEOUT-INTERNAL 05:822321AE,
+    ;; IE-MAKE-BLIP 05:82232974) -- never genuinely cold, missed in boot
+    ;; 38's batch.  Its DEFUN-IE macro forms defer FDEFINEs of
+    ;; (DEFUN-IN-FLAVOR <name> INTERACTIVE-STREAM ...) specs; at boot the
+    ;; FDEFINE arm of METHOD-FUNCTION-SPEC-HANDLER (defmethod.lisp:943-948)
+    ;; does (OR (FIND-FLAVOR 'INTERACTIVE-STREAM NIL) (ERROR "~S is not the
+    ;; name of a flavor...")) -- and INTERACTIVE-STREAM was DEFFLAVORed only
+    ;; by the file boot 38 pruned, so the ERROR fires fatally pre-banner.
+    ;; input-editor's PRINTING-INPUT-EDITOR DEFFLAVOR-INTERNAL + CFM
+    ;; (input-editor.lisp:2315, composes on INTERACTIVE-STREAM) was the next
+    ;; queued landmine of the boot-38 class; the prune removes both.  The
+    ;; check-deferred-flavor-composition gate now also detects the method-
+    ;; family-FDEFINE-on-undefined-flavor variant (the class that let IE-
+    ;; CHARACTER slip through boot 38's CFM-only detector).
+    "SYS: IO; ITERATORS" "SYS: SYS2; LET"
     "SYS: SYS; LISPFN" "SYS: SYS; LTOP" "SYS: SYS2; MACLSP"
     "SYS: SYS; MACROEXPAND" "SYS: SYS2; MEMORY-COLD"
     "SYS: EMBEDDING; RPC; OCTET-STRUCTURE-RUNTIME" "SYS: SYS; PACKAGE"

@@ -2318,6 +2318,36 @@ materialized the deferred form, so CDL-VSYM never creates new ones here."
     (values (and (vsym-p name) (cold-vsym w name))
             (nreverse comp-vmas))))
 
+(defparameter *cold-method-fspec-flavor-heads*
+  '("METHOD" "WRAPPER" "WHOPPER" "NCWHOPPER" "COMBINED" "DEFUN-IN-FLAVOR")
+  "The method-type spec heads that route through METHOD-FUNCTION-SPEC-
+HANDLER and carry a flavor name -- FLAVOR:*FDEFINABLE-METHOD-TYPES*
+\(flavor/defmethod.lisp:125), whose FUNCTION-SPEC-HANDLER property is set
+to METHOD-FUNCTION-SPEC-HANDLER by DEFINE-FLAVOR-FUNCTION-SPEC-HANDLERS
+\(defmethod.lisp:847-849).  For every one the function-spec shape is
+(type generic flavor options...) (flavor/global.lisp:87-94: METHOD-TYPE=
+FIRST, METHOD-GENERIC=SECOND, METHOD-FLAVOR=THIRD), so the flavor name is
+always the THIRD element.  METHOD-FUNCTION-SPEC-HANDLER's FDEFINE arm does
+(OR (FIND-FLAVOR FLAVOR-NAME NIL) (ERROR \"~S is not the name of a
+flavor...\")) (defmethod.lisp:945-948) -- a fatal pre-banner ERROR when
+that flavor is undefined at boot.  NOTE: SHARED-COMBINED is in
+*COLD-METHOD-FSPEC-HEADS* (it IS deferred) but is DELIBERATELY ABSENT
+here: it is excluded from *FDEFINABLE-METHOD-TYPES* and has its OWN handler
+(combine.lisp:1725) whose spec shape is (SHARED-COMBINED operator sub...)
+with integer subscripts in the tail -- no flavor to validate.")
+
+(defun cold-method-fspec-flavor-vma (w fspec)
+  "For a deferred method-family FDEFINE fspec whose head routes through
+METHOD-FUNCTION-SPEC-HANDLER (*COLD-METHOD-FSPEC-FLAVOR-HEADS*), return the
+VMA of the flavor named in its THIRD element (METHOD-FLAVOR); NIL for any
+other fspec.  Resolves the flavor symbol under the caller's
+*COLD-DEFAULT-PACKAGE* binding (mirroring the boot's own read)."
+  (when (and (consp fspec) (vsym-p (first fspec))
+             (member (vsym-name (first fspec))
+                     *cold-method-fspec-flavor-heads* :test #'string=))
+    (let ((fl (and (consp (cddr fspec)) (third fspec))))
+      (and (vsym-p fl) (cold-vsym w fl)))))
+
 (defun check-deferred-flavor-composition (w)
   "M3h boot-38 gate: the systematic detector for pre-banner flavor-
 composition WARNs.  COMPILE-FLAVOR-METHODS-LOAD-TIME calls COMPOSE-FLAVOR-
@@ -2343,8 +2373,24 @@ useful-streams' BUFFERED-*-COROUTINE/PIPE-STREAM, which appear only in
 their own CFM); it is registered defined and skipped.  Otherwise the
 transitive component+required-flavor closure is walked THROUGH the tracked
 definitions and the check FAILs naming the CFM flavor and the first
-undefined component.  Bare cold-checks: failures land in check-cold-emit's
-block (check-plist-value-cells precedent)."
+undefined component.
+
+Boot 39 extension: the CFM-only detector above missed the OTHER pre-banner
+flavor landmine of this class -- a deferred method-family FDEFINE whose
+flavor is undefined.  METHOD-FUNCTION-SPEC-HANDLER's FDEFINE arm
+(defmethod.lisp:945-948) does (OR (FIND-FLAVOR FLAVOR-NAME NIL) (ERROR
+\"~S is not the name of a flavor...\")); that ERROR is fatal pre-banner
+just like the CFM WARN.  This is how io/input-editor's (DEFUN-IN-FLAVOR
+IE-CHARACTER INTERACTIVE-STREAM ...) and siblings slipped through boot 38
+(their flavor INTERACTIVE-STREAM was DEFFLAVORed only by the file boot 38
+pruned).  So at every deferred FDEFINE (and, defensively, NOTE-SOLITARY-
+METHOD -- though its argument is a bare generic name, never a method-family
+fspec, so it carries no flavor to check) whose fspec head is in
+*COLD-METHOD-FSPEC-FLAVOR-HEADS*, the flavor named in the fspec's THIRD
+element must already be DEFINED (a DEFFLAVOR-INTERNAL seen at or before this
+boot point, or registered via the CFM auto-mixture path).  Bare
+cold-checks: failures land in check-cold-emit's block (check-plist-value-
+cells precedent)."
   (let ((defined (make-hash-table)))       ; flavor-vma -> component-vma list
     (flet ((flavor-pname (vma)
              ;; Best-effort human name for a flavor VMA (already interned).
@@ -2362,6 +2408,21 @@ block (check-plist-value-cells precedent)."
                       (multiple-value-bind (name comps)
                           (cold-defflavor-components w form)
                         (when name (setf (gethash name defined) comps))))
+                     ((string= head "FDEFINE")
+                      ;; A deferred (FDEFINE '<fspec> '<def> T).  When the
+                      ;; fspec is a method-family type that routes through
+                      ;; METHOD-FUNCTION-SPEC-HANDLER, its FDEFINE arm errors
+                      ;; fatally pre-banner unless the flavor named in the
+                      ;; fspec (THIRD element) is already defined here.
+                      (let ((fl (cold-method-fspec-flavor-vma
+                                 w (quoted (second form)))))
+                        (when fl
+                          (cold-check
+                           (nth-value 1 (gethash fl defined))
+                           "deferred method-family FDEFINE ~S (~A) targets ~
+flavor ~A, undefined at this boot point -- METHOD-FUNCTION-SPEC-HANDLER's ~
+FDEFINE arm ERRORs \"not the name of a flavor\" fatally pre-banner"
+                           (quoted (second form)) pkg (flavor-pname fl)))))
                      ((string= head "COMPILE-FLAVOR-METHODS-LOAD-TIME")
                       (let ((fv (let ((fn (quoted (second form))))
                                   (and (vsym-p fn) (cold-vsym w fn)))))
@@ -3080,10 +3141,10 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "DEBUGGER:.RESTART.DESCRIPTION."
     "DEBUGGER:*TRAP-DISPATCH-TABLE*"
     "DEBUGGER:REPORT-IGNORED-ERRORS"
-    "DYNAMIC-WINDOWS:*ACCEPT-ACTIVATION-CHARS*"
-    "DYNAMIC-WINDOWS:*ACCEPT-ACTIVE*"
-    "DYNAMIC-WINDOWS:*ACCEPT-BLIP-CHARS*"
-    "DYNAMIC-WINDOWS:*ACCEPT-HELP*"
+    ;; DYNAMIC-WINDOWS:*ACCEPT-{ACTIVATION-CHARS,ACTIVE,BLIP-CHARS,HELP}*
+    ;; removed boot 39: their only cold referencer was the pruned
+    ;; io/input-editor.lisp (the rubout-handler ACCEPT specials); no longer
+    ;; referenced-unbound.
     ;; Boot 38 (new with io/stream): the &KEY default form (CHECK-TYPE
     ;; DW::*PRESENT-CHECKS-TYPE*) on stream.lisp:224,233 PRESENT entry
     ;; points.  A default arg is evaluated only when the presentation call
@@ -3143,11 +3204,13 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "SYSTEM-INTERNALS:*COLD-LOADED-FILE-PROPERTY-LISTS*"
     "SYSTEM-INTERNALS:*COUNT*"
     "SYSTEM-INTERNALS:*CURRENT-SELF-EVALUATING-SYMBOL-TABLE*"
-    "SYSTEM-INTERNALS:*ECHOPLEX*"
+    ;; Removed boot 39 -- six SI input-editor specials (*ECHOPLEX*,
+    ;; *INPUT-HISTORY-DEFAULT*, *NUMERIC-ARG-P*, *NUMERIC-ARG*,
+    ;; *OPEN-BRACKET*, *RESCAN-STATE*) whose only cold referencer was the
+    ;; pruned io/input-editor.lisp; no longer referenced-unbound.
     "SYSTEM-INTERNALS:*FORWARDED-SYMBOL-CELL-TABLE-LOCK*"
     "SYSTEM-INTERNALS:*HIGH-PART*"
     "SYSTEM-INTERNALS:*INDEX*"
-    "SYSTEM-INTERNALS:*INPUT-HISTORY-DEFAULT*"
     "SYSTEM-INTERNALS:*INSTANT-PACKAGE-DWIM-MODULUS*"
     "SYSTEM-INTERNALS:*INSTANT-PACKAGE-DWIM-PACKAGE*"
     "SYSTEM-INTERNALS:*INSTANT-PACKAGE-DWIM-TABLE*"
@@ -3158,9 +3221,6 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "SYSTEM-INTERNALS:*LOCAL-DECLARATIONS-CACHE*"
     "SYSTEM-INTERNALS:*LOCAL-DECLARATIONS-LAST-LOCAL-DECLARATIONS*"
     "SYSTEM-INTERNALS:*LOW-PART*"
-    "SYSTEM-INTERNALS:*NUMERIC-ARG-P*"
-    "SYSTEM-INTERNALS:*NUMERIC-ARG*"
-    "SYSTEM-INTERNALS:*OPEN-BRACKET*"
     "SYSTEM-INTERNALS:*PACKAGE-NAME-AARRAY*"
     "SYSTEM-INTERNALS:*PACKAGE-NAME-TABLE-COUNT*"
     "SYSTEM-INTERNALS:*PACKAGE-NAME-TABLE-MODULUS*"
@@ -3178,7 +3238,6 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     ;; DEFVAR-RESETTABLE also registered it in *WARM-BOOT-BINDINGS* and
     ;; standard-values reloads warm (QLD) to bind it NIL.  Never read unbound.
     "SYSTEM-INTERNALS:*REMEMBERED-BINDING-WARNINGS*"
-    "SYSTEM-INTERNALS:*RESCAN-STATE*"
     "SYSTEM-INTERNALS:*SCAVENGE-IN-PROGRESS*"
     "SYSTEM-INTERNALS:*SCL-PACKAGE*"
     "SYSTEM-INTERNALS:*SIMPLE-LISTENER-PROCESS*"
@@ -3240,10 +3299,10 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "TV:WHO-LINE-RUN-LIGHT-LOC"
     "TV:WHO-LINE-RUN-STATE"
     "TV:WHO-LINE-RUN-STATE-SHEET"
-    "ZWEI:*INTERVAL*"
-    "ZWEI:*KILL-HISTORY-USER*"
-    "ZWEI:*KILL-HISTORY*"
-    "ZWEI:*MODE-LIST-SYNTAX-TABLE*"
+    ;; ZWEI:*{INTERVAL,KILL-HISTORY-USER,KILL-HISTORY,MODE-LIST-SYNTAX-TABLE}*
+    ;; removed boot 39: their only cold referencer was the pruned
+    ;; io/input-editor.lisp (the editor specials its rubout handler binds);
+    ;; no longer referenced-unbound.
     )
   "R2 danger set as reviewed 2026-07-05 (M3h boot 18; boot 19 re-homed
 CONDITIONS:CONDITION to FUTURE-COMMON-LISP, its pkgdcl exporter -- same

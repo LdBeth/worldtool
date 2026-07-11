@@ -109,7 +109,11 @@ on the host side by subtracting the QLD alists."
     ;; VLM-DISK-UTILITIES removed (band-audit-proven QLD files with fatal
     ;; pre-banner deferred CFMs); IO; STREAM added (genuinely cold).  See
     ;; cold-gen.lisp *cold-load-order* + coldset-audit.lisp.
-    "SYS: IO; INPUT-EDITOR" "SYS: IO; ITERATORS" "SYS: SYS2; LET"
+    ;; Boot 39: INPUT-EDITOR removed too (interactive-stream's cluster
+    ;; sibling, band-proven 0x8223 QLD; its DEFUN-IN-FLAVOR/method fdefines
+    ;; and PRINTING-INPUT-EDITOR CFM all target the pruned INTERACTIVE-STREAM
+    ;; flavor -> fatal pre-banner FIND-FLAVOR error / composition WARN).
+    "SYS: IO; ITERATORS" "SYS: SYS2; LET"
     "SYS: SYS; LISPFN" "SYS: SYS; LTOP" "SYS: SYS2; MACLSP"
     "SYS: SYS; MACROEXPAND" "SYS: SYS2; MEMORY-COLD"
     "SYS: EMBEDDING; RPC; OCTET-STRUCTURE-RUNTIME" "SYS: SYS; PACKAGE"
