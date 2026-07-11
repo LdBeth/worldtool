@@ -141,7 +141,19 @@
     ;; deferred flavor MAPC's PARSE-DEFFLAVOR calls LISP:NREVERSE
     ;; (defflavor.lisp:557), unbound without this (M3h boot 32); its
     ;; .vbin ships (QLD's INNER-SYSTEM-FILE-ALIST reloads it warm).
-    "SYS: CLCP; SEQFNS"))
+    "SYS: CLCP; SEQFNS"
+    ;; The CL numeric layer was cold too: the dist band scan puts
+    ;; numerics.lisp's roster consecutively in source order at
+    ;; #x8821E97A-#x8821EA47 (ISQRT, FLOAT-RADIX/DIGITS/PRECISION/SIGN,
+    ;; FLOAT, FLOAT1, FLOAT-OPTIMIZER, FIXNUM-RIGHTMOST-ONE,
+    ;; INTEGER-LENGTH) -- right after seqfns' band, matching this
+    ;; position.  Trap: the deferred flavor MAPC's handler-table build
+    ;; (HANDLER-TABLE-OPTIMAL-N-SLOTS, flavor/handle.lisp:273) calls
+    ;; LISP:INTEGER-LENGTH, unbound without this (M3h boot 37); its
+    ;; .vbin ships (QLD's INNER-SYSTEM-FILE-ALIST reloads it warm,
+    ;; "Needed by TABLE").  Its ADD-OPTIMIZER registration (:125) is
+    ;; already covered by *cold-guarded-heads*' ADD-OPTIMIZER-INTERNAL.
+    "SYS: CLCP; NUMERICS"))
 
 ;;; ---- M3f: finalization and the full pipeline -----------------------------
 
