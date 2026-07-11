@@ -157,7 +157,31 @@
     "SYS: I-SYS; WIRED-CONSOLE"
     "SYS: I-SYS; WIRED-SCREEN" "SYS: STORAGE; STORAGE" "SYS: STORAGE; USER-STORAGE"
     "SYS: STORAGE; STACK-WIRING" "SYS: STORAGE; DISK-DRIVER"
-    "SYS: STORAGE; USER-DISK-DRIVER" "SYS: STORAGE; EMBEDDED-DISK-DRIVER"
+    ;; Boot 44: SYS: STORAGE; USER-DISK-DRIVER removed (siblings DISK-DRIVER
+    ;; and EMBEDDED-DISK-DRIVER kept -- band-audited genuinely cold).
+    ;; user-disk-driver.lisp:200 carries a top-level (ADD-INITIALIZATION
+    ;; "Initialize user disk" '(initialize-user-disk) '(:system)).  :SYSTEM
+    ;; is the SYSTEM-INITIALIZATION-LIST keyword whose DEFAULT-WHEN is FIRST
+    ;; (ltop.lisp:303 INITIALIZATION-KEYWORDS), so ADD-INITIALIZATION EVALs
+    ;; the init form IMMEDIATELY at registration (ltop.lisp:363-366) -- and
+    ;; the deferred MAPC registers it pre-banner.  INITIALIZE-USER-DISK
+    ;; (user-disk-driver.lisp:195) calls PROCESS:RESET-LOCK and
+    ;; PROCESS:MAKE-LOCK (scheduler/lock-definitions.lisp), both QLD-warm
+    ;; defgenerics unbound in a fresh cold world -> trap 71 pre-banner.  The
+    ;; boot-43 gate missed it because add-initialization-eager-p only
+    ;; matched the literal ONCE/ONCE-ONLY/FIRST/NOW keyword names and never
+    ;; classified :SYSTEM's implicit FIRST default (fixed in this boot).
+    ;; Band oracle: 42 defuns -> 29 QLD (0x822) + 2 cold-band
+    ;; (SIGNAL-DISK-ERROR/SIGNAL-DISK-ERRORS, error-path noise referenced by
+    ;; no cold file); no cold file references INITIALIZE-USER-DISK or the
+    ;; *user-*-disk-event* vars.  The "Initialize user disk" :system init is
+    ;; a post-banner SYSTEM-INITIALIZATION-LIST obligation that must run warm
+    ;; (QLD reloads the file with RESET-LOCK/MAKE-LOCK/INITIALIZE-DISK-EVENT
+    ;; bound).  Cold DISK-DRIVER.LISP only uses the DISK-EVENT-LOCK accessor
+    ;; + *ROOT-DISK-EVENT*, both defined in cold files outside
+    ;; user-disk-driver.  See check-eager-initialization-callees
+    ;; (cold-diff.lisp).
+    "SYS: STORAGE; EMBEDDED-DISK-DRIVER"
     "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"

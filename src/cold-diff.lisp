@@ -838,18 +838,78 @@ deferred call head can be resolved to the compiled body it names."
                                 (setf (gethash k map) vf))))))))))
     map))
 
+;;; INITIALIZATION-KEYWORDS (ltop.lisp:300-319), transcribed.  Each row is
+;;; (KEYWORD LIST-SYMBOL [DEFAULT-WHEN]).  PARSE-INITIALIZATION-ARGS
+;;; (ltop.lisp:324-342) walks the caller's keyword list: a row whose
+;;; LIST-SYMBOL is NIL is an OVERRIDE keyword that SETQs WHEN directly (last
+;;; one wins); a row with a LIST-SYMBOL selects the init list and contributes
+;;; its DEFAULT-WHEN.  Final WHEN = the explicit override if any, else the
+;;; list keyword's DEFAULT-WHEN, else NORMAL.
+(defparameter *initialization-override-when*
+  ;; The (KEYWORD NIL WHEN) rows -- ltop.lisp:316-319.  These EXPLICITLY set
+  ;; WHEN and WIN over any list keyword's default.
+  '(("NOW"    . :now)
+    ("FIRST"  . :first)
+    ("REDO"   . :redo)
+    ("NORMAL" . :normal))
+  "Override-WHEN keyword name -> WHEN symbol.")
+
+(defparameter *initialization-list-default-when*
+  ;; The list-keyword rows carrying a DEFAULT-WHEN -- ltop.lisp:303,306,311:
+  ;; SYSTEM -> FIRST, ONCE -> FIRST, SITE -> NOW.  ONCE-ONLY accepted as a
+  ;; synonym of ONCE (PARSE matches on the row's pname, which is ONCE).
+  '(("SYSTEM"    . :first)
+    ("ONCE"      . :first)
+    ("ONCE-ONLY" . :first)
+    ("SITE"      . :now))
+  "List-keyword name -> its DEFAULT-WHEN.")
+
+(defparameter *initialization-list-keywords-no-default*
+  ;; The remaining list-keyword rows (LIST-SYMBOL present, DEFAULT-WHEN
+  ;; absent -> contributes no WHEN, so falls through to NORMAL) --
+  ;; ltop.lisp:301-314.
+  '("WARM" "COLD" "BEFORE-COLD" "SYSTEM-SHUTDOWN" "FULL-GC" "AFTER-FULL-GC"
+    "LOGIN" "LOGOUT" "ENABLE-SERVICES" "DISABLE-SERVICES" "WINDOW")
+  "Recognized list keywords with no DEFAULT-WHEN.")
+
 (defun add-initialization-eager-p (keywords)
   "KEYWORDS is the decoded (unquoted) WHEN list of an ADD-INITIALIZATION.
-True when it carries a WHEN=FIRST/NOW keyword (:ONCE, ONCE-ONLY, :FIRST,
-:NOW -- keyword or SI symbol), the classes ADD-INITIALIZATION EVALs the
-init form for IMMEDIATELY at registration (ltop.lisp:300,363).  A missing
-or non-statically-decodable list is conservatively NOT eager."
-  (and (listp keywords)
-       (loop for k in keywords
-             thereis (and (vsym-p k)
-                          (member (vsym-name k)
-                                  '("ONCE" "ONCE-ONLY" "FIRST" "NOW")
-                                  :test #'string=)))))
+True when the WHEN that PARSE-INITIALIZATION-ARGS (ltop.lisp:324-342) would
+compute is FIRST or NOW -- the two classes ADD-INITIALIZATION EVALs the init
+form for IMMEDIATELY at registration (ltop.lisp:361-366).  This faithfully
+models INITIALIZATION-KEYWORDS (ltop.lisp:300-319): an override keyword
+(:NOW/:FIRST/:REDO/:NORMAL, keyword or SI symbol) SETQs WHEN directly and
+the last one wins; a list keyword contributes its DEFAULT-WHEN (SYSTEM/ONCE
+-> FIRST, SITE -> NOW; all others -> none, i.e. NORMAL); the explicit
+override wins over the list default.  Examples: '(:SYSTEM) IS eager (SYSTEM
+default FIRST); '(:SYSTEM :NORMAL) is NOT (NORMAL override wins); '(:NOW
+:SYSTEM) IS (NOW override); '(:ONCE) IS (ONCE default FIRST); '(:WARM),
+'(:COLD), NIL are NOT.  Boot 44: the boot-43 predicate only matched the
+literal keyword NAMES ONCE/ONCE-ONLY/FIRST/NOW and so MISSED :SYSTEM (whose
+DEFAULT-WHEN is FIRST) -- user-disk-driver.lisp's '(:system) init EVALed
+INITIALIZE-USER-DISK -> QLD-warm PROCESS:RESET-LOCK pre-banner, trap 71.  A
+missing, non-list, or non-statically-decodable (unrecognized keyword) list
+is conservatively NOT eager."
+  (when (and (listp keywords)
+             (every #'vsym-p keywords))
+    (let ((when-explicit nil)
+          (default-when nil)
+          (decodable t))
+      (dolist (k keywords)
+        (let* ((name (vsym-name k))
+               (ov (cdr (assoc name *initialization-override-when*
+                               :test #'string=)))
+               (ld (cdr (assoc name *initialization-list-default-when*
+                               :test #'string=))))
+          (cond
+            (ov (setf when-explicit ov))     ; override keyword: last one wins
+            (ld (setf default-when ld))      ; list keyword carrying a default
+            ((member name *initialization-list-keywords-no-default*
+                     :test #'string=))       ; recognized, no default (-> NORMAL)
+            (t (setf decodable nil)))))      ; unknown keyword -> can't decode
+      (when decodable
+        (let ((when (or when-explicit default-when :normal)))
+          (and (member when '(:first :now)) t))))))
 
 (defun eager-init-operators (form)
   "Operator symbols (car positions) reachable in the init FORM, skipping
@@ -884,7 +944,15 @@ whose body calls QLD-warm DFLOAT (unbound in a fresh world) -> trap 71.  The
 shallow operator walk misses it -- MAKE-DFLOAT-AND-SCALE-TABLE is itself
 cold-defined -- so the gate also walks one level into each bound cold
 operator's body and names the offending callee (DFLOAT via
-MAKE-DFLOAT-AND-SCALE-TABLE).  Passes after the DOUBLE/COMPLEX prune."
+MAKE-DFLOAT-AND-SCALE-TABLE).  Passes after the DOUBLE/COMPLEX prune.
+Boot 44: STORAGE; USER-DISK-DRIVER's top-level (ADD-INITIALIZATION
+\"Initialize user disk\" '(initialize-user-disk) '(:system)) was ALSO eager
+-- :SYSTEM's DEFAULT-WHEN is FIRST (ltop.lisp:303) -- but add-initialization-
+eager-p (boot 43) only matched the literal ONCE/ONCE-ONLY/FIRST/NOW keyword
+NAMES and never classified :SYSTEM, so the eager init slipped past the gate:
+INITIALIZE-USER-DISK calls QLD-warm PROCESS:RESET-LOCK/MAKE-LOCK -> trap 71.
+add-initialization-eager-p now models PARSE-INITIALIZATION-ARGS faithfully
+(explicit-override vs list-keyword DEFAULT-WHEN); the file is pruned."
   (let ((vmap (cold-build-fspec-vfun-map))
         (dtp-null (cold-dtp w "NULL"))
         (bad (make-hash-table :test #'equal)))
@@ -3523,9 +3591,8 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "STORAGE:*READ-ONLY-N-WRITTEN-PAGES*"
     "STORAGE:*SMPT-CACHED-VPN*"
     "STORAGE:*TRANSPORTER-READ-ONLY-VPN*"
-    "STORAGE:*USER-ANONYMOUS-DISK-EVENT*"
-    "STORAGE:*USER-ROOT-DISK-EVENT*"
-    "STORAGE:*USER-SERIAL-DISK-EVENT*"
+    ;; Boot 44: *USER-{ANONYMOUS,ROOT,SERIAL}-DISK-EVENT* rows removed with
+    ;; the STORAGE; USER-DISK-DRIVER prune (their only cold definer).
     "STORAGE:*WIRE/UNWIRE-TICK*"
     "STORAGE:*WIRED-CONTROL-STACK-PAGES*"
     "SYMBOLICS-COMMON-LISP:ARGLIST"

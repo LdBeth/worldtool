@@ -134,7 +134,13 @@ on the host side by subtracting the QLD alists."
     "SYS: SYS; WIRED" "SYS: I-SYS; WIRED-CONSOLE"
     "SYS: I-SYS; WIRED-SCREEN" "SYS: STORAGE; STORAGE" "SYS: STORAGE; USER-STORAGE"
     "SYS: STORAGE; STACK-WIRING" "SYS: STORAGE; DISK-DRIVER"
-    "SYS: STORAGE; USER-DISK-DRIVER" "SYS: STORAGE; EMBEDDED-DISK-DRIVER"
+    ;; Boot 44: SYS: STORAGE; USER-DISK-DRIVER removed (siblings kept).  Its
+    ;; top-level (ADD-INITIALIZATION "Initialize user disk"
+    ;; '(initialize-user-disk) '(:system)) EVALs pre-banner (:SYSTEM ->
+    ;; DEFAULT-WHEN FIRST, ltop.lisp:303), and INITIALIZE-USER-DISK calls
+    ;; QLD-warm PROCESS:RESET-LOCK/MAKE-LOCK -> trap 71.  See cold-gen.lisp
+    ;; *cold-load-order* + check-eager-initialization-callees.
+    "SYS: STORAGE; EMBEDDED-DISK-DRIVER"
     "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
