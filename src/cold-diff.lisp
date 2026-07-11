@@ -2791,7 +2791,23 @@ fspec, so it carries no flavor to check) whose fspec head is in
 element must already be DEFINED (a DEFFLAVOR-INTERNAL seen at or before this
 boot point, or registered via the CFM auto-mixture path).  Bare
 cold-checks: failures land in check-cold-emit's block (check-plist-value-
-cells precedent)."
+cells precedent).
+
+Boot 46 extension: the auto-mixture arm was BLIND to package identity.
+An auto-mixture variant's symbol is baked at compile time in the file's
+package (useful-streams' BUFFERED-*-COROUTINE-STREAM in CLI), but the
+name is REGENERATED at replay by FLAVOR-MIXTURE-NAME's bare (INTERN
+string) (compose.lisp:1296) inside the parent DEFFLAVOR-INTERNAL --
+interning into the live *PACKAGE*.  If the replay package differs from
+the variant symbol's home, the flavor lands on a twin symbol and the
+CFM's FIND-FLAVOR (defflavor.lisp:438) errors FLAVOR-NOT-FOUND fatally
+pre-banner.  The arm now FAILs when the variant's home package differs
+from the modeled replay package: the form's recorded package when
+*COLD-PACKAGE-FAITHFUL-REPLAY* is on (cold-gen.lisp's SETQ-sandwich
+wrapper guarantees it), SYSTEM-INTERNALS when off.  Using the CFM form's
+own recorded package as the INTERN-side package is exact for every case
+genuine Genera supports: only the parent's COMPILE-FLAVOR-METHODS
+expansion can emit the variant CFM, so both live in the parent's file."
   (let ((defined (make-hash-table)))       ; flavor-vma -> component-vma list
     (flet ((flavor-pname (vma)
              ;; Best-effort human name for a flavor VMA (already interned).
@@ -2840,8 +2856,28 @@ FDEFINE arm ERRORs \"not the name of a flavor\" fatally pre-banner"
                                ;; their own CFM).  Its ingredients cannot be
                                ;; enumerated from the deferred stream and are
                                ;; covered by the primary flavor's tracked
-                               ;; DEFFLAVOR; register it defined so dependents
-                               ;; resolve and skip the closure check.
+                               ;; DEFFLAVOR -- but the variant SYMBOL must be
+                               ;; the one the replay INTERN regenerates, or
+                               ;; the flavor lands on a twin and FIND-FLAVOR
+                               ;; dies (boot 46; see docstring).
+                               (let ((replay-pkg
+                                       (if *cold-package-faithful-replay*
+                                           (canonical-package-name pkg)
+                                           "SYSTEM-INTERNALS"))
+                                     (home (cold-symbol-package-name-at
+                                            w fv)))
+                                 (cold-check
+                                  (or (null home)
+                                      (equal home replay-pkg))
+                                  "deferred COMPILE-FLAVOR-METHODS-LOAD-TIME ~
+of auto-mixture variant ~A: its symbol's home package ~A differs from the ~
+replay package ~A under which the parent DEFFLAVOR's FLAVOR-MIXTURE-NAME ~
+re-INTERNs the variant name (compose.lisp:1296) -- the flavor would land ~
+on a twin symbol and FIND-FLAVOR errors FLAVOR-NOT-FOUND fatally ~
+pre-banner (M3h boot 46)"
+                                  (flavor-pname fv) home replay-pkg))
+                               ;; Register it defined so dependents resolve
+                               ;; and skip the closure check.
                                (setf (gethash fv defined) nil))
                               (t
                                ;; FV is a real DEFFLAVOR: BFS its transitive

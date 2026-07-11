@@ -768,6 +768,16 @@ pname string array."
                                      (cold-dtp w "ARRAY")))
          (cold-read-string w pd))))
 
+(defun cold-symbol-package-name-at (w sym-vma)
+  "Home package name string in SYM-VMA's package cell (+4), or NIL for
+uninterned.  The cold world stores package NAMES as strings;
+BUILD-INITIAL-PACKAGES' FIXUP-SYMBOL-PACKAGE swaps them for the package
+objects it creates at first boot (package.lisp:2397-2410)."
+  (multiple-value-bind (pt pd) (cw-ref w (+ sym-vma 4))
+    (and pt
+         (= (tag-type pt) (cold-dtp w "STRING"))
+         (cold-read-string w pd))))
+
 (defun cold-get-property-q (w sym-vma pname)
   "(values tag data foundp) of the first property on SYM-VMA's plist
 whose indicator symbol's pname is PNAME.  Walks the cdr-coded

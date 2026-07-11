@@ -426,6 +426,67 @@ Returns the number stamped."
         (incf stamped)))
     stamped))
 
+(defvar *cold-package-faithful-replay* t
+  "When true (the default), cold-finalize wraps each deferred form whose
+recording file's package is not SYSTEM-INTERNALS so it replays under that
+package.  The boot's deferred MAPC (cold-load.lisp:547) EVALs every form
+under the single live *PACKAGE* = SI (cold-load.lisp:565 sets it only
+AFTER the MAPC); a form whose evaluation INTERNs -- FLAVOR-MIXTURE-NAME's
+bare (INTERN string) regenerating :mixture variant names, compose.lisp:
+1296 -- then interns into SI while the form's compile-time-baked symbols
+live in the file's package, splitting the flavor across two symbols and
+killing FIND-FLAVOR pre-banner (M3h boot 46, useful-streams'
+BUFFERED-*-COROUTINE-STREAM).  The wrapper restores the original warm
+file-load semantics.  NIL exists for the gate negative test only
+\(check-deferred-flavor-composition consults it).")
+
+;; Host-side memos so every wrapper shares ONE materialized prologue per
+;; package and ONE epilogue: cold-ref's *cold-object-vmas* cache shares
+;; structure by host-object identity, so EQ host forms cost their Qs once.
+(defvar *cold-replay-prologues* (make-hash-table :test #'equal))
+(defvar *cold-replay-epilogue* nil)
+
+(defun cold-package-replay-entry (entry)
+  "Wrap the deferred ENTRY (pkg-string . form) for package-faithful
+replay: non-SI forms become
+  (PROGN (SETQ PACKAGE (PKG-FIND-PACKAGE \"pkg\")) form
+         (SETQ PACKAGE PKG-SYSTEM-INTERNALS-PACKAGE))
+mirroring the boot's own idioms verbatim (BUILD-INITIAL-PACKAGES sets
+PKG-SYSTEM-INTERNALS-PACKAGE at package.lisp:2388 before the MAPC;
+cold-load.lisp:565 is the same SETQ).  A SETQ sandwich, NOT a LET:
+*PACKAGE* is DEFVAR-STANDARD whose DEFVAR is explicitly NOT done at cold
+load time (package.lisp:87-92), so an interpreted LET could bind it
+LEXICALLY and compiled INTERN would read the untouched global cell -- a
+silent no-op.  Free interpreted SETQ always writes the value cell, and
+ZL:PACKAGE / CL:*PACKAGE* share one cell by replay time
+\(permanent-links.lisp:85 via BOOTSTRAP-FORWARD-SYMBOL-CELLS at
+cold-load.lisp:545, two lines before the MAPC).  Package OBJECTS cannot
+be baked at build time -- BUILD-INITIAL-PACKAGES creates them at first
+boot and FIXUP-SYMBOL-PACKAGE swaps the name strings in symbols' package
+cells for them -- hence the runtime PKG-FIND-PACKAGE lookup.  Returns
+\(values entry wrappedp)."
+  (let ((pkg (car entry)))
+    (if (or (not *cold-package-faithful-replay*)
+            (null pkg)
+            (not (stringp pkg))
+            (string= pkg "SYSTEM-INTERNALS"))
+        (values entry nil)
+        (let ((prologue
+                (or (gethash pkg *cold-replay-prologues*)
+                    (setf (gethash pkg *cold-replay-prologues*)
+                          (list (si-vsym "SETQ") (si-vsym "PACKAGE")
+                                (list (si-vsym "PKG-FIND-PACKAGE") pkg)))))
+              (epilogue
+                (or *cold-replay-epilogue*
+                    (setf *cold-replay-epilogue*
+                          (list (si-vsym "SETQ") (si-vsym "PACKAGE")
+                                (si-vsym
+                                 "PKG-SYSTEM-INTERNALS-PACKAGE"))))))
+          (values
+           (cons pkg
+                 (list (si-vsym "PROGN") prologue (cdr entry) epilogue))
+           t)))))
+
 (defun cold-finalize (w)
   "Everything between the last vbin and emit (M3f):
 1. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp),
@@ -462,7 +523,8 @@ Returns (values deferred-count patch-count package-count)."
            (loc-tag (tag 0 (cold-dtp w "LOCATIVE")))
            (add-name (make-vsym "SYSTEM-INTERNALS" "PKG-ADD-RELATIVE-NAME"))
            (patches nil)
-           (deferred-qs nil))
+           (deferred-qs nil)
+           (wrapped 0))
       (flet ((materialize (entry)
                (let ((*cold-default-package* (car entry)))
                  (multiple-value-bind (ft fd)
@@ -472,7 +534,16 @@ Returns (values deferred-count patch-count package-count)."
         ;; inside them (FIND-GENERIC-FUNCTION-AS-CONSTANT etc., heavy in
         ;; the flavor runtime) mint patches as they materialize.  A new
         ;; DEFERRAL here would never execute -- still a hard error.
-        (setf deferred-qs (mapcar #'materialize deferred))
+        ;; Non-SI forms get the package-faithful replay wrapper (M3h boot
+        ;; 46); patches and relative-name forms stay bare -- patch heads
+        ;; are the audited value-store class and never INTERN.
+        (setf deferred-qs
+              (mapcar (lambda (entry)
+                        (multiple-value-bind (e wrappedp)
+                            (cold-package-replay-entry entry)
+                          (when wrappedp (incf wrapped))
+                          (materialize e)))
+                      deferred))
         (unless (= (length (cold-world-deferred w)) (length deferred))
           (error "~D deferral~:P noted while materializing the deferred list"
                  (- (length (cold-world-deferred w)) (length deferred))))
@@ -555,6 +626,9 @@ Returns (values deferred-count patch-count package-count)."
       (when (plusp hoisted)
         (format t "~&  ~D deferred defvar init~:P hoisted to boot front~%"
                 hoisted))
+      (when (plusp wrapped)
+        (format t "~&  ~D deferred form~:P wrapped for package-faithful ~
+replay~%" wrapped))
       (values (+ (length patches) (length deferred-qs)
                  (length (cold-world-relative-names w)))
               (length patches) package-count))))
