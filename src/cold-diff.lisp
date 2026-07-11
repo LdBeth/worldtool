@@ -1964,6 +1964,62 @@ link-record symbol" (car key) vma)
 ~D unbound cell~:P)~@[; first: ~A~]"
                 nsyms nqs null-cells (first bad))))
 
+(defun check-plist-value-cells (w)
+  "M3h boot 35 gate: no property VALUE cell may hold the DTP-NULL unbound
+marker unless it is a registered (:PROPERTY sym ind) fdefinition cell.
+CLI:PUTPROP (clcp/functions.lisp:548) replaces a property through RGETF,
+which CARs the EXISTING value cell before storing (functions.lisp:423);
+CAR of a DTP-NULL cell is trap 71 (boot 35: the deferred
+(PUTPROP 'AND ... 'SHARED-COMBINED) over cold-do-putprop's self-pointing
+NULL placeholder).  fdefinition cells are the sanctioned exception: pass 1
+FDEFINEDP must read them as unbound (cold-fdefinition-cell's :PROPERTY arm,
+the dist convention), and no PUTPROP ever CARs an fdef cell."
+  (let ((bad nil)
+        (offenders 0)
+        (dtp-null (cold-dtp w "NULL"))
+        (dtp-list (cold-dtp w "LIST"))
+        (fdef-cells (make-hash-table)))
+    (maphash (lambda (key vma) (declare (ignore key))
+               (setf (gethash vma fdef-cells) t))
+             (cold-world-fdefs w))
+    (maphash
+     (lambda (key sym-vma)
+       (multiple-value-bind (tag data) (cw-ref w (+ sym-vma 3))
+         (let ((steps 0))
+           (loop
+             (when (cold-q-nil-p w tag data) (return))
+             (unless (= (tag-type tag) dtp-list) (return))
+             (when (> (incf steps) 4096) (return))
+             (let ((vma (cold-follow-cell w data)))
+               (multiple-value-bind (ct cd) (cw-ref w vma)
+                 (declare (ignore cd))
+                 (when (and (= (tag-type ct) dtp-null)
+                            (not (gethash vma fdef-cells)))
+                   (incf offenders)
+                   (when (< (length bad) 5)
+                     ;; the value cell sits at (indicator value . next); the
+                     ;; indicator Q is the pair's first slot at vma-1.
+                     (multiple-value-bind (it id) (cw-ref w (1- vma))
+                       (declare (ignore it))
+                       (push (format nil "~A ~A (cell ~8,'0X)"
+                                     (car key)
+                                     (or (ignore-errors
+                                          (cold-symbol-pname-at w id))
+                                         (format nil "@~8,'0X" (1- vma)))
+                                     vma)
+                             bad))))
+                 (ecase (ldb (byte 2 6) ct)
+                   (0 (setf tag (tag 0 dtp-list) data (1+ vma)))
+                   (1 (return))
+                   ((2 3) (multiple-value-setq (tag data)
+                            (cw-ref w (cold-follow-cell w (1+ vma))))))))))))
+     (cold-world-symbols w))
+    (cold-check (null bad)
+                "no non-fdef plist value cell is DTP-NULL ~
+(~D fdef cell~:P exempt)~@[; ~D offender~:P, first: ~A~]"
+                (hash-table-count fdef-cells)
+                (and bad offenders) (first bad))))
+
 (defun cold-region-containing (w vma)
   (loop for region across (cold-world-regions w)
         when (and (<= (cold-region-origin region) vma)
@@ -2917,6 +2973,9 @@ prints the R1 unbound-function-cell audit."
         ;; symbols additionally NULL-free -- DECLARED-STORAGE-CATEGORY
         ;; GETs their plists at first boot (M3h boot 23).
         (check-plist-termination w)
+        ;; No non-fdef plist value cell is DTP-NULL, or CLI:PUTPROP's RGETF
+        ;; CARs it before storing the replacement (M3h boot 35).
+        (check-plist-value-cells w)
         ;; The boot's region object walks must parse every Q up to each
         ;; free pointer (M3h boot 24).
         (check-boot-object-walk w)

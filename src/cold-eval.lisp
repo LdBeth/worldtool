@@ -451,14 +451,23 @@ before calling); VALUE is an object or, with :FORM, a source form."
       (let* ((ind-key (fspec-key indicator))
              (cell (cold-property-cell w sym it id ind-key))
              (value-form (if (veval-p value) (veval-form value) value)))
+        ;; A plist value cell that a :patch or a deferred PUTPROP will
+        ;; later replace must NOT hold the DTP-NULL unbound marker: CLI:PUTPROP
+        ;; (clcp/functions.lisp:548) routes through RGETF, which CARs the
+        ;; EXISTING value cell before storing the replacement
+        ;; (functions.lisp:423), and CAR of a DTP-NULL cell is trap 71.  Stamp
+        ;; NIL instead -- the boot store overwrites it in place (M3h boot 35).
         (cond (vt (cold-store-contents w cell vt vd))
               ((eq vd :patch)
-               (cold-store-contents w cell (tag 0 (cold-dtp w "NULL")) cell)
+               (multiple-value-bind (nt nd) (cold-nil-q w)
+                 (cold-store-contents w cell nt nd))
                (cold-note-patch w cell value-form))
               (t
-               ;; Value exists only at boot: leave the property unbound-null
-               ;; and defer the whole putprop (replaces in place at boot).
-               (cold-store-contents w cell (tag 0 (cold-dtp w "NULL")) cell)
+               ;; Value exists only at boot: leave the property NIL (not
+               ;; unbound-null) and defer the whole putprop (replaces in
+               ;; place at boot).
+               (multiple-value-bind (nt nd) (cold-nil-q w)
+                 (cold-store-contents w cell nt nd))
                (cold-defer w (list (si-vsym "PUTPROP")
                                    (list (si-vsym "QUOTE") sym)
                                    value-form
