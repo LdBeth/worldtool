@@ -1086,8 +1086,17 @@ tables (same vmas in both worlds)."
                                 (string= (cold-symbol-pname-at w data)
                                          (vsym-name name)))
                            "area ~D name row is ~A" n (vsym-name name)))
-             (cold-check (= (cold-table-ref16 w rlist-tbl n) #xFFFF)
-                         "area ~D region list -1 (no regions yet)" n)
+             ;; A boot area normally owns no regions until its first
+             ;; boot-time cons; *FLAVOR-STATIC-AREA* (26) is the
+             ;; exception -- it carries the generator region hosting the
+             ;; forged MAKE-INSTANCE generic (M3h boot 36).
+             (let ((area (aref (cold-world-areas w) n)))
+               (cold-check (= (cold-table-ref16 w rlist-tbl n)
+                              (if (and area (cold-area-regions area))
+                                  (first (cold-area-regions area))
+                                  #xFFFF))
+                           "area ~D region list row matches its ~
+build-time regions" n))
              (when reference
                (dolist (key '(:area-maximum-quantum-size
                               :area-region-quantum-size
@@ -2072,6 +2081,202 @@ one sanctioned structure-embedded list form)."
                   "~D of ~D DTP-LIST Q~:P point outside LIST regions:~
 ~{ ~A~}" bad nlist (reverse samples)))))
 
+(defparameter *cold-load-function-stub-names*
+  ;; The car pnames of *COLD-LOAD-FUNCTION-INITIALIZATIONS*
+  ;; (sys/sys/cold-load.lisp:131-263), the closed pre-banner FSET stub
+  ;; contract: every one names a function bound to a bridge stub before
+  ;; the banner.  Stored as bare pnames (the alist cdrs -- the stub
+  ;; targets -- are irrelevant here; a method fdefine keys on the
+  ;; generic's pname).  #+3600 MICROCODE-ERROR-HANDLER omitted (not
+  ;; IMACH); #+IMACH ERROR-TRAP-HANDLER-1 and OPCODE-FOR-INSTRUCTION
+  ;; kept.  Duplicated cars (Y-OR-N-P, YES-OR-NO-P,
+  ;; NOTE-PRESENTATION-INPUT-CONTEXT-CHANGE) appear once.
+  '("FERROR" "ERROR" "FSIGNAL" "SIGNAL" "WARN" "CERROR"
+    "ERROR-TRAP-HANDLER-1" "ENTER-DEBUGGER"
+    "FRAME-OUT-TO-INTERESTING-ACTIVE-FRAME" "MAKE-INSTANCE"
+    "REMOVE-ARGUMENTS-FROM-LAMBDA-LIST" "FUNCTION-INLINE-FORM-METHOD"
+    "PROCESS-WAIT" "UNENCAPSULATE-FUNCTION-SPEC" "MAKE-FASLOAD-PATHNAME"
+    "FILE-ATTRIBUTE-BINDINGS" "READ-ATTRIBUTE-LIST" "AUTO-ADD-FEP-HOST"
+    "GET-INTERACTIVE-BINDINGS" "PRINT-ANY-BINDING-WARNINGS" "BEEP"
+    "LISP-TOP-LEVEL1" "BREAK-INTERNAL" "FORMAT"
+    "REDEFINE-FORMAT-DIRECTIVE" "RESET-WARM-BOOT-BINDINGS" "ADD-TIMER"
+    "DELETE-TIMER" "WHO-LINE-UPDATE" "WHO-LINE-PROCESS-CHANGE"
+    "WHO-LINE-RUN-STATE-UPDATE" "FILE-DECLARATION" "FUNCTION-DEFINED-P"
+    "FUNCTION-DEFINED" "NOTE-MACROEXPANSION" "DISABLE-SERVICES"
+    "INITIALIZE-NAMESPACES-AND-NETWORK" "KBD-INTERCEPT-CHARACTER"
+    "DEBUGGER-HANDLER" "GET-FILE-WARNINGS" "PROCESS-DELAYED-WARNINGS"
+    "NOTE-PRESENTATION-INPUT-CONTEXT-CHANGE" "INHERIT-PRESENTATION-CONTEXT"
+    "MOUSE-MOTION-PENDING" "NEW-PRESENTATION-INPUT-CONTEXT"
+    "CLEAR-PRESENTATION-INPUT-CONTEXT" "PRESENTATION-INPUT-BLIP-HANDLER"
+    "UPDATE-HIGHLIGHTED-PRESENTATION" "DESCRIBE-PRESENTATION-TYPE"
+    "MAYBE-CHECK-TYPE-REDEFINITION" "PREPARE-FOR-TYPE-CHANGE"
+    "INVALIDATE-TYPE-HANDLER-TABLES" "FINISH-TYPE-REDEFINITION" "PRESENT"
+    "PRINT-OBJECT" "ADD-PROGRESS-NOTE" "REMOVE-PROGRESS-NOTE"
+    "NOTE-PROGRESS" "ALTER-PROGRESS-NOTE-TEXT"
+    "WITH-NOTIFICATION-MODE-INTERNAL" "MOUSE-WAKEUP" "NOTIFY"
+    "NOTE-KEYBOARD-CHARACTER" "STREAMP" "PURGE-FILE-DECLARATIONS"
+    "VECTORP" "BIT-VECTOR-P" "FIXNUMP" "DEFGENERIC-INTERNAL"
+    "FIND-GENERIC-FUNCTION-AS-CONSTANT" "VARIABLE-VALUE" "Y-OR-N-P"
+    "YES-OR-NO-P" "INITIALIZE-CONSOLE" "SUBTYPEP"
+    "WITH-PROCESS-INTERACTIVE-PRIORITY-INTERNAL" "SPECIAL-LOAD"
+    "DEFCONSTANT-LOAD-2" "MAKE-VARIABLE-OBSOLETE"
+    "GLOBAL-SPECIAL-VARIABLE-P" "SYMBOL-MACRO-P" "NAMED-CONSTANT-P"
+    "FORM-REFERENCES-ENVIRONMENT-P" "TYPE-OF" "TYPE-NAME-P"
+    "FUNCTION-ENCAPSULATED-P" "COMPILER-BIND-CONTEXT-INTERNAL"
+    "MAP-KEY-TO-SOFTWARE-CHAR" "LISP-SYNTAX-FROM-KEYWORD"
+    "SHOW-PROGRESS-NOTE" "EXPAND-GENERIC-FUNCTION-DEBUGGING-INFO"
+    "COMPILED-FUNCTION-INTERNAL-FUNCTION-OFFSETS" "WAKEUP-GC-PROCESS"
+    "BACKGROUND-STREAM" "PROCESS-PRIORITY-LESSP" "DISPLAY-PROMPT-OPTION"
+    "KBD-HARDWARE-CHAR-AVAILABLE" "KBD-GET-HARDWARE-CHAR"
+    "KBD-CONVERT-TO-SOFTWARE-CHAR" "MAKE-LOCK" "LOCK-INTERNAL"
+    "UNLOCK-INTERNAL" "ABORT-LOCK" "WAIT-FOR-DISK-DONE"
+    "PROCESS-FLUSH-BACKGROUND-STREAM" "MACHINE-MODEL"
+    "BIND-INTERACTIVE-VALUE-INTERNAL" "OPCODE-FOR-INSTRUCTION"
+    "FIND-CLASS" "FIND-PACKAGE" "CURRENT-LISP-SYNTAX"
+    "SYSTEM-VERSION-INFO" "HARDWARE-RESOURCES-STRING"
+    "INITIALIZE-TIMEBASE" "DESCRIBE-OBJECT")
+  "*COLD-LOAD-FUNCTION-INITIALIZATIONS*'s car pnames -- the closed set of
+functions the cold loader FSET-bridges pre-banner (cold-load.lisp:131).")
+
+(defun check-method-generic-stub-conflicts (w)
+  "M3h boot-36 gate: every deferred method-family FDEFINE (and
+NOTE-SOLITARY-METHOD) whose generic name is *COLD-LOAD-FUNCTION-
+INITIALIZATIONS* bridge-stubbed must find a DEFLECTING generic-function
+object at boot.  The deferred FDEFINE routes through
+METHOD-FUNCTION-SPEC-HANDLER -> FIND-METHOD-HOLDER, which with
+CREATE-P=T unconditionally does (FIND-GENERIC-FUNCTION name 'CREATE-IN-
+ENV env) (defmethod.lisp:727; NOTE-SOLITARY-METHOD's CREATE is
+defmethod.lisp:1290): with no GF that reaches DEFGENERIC-INTERNAL ->
+INSTALL-GENERIC-FUNCTION (defgeneric.lisp:833), which finds the name
+already fdefined to the bridge stub and its conflict arm calls
+YES-OR-NO-P (defgeneric.lisp:861) -- pre-banner terminal I/O,
+*TERMINAL-IO* unbound, trap.  The deflection conditions FIND-METHOD-
+HOLDER itself encodes: (GET name 'GENERIC) yields the GF
+\(defgeneric.lisp:340, no create), and GENERIC-FUNCTION-HAS-DISPATCH-
+FUNCTION short-circuits the fdefinition install (\"Generic function
+object doesn't belong in function definition\").  The forged
+MAKE-INSTANCE GF (cold-build-make-instance-generic, dist ground truth
+#x8800807C) supplies both; its 7-Q shape is verified here.  The method
+fdefines themselves must stay DEFERRED -- withholding them loses
+io/useful-streams' methods forever (that file is in NO QLD mini-alist;
+boot-26 dribbl precedent).  Bare cold-checks: failures land in
+check-cold-emit's block (check-plist-value-cells precedent)."
+  (let ((dtp-symbol (cold-dtp w "SYMBOL"))
+        (dtp-list (cold-dtp w "LIST"))
+        (dtp-fixnum (cold-dtp w "FIXNUM"))
+        (dtp-gf (cold-dtp w "GENERIC-FUNCTION"))
+        (make-instance-methods 0))
+    (flet ((deflection-problem (generic-vsym pkg)
+             "NIL when boot's FIND-METHOD-HOLDER deflects off a forged
+GF for this generic; else the reason string."
+             (let* ((*cold-default-package* pkg)
+                    (sym (cold-vsym w generic-vsym)))
+               (multiple-value-bind (vt vd foundp)
+                   (cold-get-property-q w sym "GENERIC")
+                 (cond
+                   ((not foundp) "no GENERIC property")
+                   ((/= (tag-type vt) dtp-gf)
+                    (format nil "GENERIC property ~2,'0X:~8,'0X not a ~
+generic-function" vt vd))
+                   (t
+                    (multiple-value-bind (ft fd) (cw-ref w (+ vd 4))
+                      (cond
+                        ((/= (tag-type ft) dtp-fixnum)
+                         "GF flags Q not a fixnum")
+                        ((not (logbitp 7 fd))
+                         "GF lacks HAS-DISPATCH-FUNCTION (bit 7): ~
+FIND-METHOD-HOLDER would install over the bridge stub")
+                        (t nil)))))))))
+      (loop for (pkg . form) in (cold-world-deferred w)
+            do (let ((*cold-default-package* pkg))
+                 (cond
+                   ((vsym-named-p (and (consp form) (first form)) "FDEFINE")
+                    (let ((fspec (quoted (second form))))
+                      (when (and (cold-method-fspec-p fspec)
+                                 (vsym-p (second fspec)))
+                        (let ((gname (vsym-name (second fspec))))
+                          (when (string= gname "MAKE-INSTANCE")
+                            (incf make-instance-methods))
+                          (when (member gname
+                                        *cold-load-function-stub-names*
+                                        :test #'string=)
+                            (let ((problem (deflection-problem
+                                            (second fspec) pkg)))
+                              (cold-check
+                               (null problem)
+                               "deferred method fdefine on bridge-~
+stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
+                               gname problem pkg fspec)))))))
+                   ((vsym-named-p (and (consp form) (first form))
+                                  "NOTE-SOLITARY-METHOD")
+                    (let ((gname (quoted (second form))))
+                      (when (and (vsym-p gname)
+                                 (member (vsym-name gname)
+                                         *cold-load-function-stub-names*
+                                         :test #'string=))
+                        (let ((problem (deflection-problem gname pkg)))
+                          (cold-check
+                           (null problem)
+                           "deferred NOTE-SOLITARY-METHOD on bridge-~
+stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
+                           (vsym-name gname) problem pkg form)))))))))
+    ;; Anti-regression against the reverted boot-36 withhold approach:
+    ;; all 7 MAKE-INSTANCE method fdefines (vanilla + 5 useful-streams
+    ;; + hash) must be PRESENT in the deferred list.
+    (cold-check (>= make-instance-methods 7)
+                "~D deferred MAKE-INSTANCE method fdefine~:P (expect ~
+>= 7: vanilla + 5 useful-streams + basic-hash-table; withholding ~
+loses them)"
+                make-instance-methods)
+    ;; The forged object's 7-Q DEFSTORAGE shape (defgeneric.lisp:75).
+    (let ((gf (getf (cold-world-machinery w) :make-instance-generic))
+          (mi-sym (cold-vsym w (make-vsym "FLAVOR" "MAKE-INSTANCE")))
+          (two-pass (cold-vsym w (make-vsym "KEYWORD" "TWO-PASS"))))
+      (if (null gf)
+          (cold-check nil "forged MAKE-INSTANCE generic-function built")
+          (flet ((q (offset) (cw-ref w (+ gf offset)))
+                 (nil-q-p (tag data)
+                   (cold-q-nil-p w tag data)))
+            (multiple-value-bind (tag data) (q 0)
+              (cold-check (and (= (tag-type tag) dtp-symbol)
+                               (= (ldb (byte 2 6) tag) +cdr-next+)
+                               (= data mi-sym))
+                          "GF+0 NAME = MAKE-INSTANCE symbol cdr-next, ~
+got ~2,'0X:~8,'0X" tag data))
+            (loop for (offset . field) in '((1 . "ARGLIST")
+                                            (2 . "DEBUGGING-INFO")
+                                            (5 . "FLAVORS"))
+                  do (multiple-value-bind (tag data) (q offset)
+                       (cold-check (and (nil-q-p tag data)
+                                        (= (ldb (byte 2 6) tag)
+                                           +cdr-next+))
+                                   "GF+~D ~A = NIL cdr-next, got ~
+~2,'0X:~8,'0X" offset field tag data)))
+            (multiple-value-bind (tag data) (q 3)
+              (cold-check (and (= (tag-type tag) dtp-list)
+                               (= (ldb (byte 2 6) tag) +cdr-next+))
+                          "GF+3 METHOD-COMBINATION a cdr-next list, ~
+got ~2,'0X:~8,'0X" tag data)
+              (when (= (tag-type tag) dtp-list)
+                (multiple-value-bind (mt md) (cw-ref w data)
+                  (cold-check (and (= (tag-type mt) dtp-symbol)
+                                   (= (ldb (byte 2 6) mt) +cdr-nil+)
+                                   (= md two-pass))
+                              "GF method-combination = (:TWO-PASS), ~
+got ~2,'0X:~8,'0X" mt md))))
+            (multiple-value-bind (tag data) (q 4)
+              (cold-check (and (= (tag-type tag) dtp-fixnum)
+                               (= (ldb (byte 2 6) tag) +cdr-next+)
+                               (= data #x81))
+                          "GF+4 FLAGS = #x81 (EXPLICIT + HAS-DISPATCH-~
+FUNCTION, no COMPRESSED-DEBUGGING-INFO), got ~2,'0X:~8,'0X" tag data))
+            (multiple-value-bind (tag data) (q 6)
+              (cold-check (and (= (tag-type tag) dtp-gf)
+                               (= (ldb (byte 2 6) tag) +cdr-nil+)
+                               (= data gf))
+                          "GF+6 SELECTOR self-pointing cdr-nil, got ~
+~2,'0X:~8,'0X" tag data)))))))
+
 (defun check-linked-symbol-cells (w)
   "M3h gate: SI:*LINKED-SYMBOL-CELLS* carries the (from to type) records
 that permanent-links' SI:LINK-SYMBOL-*-CELLS load forms accumulated, in
@@ -2982,6 +3187,10 @@ prints the R1 unbound-function-cell audit."
         ;; Every cons in a LIST-representation region, or RPLACD traps
         ;; (M3h boot 34).
         (check-list-representation w)
+        ;; Every deferred method fdefine on a bridge-stubbed generic
+        ;; deflects off the forged GF instead of driving INSTALL-GENERIC-
+        ;; FUNCTION's redefinition query pre-banner (M3h boot 36).
+        (check-method-generic-stub-conflicts w)
         (check-pass1-fspec-handlers w)
         ;; The flavor completion-table inits hoisted ahead of the first
         ;; deferred DEFFLAVOR-INTERNAL (M3h boot 33).

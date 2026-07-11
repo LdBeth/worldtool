@@ -43,7 +43,16 @@ its attribute list.")
 (defparameter *cold-heap-list-regions*
   '(("PROPERTY-LIST-AREA"      #x80600000 #x100000)
     ("PERMANENT-STORAGE-AREA"  #x80B00000 #x100000)
-    ("WORKING-STORAGE-AREA"    #x80D00000 #x100000)))
+    ("WORKING-STORAGE-AREA"    #x80D00000 #x100000)
+    ;; The forged MAKE-INSTANCE generic-function object's home
+    ;; (cold-build-make-instance-generic): DEFGENERIC-INTERNAL allocates
+    ;; GF objects in FLAVOR:*FLAVOR-STATIC-AREA* (defgeneric.lisp:634;
+    ;; ":GC :STATIC :REPRESENTATION :LIST", flavor/global.lisp:113), and
+    ;; the dist's cold MAKE-INSTANCE GF at #x8800807C sits in that
+    ;; area's (26) LIST region.  A boot-created area may own a
+    ;; generator region: it is registered like any other in the region
+    ;; tables and threaded from the area's REGION-LIST row (M3h boot 36).
+    ("*FLAVOR-STATIC-AREA*"    #x80E00000 #x100000)))
 
 (defun cold-add-heap-regions (w)
   (loop for (name origin length) in *cold-heap-regions*

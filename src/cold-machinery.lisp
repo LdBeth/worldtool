@@ -226,6 +226,17 @@ but no store."
     (:region-free-pointer-before-flip "*REGION-FREE-POINTER-BEFORE-FLIP*")
     (:oblast-free-size                "*OBLAST-FREE-SIZE*")))
 
+(defparameter *cold-boot-area-region-bits*
+  '((26 . #x02880048))
+  "Distribution *AREA-REGION-BITS* templates for boot-created areas
+(>= +cold-area-count+) that receive generator objects, so their
+build-time regions get bits like any config area's.  26
+FLAVOR:*FLAVOR-STATIC-AREA* (\":GC :STATIC :REPRESENTATION :LIST\",
+flavor/global.lisp:113) hosts the forged MAKE-INSTANCE generic-function
+object (M3h boot 36); template probed from the dist's area row 26 at
+*AREA-REGION-BITS*+1+26 (its region 82 carries the same bits at
+level 34).")
+
 (defun cold-region-bits-for (w region)
   (let ((n (cold-region-number region))
         (area (cold-region-area region)))
@@ -233,15 +244,20 @@ but no store."
            (aref *cold-architectural-region-bits* n))
           (t
            (let* ((config (assoc area *cold-area-config*))
-                  (bits (progn
-                          (unless config
-                            (error "Region ~D belongs to non-cold area ~D"
-                                   n area))
-                          (if (member area '(16 17)) ; PAGE-TABLE / GC-TABLE
-                              (third config)
-                              (cold-heap-region-bits
-                               (third config)
-                               (cold-region-rep region))))))
+                  (boot (assoc area *cold-boot-area-region-bits*))
+                  (bits (cond
+                          ((and config (member area '(16 17)))
+                           ;; PAGE-TABLE / GC-TABLE
+                           (third config))
+                          (config
+                           (cold-heap-region-bits (third config)
+                                                  (cold-region-rep region)))
+                          (boot
+                           (cold-heap-region-bits (cdr boot)
+                                                  (cold-region-rep region)))
+                          (t
+                           (error "Region ~D belongs to non-cold area ~D"
+                                  n area)))))
              ;; The saved heap (zone 16) is uniformly STATIC level 36,
              ;; exactly like the distribution's zone-16 regions: one
              ;; level per zone is an architectural invariant
@@ -280,8 +296,13 @@ rows of the areas the cold set itself creates via MAKE-AREA (boot 31)."
                             (if config (fourth config) 0))
             (cold-table-set w abits-tbl a (tag 0 fixnum)
                             (if config (third config) 0))
+            ;; Any area owning build-time regions -- config areas AND
+            ;; boot areas like 26 *FLAVOR-STATIC-AREA*, which hosts the
+            ;; forged MAKE-INSTANCE generic (M3h boot 36) -- threads
+            ;; them from its REGION-LIST row.
             (cold-table-set16 w rlist-tbl a
-                              (let ((area (and config (aref (cold-world-areas w) a))))
+                              (let ((area (and (< a (length (cold-world-areas w)))
+                                               (aref (cold-world-areas w) a))))
                                 (if (and area (cold-area-regions area))
                                     (first (cold-area-regions area))
                                     #xFFFF)))
@@ -307,8 +328,11 @@ rows of the areas the cold set itself creates via MAKE-AREA (boot 31)."
         ;; ~200-line parse we copy the reference world's rows (its
         ;; tables live at the same vmas; rows 22..66 all carry
         ;; static-band levels 33-36, so no warm ephemeral-level state
-        ;; leaks in).  REGION-LIST stays -1: a boot-created area owns no
-        ;; regions until its first cons allocates one.
+        ;; leaks in).  REGION-LIST stays -1 for a boot-created area with
+        ;; no build-time region (the boot's first cons allocates one);
+        ;; *FLAVOR-STATIC-AREA*'s forged-generic region is the exception
+        ;; and was already threaded by the 128-row loop above (M3h
+        ;; boot 36).
         (let ((recorded (cold-live-boot-areas w)))
           (when (and recorded (not reference))
             (error "~D boot-created area~:P but no reference world"
@@ -569,6 +593,79 @@ presets it before any recoverable overflow can use it."
     (cold-set-symbol-value w (make-vsym "DEBUGGER" "STACK-GROWER")
                            (tag 0 (cold-dtp w "ARRAY")) sg)
     sg))
+
+(defun cold-build-make-instance-generic (w)
+  "The MAKE-INSTANCE generic-function object, forged at build time
+\(dist ground truth: DTP-GENERIC-FUNCTION at #x8800807C, area 26
+*FLAVOR-STATIC-AREA*'s LIST region).  The cold set defers 7 MAKE-INSTANCE
+method fdefines (flavor/vanilla.lisp:111, 5 in io/useful-streams.lisp,
+sys2/hash.lisp's BASIC-HASH-TABLE -- all legitimately cold: sysdcl.lisp
+inner cold subsystems, and useful-streams is in NO QLD mini-alist, so
+withholding them loses the methods -- boot-26 dribbl precedent).  At
+first boot each routes through
+METHOD-FUNCTION-SPEC-HANDLER -> FIND-METHOD-HOLDER, which with
+CREATE-P=T unconditionally FIND-GENERIC-FUNCTIONs the generic name with
+CREATE (defmethod.lisp:727); no GF -> DEFGENERIC-INTERNAL ->
+INSTALL-GENERIC-FUNCTION (defgeneric.lisp:833) finds MAKE-INSTANCE
+already fdefined -- to the engineered bridge stub MAKE-INSTANCE-COLD
+\(cold-load.lisp:142) -- and its conflict arm calls YES-OR-NO-P
+\(defgeneric.lisp:861): pre-banner terminal I/O, *TERMINAL-IO* unbound,
+trap (M3h boot 36).  With the GF pre-existing, FIND-GENERIC-FUNCTION
+finds it via (GET 'MAKE-INSTANCE 'GENERIC) (defgeneric.lisp:340) and
+FIND-METHOD-HOLDER's install arm is deflected by
+GENERIC-FUNCTION-HAS-DISPATCH-FUNCTION (\"Generic function object
+doesn't belong in function definition\"): holder filed, flavor PUSHNEWed
+into the FLAVORS field, bridge fcell untouched.  At QLD, make.lisp:1058's
+explicit DEFGENERIC updates this object's fields IN PLACE
+\(defgeneric.lisp:60: GF objects are interned, modified rather than
+replaced -- the dist object's ARGLIST/DEBUGGING-INFO point into the QLD
+band, proving QLD updated the COLD object) and installs the real
+dispatch (INSTALL's query arm skipped: EXPLICIT is set).
+  Shape = the 7-Q SYSDEF DEFSTORAGE (field comments defgeneric.lisp:75):
+NAME / ARGLIST / DEBUGGING-INFO / METHOD-COMBINATION / FLAGS / FLAVORS /
+SELECTOR.  ARGLIST and DEBUGGING-INFO ship NIL (QLD overwrites; the dist
+cold values are disposable), METHOD-COMBINATION = (:TWO-PASS) (dist
+field -> 1-Q cdr-nil list of the keyword), FLAGS = #x81 = EXPLICIT +
+HAS-DISPATCH-FUNCTION (dist #x281 adds COMPRESSED-DEBUGGING-INFO bit 9,
+wrong for our NIL Q2; METHODS-MADE stays clear), FLAVORS = NIL (boot
+methods file themselves in), SELECTOR = the object itself
+\(DEFGENERIC-INTERNAL: non-message generics dispatch on the GF object,
+dist 5D:8800807C self-pointer)."
+  (let* ((dtp-symbol (cold-dtp w "SYMBOL"))
+         (dtp-list (cold-dtp w "LIST"))
+         (dtp-fixnum (cold-dtp w "FIXNUM"))
+         (dtp-gf (cold-dtp w "GENERIC-FUNCTION"))
+         ;; Resolve exactly as the deferred method fspecs' vsyms and the
+         ;; cold defmethod/defgeneric CCA constants do -- under the
+         ;; FLAVOR package context through the symbol-home oracle -- so
+         ;; boot's (GET NAME 'GENERIC) read (NAME from the fspec,
+         ;; GENERIC compiled into defgeneric.lisp) hits this property.
+         (mi-sym (cold-vsym w (make-vsym "FLAVOR" "MAKE-INSTANCE")))
+         (generic-sym (cold-vsym w (make-vsym "FLAVOR" "GENERIC")))
+         (two-pass (cold-vsym w (make-vsym "KEYWORD" "TWO-PASS")))
+         (gf (cold-alloc w "*FLAVOR-STATIC-AREA*" 7 :list))
+         (mc (cold-alloc w "*FLAVOR-STATIC-AREA*" 1 :list)))
+    (multiple-value-bind (ntag ndata) (cold-nil-q w)
+      (flet ((set-q (offset cdr tag data)
+               (cw-set w (+ gf offset)
+                       (logior (ash cdr 6) (tag-type tag)) data)))
+        (set-q 0 +cdr-next+ dtp-symbol mi-sym)           ; NAME
+        (set-q 1 +cdr-next+ (tag-type ntag) ndata)       ; ARGLIST
+        (set-q 2 +cdr-next+ (tag-type ntag) ndata)       ; DEBUGGING-INFO
+        (set-q 3 +cdr-next+ dtp-list mc)                 ; METHOD-COMBINATION
+        (set-q 4 +cdr-next+ dtp-fixnum #x81)             ; FLAGS
+        (set-q 5 +cdr-next+ (tag-type ntag) ndata)       ; FLAVORS
+        (set-q 6 +cdr-nil+ dtp-gf gf)))                  ; SELECTOR (self)
+    ;; The (:TWO-PASS) method-combination list (keyword self-evaluation
+    ;; comes free: cold-forward-all-keywords sweeps at finalize).
+    (cw-set w mc (logior (ash +cdr-nil+ 6) dtp-symbol) two-pass)
+    ;; (GET 'MAKE-INSTANCE 'GENERIC) = the object, the FIND-GENERIC-
+    ;; FUNCTION interning read (defgeneric.lisp:340).
+    (cold-prepend-property w mi-sym
+                           (tag 0 dtp-symbol) generic-sym
+                           (tag 0 dtp-gf) gf)
+    (setf (getf (cold-world-machinery w) :make-instance-generic) gf)
+    gf))
 
 ;;; ---------------- Generator-owned wired values ----------------
 
@@ -1160,6 +1257,9 @@ slots from the reference world."
   (cold-build-zone-level w)
   (cold-build-stack-registry w)
   (cold-build-array-meta w)
+  ;; Allocates in *FLAVOR-STATIC-AREA* + PROPERTY-LIST-AREA: also before
+  ;; the table fill (M3h boot 36).
+  (cold-build-make-instance-generic w)
   (cold-fill-storage-tables w :reference reference)
   (cold-stamp-fepcomm-boot-slots w)
   (cold-graft-ignore-stubs w)
