@@ -1618,7 +1618,8 @@ when the pname appears in more than one package."
   "M3h gate: every generator-owned wired array is bound to a
 WIRED-CONTROL-TABLES array whose header Q equals the reference's (same
 type/leader/length/dims), leaders match the spec, and the data is
-exactly what the spec bakes (NIL / fixnum fill / verbatim words)."
+exactly what the spec bakes (NIL / fixnum fill / verbatim words /
+named SYSTEM symbols, whose order must also match the reference)."
   (let ((array (cold-dtp w "ARRAY"))
         (header-i (cold-dtp w "HEADER-I"))
         (fixnum (cold-dtp w "FIXNUM")))
@@ -1626,7 +1627,8 @@ exactly what the spec bakes (NIL / fixnum fill / verbatim words)."
       (dolist (spec *cold-wired-arrays*)
         (destructuring-bind (package name type dims
                              &key fill-pointer leader-length leader-list
-                                  contents words fill-fixnum last-cdr-nil
+                                  contents symbol-contents words fill-fixnum
+                                  last-cdr-nil
                                   (area "WIRED-CONTROL-TABLES"))
             spec
           (declare (ignore leader-length))
@@ -1650,7 +1652,27 @@ exactly what the spec bakes (NIL / fixnum fill / verbatim words)."
                       (declare (ignore rht))
                       (cold-check (eql hd rhd)
                                   "~A header ~8,'0X vs ref ~@[~8,'0X~]"
-                                  name hd rhd)))))
+                                  name hd rhd))
+                    ;; :SYMBOL-CONTENTS order comes from the reference,
+                    ;; not just the spec: each ref element (leaderless
+                    ;; rank-1 ART-Q, data at header+1 -- the header
+                    ;; equality above pins that shape) must be a symbol
+                    ;; whose pname is the spec's name at that index.
+                    (when symbol-contents
+                      (cold-check
+                       (loop for pname in symbol-contents
+                             for i from 0
+                             always
+                             (let* ((symvma (nth-value
+                                             1 (world-q reference
+                                                        (+ rd 1 i))))
+                                    (pvma (nth-value
+                                           1 (world-q reference symvma))))
+                               (equal (ignore-errors
+                                        (w-string reference pvma))
+                                      pname)))
+                       "~A spec order matches the reference's elements"
+                       name)))))
               (when fill-pointer
                 (multiple-value-bind (ft fd) (cw-ref w (- data 1))
                   (cold-check (and (= (tag-type ft) fixnum)
@@ -1681,6 +1703,16 @@ expected ~D" name i lt ld lv)))
                     (loop for word in words
                           for vma from base
                           always (= word (nth-value 1 (cw-ref w vma)))))
+                   (symbol-contents
+                    (let ((symbol (cold-dtp w "SYMBOL")))
+                      (loop for pname in symbol-contents
+                            for vma from base
+                            always (multiple-value-bind (et ed)
+                                       (cw-ref w vma)
+                                     (and (= (tag-type et) symbol)
+                                          (equal (cold-symbol-pname-at
+                                                  w ed)
+                                                 pname))))))
                    (contents
                     (and (loop for c in contents
                                for vma from base

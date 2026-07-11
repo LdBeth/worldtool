@@ -865,7 +865,9 @@ wired-table forwards, so they land in the comm slots or wired cells."
 ;;; Spec: (package name type dims . options).  DIMS is a length or a
 ;;; dimension list (2-D arrays get the long-prefix format).  Options:
 ;;; :FILL-POINTER n / :LEADER-LENGTH n / :LEADER-LIST (..) shape the
-;;; leader; :CONTENTS (..) bakes boxed elements (fixnums); :WORDS (..)
+;;; leader; :CONTENTS (..) bakes boxed elements (fixnums);
+;;; :SYMBOL-CONTENTS (..) bakes boxed elements that are SYSTEM-package
+;;; symbols named by the listed pname strings; :WORDS (..)
 ;;; bakes packed data words verbatim; :FILL-FIXNUM n fills boxed
 ;;; elements with a fixnum instead of NIL; :LAST-CDR-NIL sets the last
 ;;; element's cdr code (ART-Q-LIST list discipline).
@@ -942,13 +944,55 @@ wired-table forwards, so they land in the comm slots or wired cells."
     ;; recursion driver).  Values are the distribution's.
     ("SYSTEM-INTERNALS" "*EPHEMERAL-GC-FLIP-CAPACITY*" "ART-Q"   32
      :area "SAFEGUARDED-OBJECTS-AREA"
-     :contents (#x186A0 #x30D40 #x4E20 #x2710))))
+     :contents (#x186A0 #x30D40 #x4E20 #x2710))
+    ;; Data-type code -> name symbol, the DEFENUMERATED *DATA-TYPES*
+    ;; order (i-sys/sysdef.lisp:166).  sysdef.lisp:155: "Patch
+    ;; *DATA-TYPE-NAME*, set up by from *DATA-TYPES* by the cold-load
+    ;; generator"; its DEFVAR-SAFEGUARDED (sys/ldata.lisp:224) has no
+    ;; Lisp initializer.  DATA-TYPE-NAME is this array applied as a
+    ;; function (sys2/macro.lisp:1018) and PRINT-OBJECT's
+    ;; error-recovery / random-object fallbacks call it for any object
+    ;; PRINT can't dispatch (io/print.lisp:204,242,279,284), so leaving
+    ;; it unbound turned EVERY post-banner error report into a trap-71
+    ;; recursion on the safeguarded cell (first post-M3h defect).
+    ;; Distribution verbatim: leaderless ART-Q 64 in
+    ;; SAFEGUARDED-OBJECTS-AREA (header C0000040 at F0001466).
+    ("SYSTEM-INTERNALS" "*DATA-TYPE-NAME*"          "ART-Q"       64
+     :area "SAFEGUARDED-OBJECTS-AREA"
+     :symbol-contents
+     ("DTP-NULL" "DTP-MONITOR-FORWARD" "DTP-HEADER-P" "DTP-HEADER-I"
+      "DTP-EXTERNAL-VALUE-CELL-POINTER" "DTP-ONE-Q-FORWARD"
+      "DTP-HEADER-FORWARD" "DTP-ELEMENT-FORWARD"
+      "DTP-FIXNUM" "DTP-SMALL-RATIO" "DTP-SINGLE-FLOAT" "DTP-DOUBLE-FLOAT"
+      "DTP-BIGNUM" "DTP-BIG-RATIO" "DTP-COMPLEX" "DTP-SPARE-NUMBER"
+      "DTP-INSTANCE" "DTP-LIST-INSTANCE" "DTP-ARRAY-INSTANCE"
+      "DTP-STRING-INSTANCE"
+      "DTP-NIL" "DTP-LIST" "DTP-ARRAY" "DTP-STRING" "DTP-SYMBOL"
+      "DTP-LOCATIVE" "DTP-LEXICAL-CLOSURE" "DTP-DYNAMIC-CLOSURE"
+      "DTP-COMPILED-FUNCTION" "DTP-GENERIC-FUNCTION"
+      "DTP-SPARE-POINTER-1" "DTP-SPARE-POINTER-2"
+      "DTP-PHYSICAL-ADDRESS" "DTP-SPARE-IMMEDIATE-1" "DTP-BOUND-LOCATION"
+      "DTP-CHARACTER" "DTP-LOGIC-VARIABLE" "DTP-GC-FORWARD"
+      "DTP-EVEN-PC" "DTP-ODD-PC"
+      "DTP-CALL-COMPILED-EVEN" "DTP-CALL-COMPILED-ODD"
+      "DTP-CALL-INDIRECT" "DTP-CALL-GENERIC"
+      "DTP-CALL-COMPILED-EVEN-PREFETCH" "DTP-CALL-COMPILED-ODD-PREFETCH"
+      "DTP-CALL-INDIRECT-PREFETCH" "DTP-CALL-GENERIC-PREFETCH"
+      "DTP-PACKED-INSTRUCTION-60" "DTP-PACKED-INSTRUCTION-61"
+      "DTP-PACKED-INSTRUCTION-62" "DTP-PACKED-INSTRUCTION-63"
+      "DTP-PACKED-INSTRUCTION-64" "DTP-PACKED-INSTRUCTION-65"
+      "DTP-PACKED-INSTRUCTION-66" "DTP-PACKED-INSTRUCTION-67"
+      "DTP-PACKED-INSTRUCTION-70" "DTP-PACKED-INSTRUCTION-71"
+      "DTP-PACKED-INSTRUCTION-72" "DTP-PACKED-INSTRUCTION-73"
+      "DTP-PACKED-INSTRUCTION-74" "DTP-PACKED-INSTRUCTION-75"
+      "DTP-PACKED-INSTRUCTION-76" "DTP-PACKED-INSTRUCTION-77"))))
 
 (defun cold-build-wired-arrays (w)
   (dolist (spec *cold-wired-arrays*)
     (destructuring-bind (package name type dims
                          &key fill-pointer leader-length leader-list
-                              contents words fill-fixnum last-cdr-nil
+                              contents symbol-contents words fill-fixnum
+                              last-cdr-nil
                               (area "WIRED-CONTROL-TABLES"))
         spec
       (let* ((len (if (listp dims) (reduce #'* dims) dims))
@@ -971,6 +1015,13 @@ wired-table forwards, so they land in the comm slots or wired cells."
           (setf (varray-contents arr)
                 (coerce (append contents
                                 (make-list (- len (length contents))))
+                        'vector)))
+        (when symbol-contents
+          (setf (varray-contents arr)
+                (coerce (append (mapcar (lambda (pname)
+                                          (make-vsym "SYSTEM" pname))
+                                        symbol-contents)
+                                (make-list (- len (length symbol-contents))))
                         'vector)))
         (let* ((hdr (cold-array w arr area))
                (fixnum (cold-dtp w "FIXNUM")))
