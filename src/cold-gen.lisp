@@ -143,6 +143,18 @@
     "SYS: SYS; ALLOCATE-COMMON" "SYS: SYS; ICONS" "SYS: SYS; OBJECTS"
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
     "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH"
+    ;; Post-M3h: Ivory software-float support (FP exception handlers,
+    ;; soft single/double ops, FLOAT-OPERATING-MODE plumbing).  Band
+    ;; roster: every probed defun is 882-cold or F000-wired in the dist
+    ;; (SET-FLOAT-OPERATING-MODE fcell 05->F000386D), so the stock cold
+    ;; load contained it; vbin ships.  Without it XR-READ-FLONUM traps
+    ;; on SET-FLOAT-OPERATING-MODE's unbound fcell -- reading ANY float
+    ;; (1.2, 1.2d0) at the cold REPL errored.  The mode/status
+    ;; variables are DEFINE-MAGIC-LOCATIONS cells (dist
+    ;; FLOAT-OPERATION-STATUS val 05->F8041138), already built; the 4
+    ;; DEFINE-INSTRUCTION-EXCEPTION-HANDLERs ride the same trap-vector
+    ;; machinery as ISTACK/LARITH.
+    "SYS: I-SYS; FLOAT"
     ;; Boot 43: SYS2; DOUBLE and its cluster sibling SYS2; COMPLEX removed.
     ;; DOUBLE carries an eager top-level (ADD-INITIALIZATION "Make
     ;; *DFLOAT-AND-SCALE-TABLE*" '(setq *dfloat-and-scale-table*
