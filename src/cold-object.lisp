@@ -160,6 +160,14 @@ load already materialized (vbin table slots share host conses)."
     ("ART-BOOLEAN" . #o52)
     ("ART-Q" . #o60) ("ART-Q-LIST" . #o61)))
 
+;;; The 2-bit element-type field of an array type code (cold-array-type
+;;; returns it as (ldb (byte 2 4) code)).  Enumeration *ARRAY-ELEMENT-
+;;; DATA-TYPES* = (FIXNUM CHARACTER BOOLEAN OBJECT) -> 0 1 2 3
+;;; (i-sys/sysdef.lisp:626).  OBJECT (the ART-Q family) is 3 -- the only
+;;; element type whose named-structure symbol may live leaderlessly in
+;;; element 0 (SI:MAKE-ARRAY-INTERNAL, icons.lisp:1207).
+(defconstant +array-element-type-object+ 3)
+
 (defun cold-array-type-code (w name)
   (declare (ignore w))
   (or (cdr (assoc name *cold-array-type-codes* :test #'string=))
@@ -586,21 +594,55 @@ world's STANDARD-READTABLE (header 43:0A930002, locative +3 -> +8)."
           (error "Array dimensions ~S unsupported" dims))
         (multiple-value-bind (type-code element-type packing)
             (cold-array-type w varray)
-          (declare (ignore element-type))
           (let* ((len (reduce #'* dims))
+                 (rank (length dims))
                  (per-word (ash 1 packing))
                  (options (varray-options varray))
-                 (leader-length
-                   (or (varray-option options "LEADER-LENGTH") 0))
+                 (explicit-leader-length
+                   (varray-option options "LEADER-LENGTH"))
                  (leader-list (varray-option options "LEADER-LIST"))
+                 (leader-list-length (length leader-list))
                  (fill-pointer (varray-option options "FILL-POINTER"))
+                 (displaced-to (varray-option options "DISPLACED-TO"))
                  (nwords (if (zerop packing) len (ceiling len per-word)))
                  (named-structure
                    (varray-option options "NAMED-STRUCTURE-SYMBOL"))
-                 (longp (or (> (length dims) 1) (>= len (ash 1 15))))
-                 (prefix-extra (if longp (+ 3 (* 2 (length dims))) 0)))
-            (when (and fill-pointer (zerop leader-length))
-              (setf leader-length 1))
+                 (longp (or (> rank 1) (>= len (ash 1 15))))
+                 (prefix-extra (if longp (+ 3 (* 2 rank)) 0))
+                 ;; Leader length, mirrored EXACTLY from SI:MAKE-ARRAY-
+                 ;; INTERNAL (sys/icons.lisp:1097-1213).  The old code took
+                 ;; only (or :LEADER-LENGTH 0) and a fill-pointer bump, which
+                 ;; silently truncated every :LEADER-LIST / named-structure
+                 ;; array to leader-length 0 (M3h boot 40: leaderless
+                 ;; STANDARD-READTABLE, ARRAY-DIMENSION-N -> NIL).
+                 (leader-length (or explicit-leader-length 0)))  ; icons:1097
+            ;; icons.lisp:1179-1182 -- a fill-pointer forces LLENGTH >= 1.
+            (when fill-pointer
+              (setf leader-length (max leader-length 1)))
+            ;; icons.lisp:1190-1201 -- when :LEADER-LENGTH is given it must be
+            ;; >= the leader-list length (%ERROR-UNLESS); otherwise LLENGTH
+            ;; rises to hold the whole leader list.  This is the build-time
+            ;; invariant: a spec whose explicit leader is too short to hold
+            ;; its own leader-list is a generator bug -- fail the build.
+            (if explicit-leader-length
+                (unless (>= explicit-leader-length leader-list-length)
+                  (error "cold-array: :LEADER-LENGTH ~D shorter than its ~
+:LEADER-LIST (~D elements) for ~S"
+                         explicit-leader-length leader-list-length varray))
+                (setf leader-length (max leader-length leader-list-length)))
+            ;; icons.lisp:1202-1213 -- a named-structure symbol lives
+            ;; leaderlessly in element 0 ONLY for a rank-1 ART-Q-family array
+            ;; with a nonzero, non-displaced, still-leaderless body; any other
+            ;; case forces it into leader slot 1, so LLENGTH >= 2.  (The Genera
+            ;; test is (OR (NOT (ZEROP LLENGTH)) (> RANK 1) (/= elt OBJECT)
+            ;; DISPLACED-TO (ZEROP N-ELEMENTS)); ^Z=> at icons.lisp:1206.)
+            (when (and named-structure
+                       (or (not (zerop leader-length))
+                           (> rank 1)
+                           (/= element-type +array-element-type-object+)
+                           displaced-to
+                           (zerop len)))
+              (setf leader-length (max leader-length 2)))
             (let* ((total (+ (if (zerop leader-length) 0 (1+ leader-length))
                              1 prefix-extra nwords))
                    (base (cold-alloc w area total))

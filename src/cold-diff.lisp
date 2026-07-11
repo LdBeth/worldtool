@@ -1371,6 +1371,65 @@ expected ~D" name i lt ld lv)))
                           always (zerop (nth-value 1 (cw-ref w (+ base i)))))))
                  "~A data matches its spec" name)))))))))
 
+(defun check-readtable-leaders (w reference)
+  "M3h boot-40 gate: the named-structure readtable arrays must carry a
+real leader (dist leader-length 38), not the leaderless header the old
+cold-array truncation produced.  For each readtable symbol assert the
+built array header equals the reference world's (same type / named bit /
+leader-length / dims), the leader-length field is nonzero and matches,
+and every leader slot the reference materialized to a pointer (array /
+list / symbol) has the same DTP in the fresh world -- the ART-16B syntax
+sub-array and macro-char alist must exist, or COPY-READTABLE's
+(ARRAY-DIMENSION-N 0 ...) reads NIL and traps (io/read.lisp:2919)."
+  (let ((array (cold-dtp w "ARRAY")))
+    (dolist (name '("STANDARD-READTABLE"
+                    "*COMMON-LISP-READTABLE*"
+                    "*ANSI-COMMON-LISP-READTABLE*"))
+      (multiple-value-bind (tag data boundp)
+          (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS" name))
+        (cold-check (and boundp (= (tag-type tag) array))
+                    "SI:~A is a bound array" name)
+        (when (and boundp (= (tag-type tag) array))
+          (multiple-value-bind (rt rd) (reference-symbol-value reference name)
+            (cold-check (and rt (= (tag-type rt) array))
+                        "~A bound to an array in the reference" name)
+            (when (and rt (= (tag-type rt) array))
+              (multiple-value-bind (ht hd) (cw-ref w data)
+                (declare (ignore ht))
+                (multiple-value-bind (rht rhd) (world-q reference rd)
+                  (declare (ignore rht))
+                  ;; Header Q equality: type / named bit / leader-length / dims.
+                  (cold-check (eql hd rhd)
+                              "~A header ~8,'0X vs ref ~@[~8,'0X~]"
+                              name hd rhd)
+                  ;; Leader-length field (byte 8 15); dist ground truth 38.
+                  (let ((ll (ldb (byte 8 15) hd))
+                        (rll (and rhd (ldb (byte 8 15) rhd))))
+                    (cold-check (and rll (plusp ll) (= ll rll))
+                                "~A leader-length ~D matches ref ~@[~D~] ~
+(nonzero)" name ll rll)
+                    ;; Every reference leader slot that is a pointer must be
+                    ;; materialized to the same DTP; the syntax sub-arrays
+                    ;; (DTP-ARRAY) and macro-char alist (DTP-LIST) must exist.
+                    (when (and rll (plusp rll))
+                      (let ((mism 0) (subarrays 0))
+                        (dotimes (i rll)
+                          (multiple-value-bind (gt gd) (cw-ref w (- data 1 i))
+                            (declare (ignore gd))
+                            (multiple-value-bind (r2t r2d)
+                                (world-q reference (- rd 1 i))
+                              (declare (ignore r2d))
+                              (when (and r2t (/= (tag-type gt) (tag-type r2t)))
+                                (incf mism))
+                              (when (and r2t (= (tag-type r2t) array))
+                                (incf subarrays)))))
+                        (cold-check (zerop mism)
+                                    "~A: all ~D leader slots match the ~
+reference DTP (~D mismatched)" name rll mism)
+                        (cold-check (plusp subarrays)
+                                    "~A leader holds ~D materialized ~
+sub-array(s)" name subarrays)))))))))))))
+
 (defun check-disk-events (w reference)
   "M3h gate: the five system disk-event variables reference four all-NIL
 18-Q events with the distribution's headers; the serial event is the
@@ -3435,6 +3494,11 @@ prints the R1 unbound-function-cell audit."
 #xF0001054 (dist ground truth)")
         ;; R2: referenced-unbound value cells all reviewed (M3h boot 18).
         (check-unbound-value-cells w)
+        ;; The named-structure readtable arrays carry a real leader (dist
+        ;; leader-length 38); leaderless truncation trapped COPY-READTABLE
+        ;; at boot (M3h boot 40).
+        (when reference
+          (check-readtable-leaders w reference))
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model
