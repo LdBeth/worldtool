@@ -713,6 +713,89 @@ LOAD-MULTIPLE-DEFINITION always passes :START-TYPE-DEFINITION NIL
 DEFSTRUCT without :START-TYPE-DEFINITION would CL:WARN pre-banner ~
 (~A): ~S" pkg form)))))
 
+(defun cold-deferred-set-parts (form)
+  "If FORM is a deferred boot SET -- bare (SET (QUOTE X) V) or guarded
+(IF (BOUNDP (QUOTE X)) NIL (SET (QUOTE X) V)) -- return (values X V);
+else NIL."
+  (let ((set (cond ((and (consp form) (vsym-named-p (first form) "SET"))
+                    form)
+                   ((and (consp form) (vsym-named-p (first form) "IF")
+                         (= (length form) 4)
+                         (consp (fourth form))
+                         (vsym-named-p (first (fourth form)) "SET"))
+                    (fourth form)))))
+    (when set
+      (let ((q (second set)))
+        (when (and (consp q) (vsym-named-p (first q) "QUOTE")
+                   (vsym-p (second q)))
+          (values (second q) (third set)))))))
+
+(defun cold-known-area-name-p (w vsym)
+  "True when VSYM names one of the architectural areas.  The fundamental
+area-number variables are bare (DEFVAR WORKING-STORAGE-AREA) declarations
+with no load-time value (ldata.lisp:165); the area/memory machinery binds
+them at boot before any Lisp runs, so a deferred SYMEVAL of one is safe."
+  (let ((name (vsym-name vsym)))
+    (loop for a across (cold-world-areas w)
+          thereis (and a (string= name (strip-package (cold-area-name a)))))))
+
+(defun check-deferred-set-referents (w)
+  "M3h boot-42 gate: every deferred (SET 'X V) whose V is a BARE symbol
+SYMEVALs V at boot, so V must be bound by then through one of four
+legitimate mechanisms: (1) bound in the built world, (2) SET by an
+EARLIER deferred form, (3) an init row in *COLD-LOAD-VARIABLE-INITIALIZATIONS*
+(LISP-INITIALIZE-FIRST-TIME raw-SETs those before the deferred MAPC,
+cold-load.lisp:527), or (4) an architectural area-number variable the
+memory machinery binds pre-Lisp (ldata.lisp bare DEFVARs).  A
+literal-symbol value carries NO such guarantee: (DEFCONST COLD-LOAD-STREAM
+'COLD-LOAD-STREAM-IO) deferred (SET 'COLD-LOAD-STREAM COLD-LOAD-STREAM-IO),
+and COLD-LOAD-STREAM-IO's value cell is unbound by design (a symbol used
+as a stream via its function cell) -- nothing ever binds it.  Such a
+literal must be stored eagerly instead; dist parity: COLD-LOAD-STREAM's
+value cell is a DTP-SYMBOL to the COLD-LOAD-STREAM-IO symbol block.  The 7
+legit bare-symbol deferrals are DEFVAR var-refs (e.g. the area aliases)
+covered by cases (1)-(4)."
+  (let ((dtp-symbol (cold-dtp w "SYMBOL"))
+        (set-targets (make-hash-table :test #'equal))
+        (inits (cold-boot-init-forms w)))
+    ;; Boot execution order = reverse of the stored deferred list.
+    (loop for (pkg . form) in (reverse (cold-world-deferred w))
+          do (let ((*cold-default-package* pkg))
+               (multiple-value-bind (target value)
+                   (cold-deferred-set-parts form)
+                 (when target
+                   (when (and (vsym-p value)
+                              (let ((p (canonical-package-name
+                                        (vsym-package value)))
+                                    (n (vsym-name value)))
+                                ;; NIL/T self-evaluate; keywords self-eval.
+                                (not (or (and (string= n "NIL") p)
+                                         (and (string= n "T") p)
+                                         (equal p "KEYWORD")))))
+                     (let ((bound (or (nth-value 2
+                                       (cold-symbol-value-q w value))
+                                      (gethash (fspec-key value)
+                                               set-targets)
+                                      (gethash (cold-vsym w value) inits)
+                                      (cold-known-area-name-p w value))))
+                       (cold-check bound
+                                   "deferred (SET '~A ~A) SYMEVALs an ~
+unbound referent: ~A is not bound in the built world, by an earlier ~
+deferred form, by a *COLD-LOAD-VARIABLE-INITIALIZATIONS* row, nor as an ~
+area variable -- a literal-symbol value must be stored/quoted"
+                                   (vsym-name target) (vsym-name value)
+                                   (vsym-name value))))
+                   (setf (gethash (fspec-key target) set-targets) t)))))
+    ;; Dist parity for the boot-42 literal.
+    (let ((io-vma (cold-vsym w (si-vsym "COLD-LOAD-STREAM-IO"))))
+      (multiple-value-bind (tag data boundp)
+          (cold-symbol-value-q w (si-vsym "COLD-LOAD-STREAM"))
+        (cold-check (and boundp (= (tag-type tag) dtp-symbol)
+                         (= data io-vma))
+                    "COLD-LOAD-STREAM value cell is DTP-SYMBOL -> ~
+COLD-LOAD-STREAM-IO (dist parity); got boundp=~A tag=~2,'0X data=~8,'0X ~
+(want #x~X)" boundp (tag-type tag) data io-vma)))))
+
 (defun check-deferred-defvar-hoist (w)
   "M3h boot-33 gate: both flavor completion-table inits precede the
 first deferred flavor composition.  DEFFLAVOR-INTERNAL (first at ~104,
@@ -3547,6 +3630,11 @@ prints the R1 unbound-function-cell audit."
         ;; at boot (M3h boot 40).
         (when reference
           (check-readtable-leaders w reference))
+        ;; No deferred (SET 'X bare-symbol) may SYMEVAL an unbound
+        ;; referent at boot; COLD-LOAD-STREAM stores its DEFCONST literal
+        ;; eagerly instead of deferring an unbound SYMEVAL (M3h boot 42).
+        ;; Post-finalize, so the reconcile-re-deferred SETs are included.
+        (check-deferred-set-referents w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model

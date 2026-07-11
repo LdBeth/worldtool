@@ -411,6 +411,20 @@ Same return convention as COLD-EVAL-VALUE."
 
 ;;; ---------------- defvar / defconst / defconstant ----------------
 
+(defun cold-deferred-set-value (value value-kind)
+  "The value slot of a deferred boot-time (SET 'sym VALUE).  A veval
+carries a source form the boot MAPC evaluates.  Under :OBJECT value-kind
+a bare symbol is a LITERAL constant (quote semantics -- a DEFCONST or
+:setq operand), so QUOTE it: an unquoted symbol would SYMEVAL its value
+cell at boot, possibly unbound by design (M3h boot 42, COLD-LOAD-STREAM-IO).
+Under :FORM a bare symbol is a variable REFERENCE (DEFVAR-1 var-ref)
+whose boot SYMEVAL is intended -- the 7 legit deferrals (e.g. SYMBOL-AREA)
+must keep evaluating, so :form never quotes."
+  (cond ((veval-p value) (veval-form value))
+        ((and (eq value-kind :object) (vsym-p value))
+         (list (si-vsym "QUOTE") value))
+        (t value)))
+
 (defun cold-do-defvar (w kind sym value valuep doc localize
                        &key (value-kind :object))
   "KIND is :defvar (store only if unbound), :defconst or :defconstant
@@ -442,13 +456,13 @@ An unevaluable value defers a boot-time (SET 'sym form)."
                                 (cold-world-defvar-stamps w))
                        (list (si-vsym "SET")
                              (list (si-vsym "QUOTE") sym)
-                             (if (veval-p value) (veval-form value) value)))))
+                             (cold-deferred-set-value value value-kind)))))
               (tag nil)                 ; defvar of an already-bound symbol
               (t
            (cold-note "deferred values")
            (let ((set-form (list (si-vsym "SET")
                                  (list (si-vsym "QUOTE") sym)
-                                 (if (veval-p value) (veval-form value) value))))
+                                 (cold-deferred-set-value value value-kind))))
              (cold-defer w (if (eq kind :defvar)
                                (list (si-vsym "IF")
                                      (list (si-vsym "BOUNDP")
@@ -1212,20 +1226,33 @@ compiler-side and have no cold definition or boot effect.")
                        (cold-set-symbol-value w (first args) tag data))
                 (cold-defer w (list (si-vsym "SET")
                                     (list (si-vsym "QUOTE") (first args))
-                                    (let ((v (second args)))
-                                      (if (veval-p v) (veval-form v) v)))
+                                    ;; :setq operands are quote-semantics
+                                    ;; objects (like DEFCONST), so a bare
+                                    ;; symbol is a LITERAL (M3h boot 42).
+                                    (cold-deferred-set-value (second args)
+                                                             :object))
                             "deferred setqs"))))
          (:putprop (cold-do-putprop w (first args) (second args)
                                     (third args)))
-         ;; The value operand of the DEFVAR/DEFCONST bin ops is the
-         ;; SOURCE FORM (DEFVAR-1 semantics -- evaluated lazily by the
-         ;; loader), not a quoted object: constants coincide either way,
-         ;; but (QUOTE X) must store X and calls like (MAKE-AREA ...)
-         ;; must evaluate (M3h boot-11: *WIRED-CONSOLE-AREA* held its
-         ;; own make-area form; dist holds area number 19).
+         ;; The value operand of the DEFVAR bin op is the SOURCE FORM
+         ;; (DEFVAR-1 semantics -- evaluated lazily by the loader), not a
+         ;; quoted object: constants coincide either way, but (QUOTE X)
+         ;; must store X and calls like (MAKE-AREA ...) must evaluate
+         ;; (M3h boot-11: *WIRED-CONSOLE-AREA* held its own make-area
+         ;; form; dist holds area number 19).
+         ;;
+         ;; DEFCONST operands are PRE-EVALUATED constants (BIN-OP-DEFCONST
+         ;; -> SI:DEFCONST-1-INTERNAL, l-bin/load.lisp:611, stores
+         ;; directly), so a bare symbol is a LITERAL, not a variable
+         ;; reference: :object materializes it (like the :setq path).
+         ;; With :form the bare symbol SYMEVAL'd its referent, and
+         ;; (DEFCONST COLD-LOAD-STREAM 'COLD-LOAD-STREAM-IO) deferred a
+         ;; boot (SET 'COLD-LOAD-STREAM COLD-LOAD-STREAM-IO) that read
+         ;; COLD-LOAD-STREAM-IO's value cell -- unbound by design, a
+         ;; symbol-as-stream used via its function cell (M3h boot 42).
          (:defconst (cold-do-defvar w :defconst (first args) (second args)
                                     (> (length args) 1) (third args) nil
-                                    :value-kind :form))
+                                    :value-kind :object))
          (:defvar (cold-do-defvar w :defvar (first args) (second args)
                                   (> (length args) 1)
                                   (third args) (fourth args)
