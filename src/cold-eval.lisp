@@ -81,7 +81,7 @@
 
 (defun cold-cons (w cart card cdt cdd &optional (area "WORKING-STORAGE-AREA"))
   "A fresh 2-Q cons; returns its vma."
-  (let ((vma (cold-alloc w area 2)))
+  (let ((vma (cold-alloc w area 2 :list)))
     (cw-set w vma (logior (ash +cdr-normal+ 6) (tag-type cart)) card)
     (cw-set w (1+ vma) cdt cdd)
     vma))
@@ -222,7 +222,8 @@ it pre-built (array header 43:C0800002 at #xF0003597, structs
                                     (values nil data)))
                                 (cons tag data)))
                             args)))
-            (let ((vma (cold-alloc w "WORKING-STORAGE-AREA" (length qs))))
+            (let ((vma (cold-alloc w "WORKING-STORAGE-AREA" (length qs)
+                                   :list)))
               (loop for (tag . data) in qs
                     for i from 0
                     for lastp = (= i (1- (length qs)))
@@ -705,7 +706,7 @@ categories' tables at boot."
              w (si-vsym "*CURRENT-WIRED-SYMBOL-CELL-TABLE*")
              (tag 0 (cold-dtp w "ARRAY")) tbl-vma)
             ;; (LIST table): one cdr-nil cell.
-            (let ((cell (cold-alloc w "PERMANENT-STORAGE-AREA" 1)))
+            (let ((cell (cold-alloc w "PERMANENT-STORAGE-AREA" 1 :list)))
               (cw-set w cell
                       (logior (ash +cdr-nil+ 6) (cold-dtp w "ARRAY"))
                       tbl-vma)

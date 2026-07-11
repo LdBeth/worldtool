@@ -44,13 +44,15 @@ FEP-AREA is the vma=pma image of the FEP reservation: fully allocated,
 no pages in the world file.  STACK-AREA's initial region is reserved
 address space only (the first data stack is created at first boot by
 GROW-DATA-STACK, allocate-common.lisp:990)."
-  (let ((fep (cold-add-region w "FEP-AREA" #xF8000000 #x40000)))
+  ;; Reps mirror bit 0 of *cold-architectural-region-bits*; only the two
+  ;; structure regions ever see COLD-ALLOC.
+  (let ((fep (cold-add-region w "FEP-AREA" #xF8000000 #x40000 :rep :list)))
     (setf (cold-region-free fep) #xF8040000))
   (cold-add-region w "WIRED-CONTROL-TABLES" #xF8040000 #x10000)
   (cold-add-region w "SAFEGUARDED-OBJECTS-AREA" #xF0000000 #x10000)
-  (cold-add-region w "CONTROL-STACK-AREA" #xF6000000 #x10000)
-  (cold-add-region w "BINDING-STACK-AREA" #xF2000000 #x10000)
-  (cold-add-region w "STACK-AREA" #xF0010000 #x20000))
+  (cold-add-region w "CONTROL-STACK-AREA" #xF6000000 #x10000 :rep :list)
+  (cold-add-region w "BINDING-STACK-AREA" #xF2000000 #x10000 :rep :list)
+  (cold-add-region w "STACK-AREA" #xF0010000 #x20000 :rep :list))
 
 (defun cold-build-symbol-block (w vma &key value-tag value-data)
   "The fixed 5-Q symbol shape (NIL and T; SYMBOL-AREA symbols reuse it):

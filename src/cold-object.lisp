@@ -32,6 +32,19 @@ its attribute list.")
     ("DEBUG-INFO-AREA"         #x81900000 #x400000)
     ("CONSTANTS-AREA"          #x81E00000 #x100000)))
 
+;;; LIST-representation companions for the areas that receive generator
+;;; conses (COLD-ALLOC rep :LIST), in the address gaps between the
+;;; structure regions.  An area holding both representations region-by-
+;;; region is exactly the distribution's shape (its PERMANENT-STORAGE-AREA
+;;; carries 02880048 LIST next to 02880049 STRUCTURE regions); a cons in
+;;; a STRUCTURE region cannot be RPLACD'd -- REDEFINE-GC-OPTIMIZATION-1's
+;;; boot-time PUSHNEW onto the dumped *IMMEDIATE-GC-MODE-OPTIMIZATION-
+;;; ALIST* sublists trapped in RPLACD-ESCAPE (M3h boot 34).
+(defparameter *cold-heap-list-regions*
+  '(("PROPERTY-LIST-AREA"      #x80600000 #x100000)
+    ("PERMANENT-STORAGE-AREA"  #x80B00000 #x100000)
+    ("WORKING-STORAGE-AREA"    #x80D00000 #x100000)))
+
 (defun cold-add-heap-regions (w)
   (loop for (name origin length) in *cold-heap-regions*
         do (cold-add-region w name origin length))
@@ -44,8 +57,12 @@ its attribute list.")
   ;; the resetters through %<AREA>-REGION{,-ORIGIN,-LENGTH} wired
   ;; variables, which cold-machinery stamps.
   (cold-add-region w "WIRED-DYNAMIC-AREA" #xF0030000 #x10000)
-  (cold-add-region w "PAGE-TABLE-AREA" #xF0040000 #x200000)
-  (cold-add-region w "GC-TABLE-AREA" #xF0240000 #x80000))
+  (cold-add-region w "PAGE-TABLE-AREA" #xF0040000 #x200000 :rep :list)
+  (cold-add-region w "GC-TABLE-AREA" #xF0240000 #x80000 :rep :list)
+  ;; The LIST regions come last so the reserved trio keeps the
+  ;; distribution's region numbers 14/15/16 (check-reserved-regions).
+  (loop for (name origin length) in *cold-heap-list-regions*
+        do (cold-add-region w name origin length :rep :list)))
 
 ;;; EQ identity for materialized host objects (conses, varrays, vfuns).
 (defvar *cold-object-vmas*)
@@ -467,7 +484,7 @@ tails -- terminate the run with a cdr-normal link."
         (let* ((n (length cells))
                (last-shared (or (consp tail) (and tail t)))
                (nqs (if last-shared (1+ n) n))
-               (vma (cold-alloc w area nqs)))
+               (vma (cold-alloc w area nqs :list)))
           ;; Phase 1: register cell VMAs (self-references resolve).
           (loop for c in cells
                 for i from 0
@@ -739,7 +756,7 @@ GET from DECLARED-STORAGE-CATEGORY on the first :FUNCTION link record)."
 (defun cold-prepend-property (w sym-vma ind-tag ind-data val-tag val-data)
   "Push an (indicator value) pair onto the plist at SYM-VMA+3; returns the
 VMA of the value cell (= PROPERTY-CELL-LOCATION)."
-  (let ((block (cold-alloc w "PROPERTY-LIST-AREA" 3)))
+  (let ((block (cold-alloc w "PROPERTY-LIST-AREA" 3 :list)))
     (multiple-value-bind (old-tag old-data) (cw-ref w (+ sym-vma 3))
       (cw-set w block (logior (ash +cdr-next+ 6) (tag-type ind-tag)) ind-data)
       (cw-set w (+ block 1)
@@ -779,7 +796,8 @@ are redefined after boot."
                 ((consp fspec)
                  ;; (fspec-list . cell) block; the locative points at the cell.
                  (multiple-value-bind (ft fd) (cold-ref w fspec)
-                   (let ((block (cold-alloc w "PERMANENT-STORAGE-AREA" 2)))
+                   (let ((block (cold-alloc w "PERMANENT-STORAGE-AREA" 2
+                                            :list)))
                      (cw-set w block
                              (logior (ash +cdr-normal+ 6) (tag-type ft)) fd)
                      (cw-set w (1+ block) (tag 0 (cold-dtp w "NULL"))
@@ -808,7 +826,7 @@ BOOTSTRAP-FASD-INSTANCES)."
   (or (gethash vinstance *cold-object-vmas*)
       (let* ((plist (vinstance-plist vinstance))
              (n (+ 2 (length plist)))
-             (vma (cold-alloc w area n))
+             (vma (cold-alloc w area n :list))
              (dtp-symbol (cold-dtp w "SYMBOL")))
         (setf (gethash vinstance *cold-object-vmas*) vma)
         (cw-set w vma (tag +cdr-next+ dtp-symbol) (cold-instance-marker w))

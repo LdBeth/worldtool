@@ -17,7 +17,13 @@
   (number 0) (area 0)
   (origin 0)       ; base VMA
   (length 0)       ; capacity in Qs
-  (free 0))        ; next unallocated VMA
+  (free 0)         ; next unallocated VMA
+  (rep :structure)); %%REGION-REPRESENTATION-TYPE: :structure or :list.
+                   ; RPLACD-ESCAPE forwards a cdr-coded cons only in a
+                   ; LIST region ("embedded in a structure" otherwise),
+                   ; and the transporter picks copy semantics by it, so
+                   ; conses and structures cannot share a region (M3h
+                   ; boot 34).
 
 (defstruct cold-area
   (number 0) (name "") (regions nil))   ; region numbers, newest first
@@ -155,12 +161,13 @@ numbers from here up (cold-world-boot-areas).")
                  return a)
          (error "No area named ~A" designator)))))
 
-(defun cold-add-region (w area-designator origin length)
+(defun cold-add-region (w area-designator origin length &key (rep :structure))
   "Attach a new region [ORIGIN, ORIGIN+LENGTH) to an area."
   (let* ((area (cold-area w area-designator))
          (region (make-cold-region :number (fill-pointer (cold-world-regions w))
                                    :area (cold-area-number area)
-                                   :origin origin :length length :free origin)))
+                                   :origin origin :length length :free origin
+                                   :rep rep)))
     (vector-push-extend region (cold-world-regions w))
     (push (cold-region-number region) (cold-area-regions area))
     region))
@@ -170,16 +177,25 @@ numbers from here up (cold-world-boot-areas).")
     (when (cold-area-regions area)
       (aref (cold-world-regions w) (first (cold-area-regions area))))))
 
-(defun cold-alloc (w area-designator nqs)
-  "Allocate NQS Qs in AREA's newest region; returns the base VMA.
-No automatic region extension yet -- callers add regions explicitly."
-  (let ((region (or (cold-area-current-region w area-designator)
-                    (error "Area ~A has no region" area-designator))))
+(defun cold-area-region-of-rep (w area-designator rep)
+  "AREA's newest region of representation REP, or NIL."
+  (let ((area (cold-area w area-designator)))
+    (loop for n in (cold-area-regions area)
+          for region = (aref (cold-world-regions w) n)
+          when (eq (cold-region-rep region) rep)
+            return region)))
+
+(defun cold-alloc (w area-designator nqs &optional (rep :structure))
+  "Allocate NQS Qs in AREA's newest region of representation REP; returns
+the base VMA.  Conses must pass :LIST (see COLD-REGION-REP).  No automatic
+region extension yet -- callers add regions explicitly."
+  (let ((region (or (cold-area-region-of-rep w area-designator rep)
+                    (error "Area ~A has no ~A region" area-designator rep))))
     (let ((vma (cold-region-free region)))
       (when (> (+ (- vma (cold-region-origin region)) nqs)
                (cold-region-length region))
-        (error "Region ~D (area ~A) full: need ~D Qs at #x~X"
-               (cold-region-number region) area-designator nqs vma))
+        (error "Region ~D (area ~A ~A) full: need ~D Qs at #x~X"
+               (cold-region-number region) area-designator rep nqs vma))
       (setf (cold-region-free region) (+ vma nqs))
       ;; Make the pages the object spans present.
       (loop for page-vma from (logandc2 vma #xFF) to (+ vma nqs -1)

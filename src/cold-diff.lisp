@@ -1964,6 +1964,58 @@ link-record symbol" (car key) vma)
 ~D unbound cell~:P)~@[; first: ~A~]"
                 nsyms nqs null-cells (first bad))))
 
+(defun cold-region-containing (w vma)
+  (loop for region across (cold-world-regions w)
+        when (and (<= (cold-region-origin region) vma)
+                  (< vma (+ (cold-region-origin region)
+                            (cold-region-length region))))
+          return region))
+
+(defun check-list-representation (w)
+  "M3h boot-34 gate: every DTP-LIST Q in the emitted world points into a
+LIST-representation region.  RPLACD-ESCAPE relocates a cdr-coded cons
+only there -- anywhere else the first in-place cdr surgery (the deferred
+DEFINE-GC-OPTIMIZATION's PUSHNEW onto *IMMEDIATE-GC-MODE-OPTIMIZATION-
+ALIST*'s dumped sublists, REDEFINE-GC-OPTIMIZATION-1 lispfn.lisp:3818)
+FERRORs \"embedded in a structure\" pre-banner -- and the transporter
+picks copy semantics by the region representation.  Exempt targets, all
+distribution shapes: the three CCA-hosting areas (CCA-embedded vembed
+constants and CCA-EXTRA-INFO lists live inside the function block --
+COMPILED-FUNCTION-AREA plus the DSCL :WIRED and :SAFEGUARDED CCAs of
+WIRED-CONTROL-TABLES and SAFEGUARDED-OBJECTS-AREA), which also carry
+the ART-Q-LIST table lists (SI:AREA-LIST rides the *AREA-NAME* table,
+WIRED-FERROR-ARGS-ARRAY is G-L-P'd -- ART-Q-LIST array bodies are the
+one sanctioned structure-embedded list form)."
+  (with-cold-checks ("list representation")
+    (let ((dtp-list (cold-dtp w "LIST"))
+          (exempt (list (cold-area-number (cold-area w "WIRED-CONTROL-TABLES"))
+                        (cold-area-number
+                         (cold-area w "SAFEGUARDED-OBJECTS-AREA"))
+                        (cold-area-number
+                         (cold-area w "COMPILED-FUNCTION-AREA"))))
+          (nlist 0) (bad 0) (samples nil))
+      (loop for page being the hash-keys of (cold-world-pages w)
+              using (hash-value qv)
+            do (dotimes (i +ivory-page-size-qs+)
+                 (multiple-value-bind (tag data) (qref qv i)
+                   (when (= (tag-type tag) dtp-list)
+                     (incf nlist)
+                     (let ((region (cold-region-containing w data)))
+                       (unless (and region
+                                    (or (eq (cold-region-rep region) :list)
+                                        (member (cold-region-area region)
+                                                exempt)))
+                         (incf bad)
+                         (when (< (length samples) 6)
+                           (push (format nil "~8,'0X->~8,'0X (region ~A)"
+                                         (+ (ash page 8) i) data
+                                         (and region
+                                              (cold-region-number region)))
+                                 samples))))))))
+      (cold-check (zerop bad)
+                  "~D of ~D DTP-LIST Q~:P point outside LIST regions:~
+~{ ~A~}" bad nlist (reverse samples)))))
+
 (defun check-linked-symbol-cells (w)
   "M3h gate: SI:*LINKED-SYMBOL-CELLS* carries the (from to type) records
 that permanent-links' SI:LINK-SYMBOL-*-CELLS load forms accumulated, in
@@ -2868,6 +2920,9 @@ prints the R1 unbound-function-cell audit."
         ;; The boot's region object walks must parse every Q up to each
         ;; free pointer (M3h boot 24).
         (check-boot-object-walk w)
+        ;; Every cons in a LIST-representation region, or RPLACD traps
+        ;; (M3h boot 34).
+        (check-list-representation w)
         (check-pass1-fspec-handlers w)
         ;; The flavor completion-table inits hoisted ahead of the first
         ;; deferred DEFFLAVOR-INTERNAL (M3h boot 33).

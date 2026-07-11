@@ -105,12 +105,16 @@ records plus the synthesized allowlist."
 ;;; space-type bits 2-5, scavenge-enable bit 6, level bits 18-23.
 (defconstant +region-bits-scavenge+ (ash 1 6))
 
-(defun cold-heap-region-bits (area-bits)
+(defun cold-heap-region-bits (area-bits rep)
   "REGION-BITS for a generator heap region: the area template with the
-representation forced to STRUCTURE and an ephemeral-level template (level
-< 32, e.g. WORKING-STORAGE-AREA's level-1 marker) replaced by plain
-dynamic level 35 -- the cold world boots with the ephemeral GC off."
-  (let ((bits (logior (logandc2 area-bits 3) 1)))
+representation set from the region's REP (STRUCTURE=1, LIST=0 -- the
+dist's PERMANENT-STORAGE-AREA carries 02880048 LIST beside 02880049
+STRUCTURE regions, both the 02880048 template) and an ephemeral-level
+template (level < 32, e.g. WORKING-STORAGE-AREA's level-1 marker)
+replaced by plain dynamic level 35 -- the cold world boots with the
+ephemeral GC off."
+  (let ((bits (dpb (ecase rep (:structure 1) (:list 0)) (byte 2 0)
+                   area-bits)))
     (if (< (ldb (byte 6 18) bits) 32)
         (dpb 35 (byte 6 18) bits)
         bits)))
@@ -235,7 +239,9 @@ but no store."
                                    n area))
                           (if (member area '(16 17)) ; PAGE-TABLE / GC-TABLE
                               (third config)
-                              (cold-heap-region-bits (third config))))))
+                              (cold-heap-region-bits
+                               (third config)
+                               (cold-region-rep region))))))
              ;; The saved heap (zone 16) is uniformly STATIC level 36,
              ;; exactly like the distribution's zone-16 regions: one
              ;; level per zone is an architectural invariant
