@@ -3784,7 +3784,7 @@ split, re-read it, and check the boot-critical Qs on the FILE.  Also
 prints the R1 unbound-function-cell audit."
   (with-cold-checks ("cold emit (fresh world)")
     (multiple-value-bind (ndeferred npatches npackages)
-        (handler-case (cold-finalize w)
+        (handler-case (cold-finalize w :reference reference)
           (error (e)
             (cold-check nil "finalize: ~A" e)
             (values nil nil nil)))
@@ -3890,6 +3890,16 @@ prints the R1 unbound-function-cell audit."
         ;; (M3h boot 43: DOUBLE's :once init -> MAKE-DFLOAT-AND-SCALE-TABLE
         ;; -> QLD-warm DFLOAT, trap 71).
         (check-eager-initialization-callees w)
+        ;; The region tables must describe the FINAL frontiers (M3h boot
+        ;; 47): finalize allocates (deferred list, patches, late-interned
+        ;; symbols like the CFM auto-mixture variants), so the tables
+        ;; cold-build-wired-machinery stamped pre-finalize go stale --
+        ;; FIXUP-SYMBOL-PACKAGE sweeps SYMBOL-AREA only up to the table
+        ;; fp (late symbols never register; INTERN mints twins), and the
+        ;; boot allocator would cons over anything past a stale fp.
+        ;; cold-finalize re-stamps (its step 6); this re-run of the
+        ;; wired-machinery check verifies fp = frontier POST-finalize.
+        (check-machinery-region-tables w)
         ;; Emit with the map split and re-read.
         (let ((out (format nil "~A/fresh.ilod" tmpdir))
               (model (cold-world-model

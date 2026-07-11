@@ -487,7 +487,7 @@ cells for them -- hence the runtime PKG-FIND-PACKAGE lookup.  Returns
                  (list (si-vsym "PROGN") prologue (cdr entry) epilogue))
            t)))))
 
-(defun cold-finalize (w)
+(defun cold-finalize (w &key reference)
   "Everything between the last vbin and emit (M3f):
 1. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp),
    withholding :RELATIVE-NAMES triples (M3h boot 14) -- it runs first
@@ -510,6 +510,19 @@ cells for them -- hence the runtime PKG-FIND-PACKAGE lookup.  Returns
    so BUILD-INITIAL-PACKAGES can EVAL those forms at first boot.  Done
    last: the PKGDCL pass and the deferred-list materialization both
    intern keywords.
+6. the storage tables are RE-stamped (cold-fill-storage-tables, M3h boot
+   47): every step above ALLOCATES -- deferred-list conses, patch forms,
+   strings, and every symbol first referenced by a deferred form (the
+   CFM auto-mixture variants exactly) -- so the region free pointers
+   cold-build-wired-machinery stamped are stale by now.  A stale fp is
+   not cosmetic: BUILD-INITIAL-PACKAGES' FIXUP-SYMBOL-PACKAGE sweep
+   walks SYMBOL-AREA only up to the table fp, so late-interned symbols
+   never register in their packages (boot 47: the boot-46 package
+   wrapper made the mixture INTERN run in CLI, but INTERN still minted
+   a fresh CLI twin because the baked variant @801127C3 sat past region
+   6's stamped fp #x12151) -- and the boot allocator would treat the
+   space past a stale fp as free, consing OVER finalize-baked objects.
+   REFERENCE is needed again for the boot-created areas' template rows.
 Returns (values deferred-count patch-count package-count)."
   (with-cold-materializer (w)
     (let* ((*cold-load-time-eval* #'cold-operand-eval)
@@ -629,6 +642,10 @@ Returns (values deferred-count patch-count package-count)."
       (when (plusp wrapped)
         (format t "~&  ~D deferred form~:P wrapped for package-faithful ~
 replay~%" wrapped))
+      ;; LAST: refresh the frontier-derived storage tables (docstring
+      ;; point 6).  Nothing after finalize allocates (audits read, emit
+      ;; writes pages); check-region-frontier-tables enforces that.
+      (cold-fill-storage-tables w :reference reference)
       (values (+ (length patches) (length deferred-qs)
                  (length (cold-world-relative-names w)))
               (length patches) package-count))))
@@ -645,4 +662,4 @@ values of COLD-FINALIZE."
       (unless (zerop failures)
         (error "~D fixup~:P never resolved" failures)))
     (cold-build-wired-machinery w :reference reference)
-    (cold-finalize w)))
+    (cold-finalize w :reference reference)))
