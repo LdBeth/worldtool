@@ -230,6 +230,21 @@
     ;; (defflavor.lisp:557), unbound without this (M3h boot 32); its
     ;; .vbin ships (QLD's INNER-SYSTEM-FILE-ALIST reloads it warm).
     "SYS: CLCP; SEQFNS"
+    ;; The CL string layer was cold too: the whole stringfns function
+    ;; family is a consecutive 0x882 cold block at #x8821DC54-#x8821E583
+    ;; in the dist band scan -- right after seqfns' band and just before
+    ;; numerics' (source/band order seqfns,stringfns,numerics).  Trap: the
+    ;; deferred flavor MAPC evaluates a cold DEFFLAVOR ->
+    ;; ENCODE-FLAVOR-MIXTURE -> FLAVOR-MIXTURE-NAME (flavor/compose.lisp:
+    ;; 1284) whose STRING-SEARCH-CHAR / STRING-EQUAL calls (compose.lisp:
+    ;; 1289,1302,1304) the optimizer inlines to direct fcell calls of
+    ;; CLI:STRING-SEARCH-CHAR-FORWARD / STRING-EQUAL-INTERNAL, defined
+    ;; ONLY here -- unbound without this (M3h boot 45, trap 71).  Its
+    ;; .vbin ships (QLD's INNER-SYSTEM-FILE-ALIST reloads it warm;
+    ;; mini-alists.lisp:78 "Needed by FLAVOR").  Its ADD-OPTIMIZER
+    ;; registrations are already covered by *cold-guarded-heads*'
+    ;; ADD-OPTIMIZER-INTERNAL.
+    "SYS: CLCP; STRINGFNS"
     ;; The CL numeric layer was cold too: the dist band scan puts
     ;; numerics.lisp's roster consecutively in source order at
     ;; #x8821E97A-#x8821EA47 (ISQRT, FLOAT-RADIX/DIGITS/PRECISION/SIGN,
