@@ -49,14 +49,45 @@
     "SYS: FLAVOR; HANDLE" "SYS: FLAVOR; CTYPES" "SYS: FLAVOR; VANILLA"
     "SYS: IO; DRIBBL" "SYS: SYS2; ENCAPS" "SYS: SYS; EVAL"
     "SYS: SYS; LISP-DATABASE-COLD" "SYS: SYS; FSPEC"
-    "SYS: SYS2; HASH" "SYS: SYS2; HEAP" "SYS: IO; INTERACTIVE-STREAM"
+    ;; Boot 38: five files removed from the cold set below (HASH, HEAP,
+    ;; INTERACTIVE-STREAM, STANDARD-VALUES, VLM-DISK-UTILITIES).  A full
+    ;; band-roster reconciliation of the cold set against the dist
+    ;; (coldset-audit.lisp -- the oracle) proved none of them was ever
+    ;; genuinely cold, and each carries a deferred
+    ;; COMPILE-FLAVOR-METHODS-LOAD-TIME whose component flavor is DEFFLAVORed
+    ;; ONLY on the QLD side -- so COMPOSE-FLAVOR-COMBINATION's missing-component
+    ;; WARN fires pre-banner, where any WARN is fatal (streams unbound until
+    ;; the banner, by design).  Boot 38 died on hash's (EQ-HASH-TABLE ...)
+    ;; CFM missing FCL:HASH-TABLE (QLD-only sys2/tables.lisp); the queued
+    ;; siblings are heap->ERROR, interactive-stream->character-sets,
+    ;; standard-values->ERROR, vlm-disk-utilities->DISK-ERROR.  See the new
+    ;; check-deferred-flavor-composition gate (cold-diff.lisp) -- the
+    ;; systematic detector for this class.
     "SYS: IO; INPUT-EDITOR" "SYS: IO; ITERATORS" "SYS: SYS2; LET"
     "SYS: SYS; LISPFN" "SYS: SYS; LTOP" "SYS: SYS2; MACLSP"
     "SYS: SYS; MACROEXPAND" "SYS: SYS2; MEMORY-COLD"
     "SYS: EMBEDDING; RPC; OCTET-STRUCTURE-RUNTIME" "SYS: SYS; PACKAGE"
     "SYS: SYS2; PLANE" "SYS: IO; PRINT" "SYS: IO; QIO" "SYS: IO; READ"
     "SYS: IO; READERS" "SYS: SYS2; RESOUR" "SYS: SYS2; SELEV" "SYS: SYS; SORT"
-    "SYS: SYS; STANDARD-VALUES" "SYS: SYS2; STORAGE-CATEGORIES"
+    "SYS: SYS2; STORAGE-CATEGORIES"
+    ;; io/stream IS genuinely cold and was missing (band-audit-proven, and
+    ;; confirmed necessary by check-deferred-flavor-composition: without it
+    ;; the gate FAILs on four deferred CFMs).  The already-cold io/unix-
+    ;; translating-streams.lisp (below) DEFFLAVORs the TCP embedded-network
+    ;; unix-character-stream flavors (8BIT-BINARY-STREAM-ASSOCIATED-UNIX-
+    ;; CHARACTER-{,INPUT,OUTPUT}-STREAM) on components BIDIRECTIONAL-STREAM /
+    ;; UNBUFFERED-LINE-INPUT-MIXIN / LINE-OUTPUT-STREAM-MIXIN -- all
+    ;; DEFFLAVORed only in io/stream.lisp (245/359/429).  Their deferred
+    ;; COMPILE-FLAVOR-METHODS-LOAD-TIME would hit COMPOSE-FLAVOR-COMBINATION's
+    ;; missing-component WARN (fatal pre-banner) without stream's flavors.
+    ;; It occupies its sysdcl main-group slot here (right after storage-
+    ;; categories, before string) -- a hard constraint: stream's DEFFLAVOR-
+    ;; INTERNALs must precede unix-translating-streams' CFMs in deferred
+    ;; order.  (The SI:STREAM/SYNONYM-STREAM banner path via MAKE-SYN-STREAM,
+    ;; cold-load.lisp:553, also lives here, but iofns.lisp:2116's SYNONYM-
+    ;; STREAM DEFFLAVOR is inside a #||...||# block comment and never
+    ;; compiles -- the real driver is the unix-character-stream cluster.)
+    "SYS: IO; STREAM"
     "SYS: SYS2; STRING" "SYS: SYS2; STRUCT-COLD"
     "SYS: IO; UNIX-TRANSLATING-STREAMS" "SYS: SYS; WIRED-EVENT-LOG"
     "SYS: IO; RTC"
@@ -94,7 +125,7 @@
     "SYS: I-SYS; WIRED-SCREEN" "SYS: STORAGE; STORAGE" "SYS: STORAGE; USER-STORAGE"
     "SYS: STORAGE; STACK-WIRING" "SYS: STORAGE; DISK-DRIVER"
     "SYS: STORAGE; USER-DISK-DRIVER" "SYS: STORAGE; EMBEDDED-DISK-DRIVER"
-    "SYS: STORAGE; VLM-DISK-UTILITIES" "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
+    "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
     "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"

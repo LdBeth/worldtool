@@ -2197,9 +2197,20 @@ FIND-METHOD-HOLDER would install over the bridge stub")
                         (let ((gname (vsym-name (second fspec))))
                           (when (string= gname "MAKE-INSTANCE")
                             (incf make-instance-methods))
-                          (when (member gname
-                                        *cold-load-function-stub-names*
-                                        :test #'string=)
+                          ;; A KEYWORD selector (e.g. (FLAVOR:METHOD :BEEP
+                          ;; OUTPUT-STREAM ...) from io/stream) is a message
+                          ;; method: it dispatches through the flavor's method
+                          ;; table and installs NO globally-named generic, so
+                          ;; it cannot conflict with a same-pname bridge stub
+                          ;; (the (BEEP . IGNORE) stub is on the FUNCTION BEEP,
+                          ;; a different symbol from the keyword :BEEP).  Only
+                          ;; non-keyword generics reach INSTALL-GENERIC-FUNCTION.
+                          (when (and (not (equal (canonical-package-name
+                                                  (vsym-package (second fspec)))
+                                                 "KEYWORD"))
+                                     (member gname
+                                             *cold-load-function-stub-names*
+                                             :test #'string=))
                             (let ((problem (deflection-problem
                                             (second fspec) pkg)))
                               (cold-check
@@ -2211,6 +2222,11 @@ stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
                                   "NOTE-SOLITARY-METHOD")
                     (let ((gname (quoted (second form))))
                       (when (and (vsym-p gname)
+                                 ;; Keyword message selectors install no
+                                 ;; globally-named generic (see FDEFINE arm).
+                                 (not (equal (canonical-package-name
+                                              (vsym-package gname))
+                                             "KEYWORD"))
                                  (member (vsym-name gname)
                                          *cold-load-function-stub-names*
                                          :test #'string=))
@@ -2221,12 +2237,15 @@ stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
 stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
                            (vsym-name gname) problem pkg form)))))))))
     ;; Anti-regression against the reverted boot-36 withhold approach:
-    ;; all 7 MAKE-INSTANCE method fdefines (vanilla + 5 useful-streams
-    ;; + hash) must be PRESENT in the deferred list.
-    (cold-check (>= make-instance-methods 7)
+    ;; all 8 MAKE-INSTANCE method fdefines must be PRESENT in the deferred
+    ;; list -- withholding them loses those methods forever (boot-26
+    ;; dribbl precedent).  Boot 38: hash's (MAKE-INSTANCE BASIC-HASH-TABLE)
+    ;; left with the pruned sys2/hash.lisp (-1); io/stream added two
+    ;; (make-instance areg-caching-buffered-{input,output}-stream-mixin
+    ;; :after) (+2).  Contributors: vanilla 1 + useful-streams 5 + stream 2.
+    (cold-check (= make-instance-methods 8)
                 "~D deferred MAKE-INSTANCE method fdefine~:P (expect ~
->= 7: vanilla + 5 useful-streams + basic-hash-table; withholding ~
-loses them)"
+8: vanilla 1 + useful-streams 5 + stream 2; withholding loses them)"
                 make-instance-methods)
     ;; The forged object's 7-Q DEFSTORAGE shape (defgeneric.lisp:75).
     (let ((gf (getf (cold-world-machinery w) :make-instance-generic))
@@ -2276,6 +2295,118 @@ FUNCTION, no COMPRESSED-DEBUGGING-INFO), got ~2,'0X:~8,'0X" tag data))
                                (= data gf))
                           "GF+6 SELECTOR self-pointing cdr-nil, got ~
 ~2,'0X:~8,'0X" tag data)))))))
+
+(defun cold-defflavor-components (w form)
+  "For a deferred (DEFFLAVOR-INTERNAL 'NAME 'IVARS 'COMPONENTS 'OPTIONS NIL)
+form (defflavor.lisp:501), return (values NAME-VMA COMPONENT-VMAS) where
+COMPONENT-VMAS holds the flavor symbol VMAs of the direct component flavors
+plus every flavor named in the :REQUIRED-FLAVORS option.  Resolves symbols
+under the current *COLD-DEFAULT-PACKAGE* binding, mirroring the boot's own
+PARSE-DEFFLAVOR read.  All these symbols were interned when COLD-FINALIZE
+materialized the deferred form, so CDL-VSYM never creates new ones here."
+  (let ((name (quoted (second form)))
+        (components (quoted (fourth form)))
+        (options (quoted (fifth form)))
+        (comp-vmas nil))
+    (dolist (c (and (listp components) components))
+      (when (vsym-p c) (push (cold-vsym w c) comp-vmas)))
+    ;; :REQUIRED-FLAVORS <fl>... adds hard components (compose.lisp:385).
+    (dolist (opt (and (listp options) options))
+      (when (and (consp opt) (vsym-named-p (first opt) "REQUIRED-FLAVORS"))
+        (dolist (rf (rest opt))
+          (when (vsym-p rf) (push (cold-vsym w rf) comp-vmas)))))
+    (values (and (vsym-p name) (cold-vsym w name))
+            (nreverse comp-vmas))))
+
+(defun check-deferred-flavor-composition (w)
+  "M3h boot-38 gate: the systematic detector for pre-banner flavor-
+composition WARNs.  COMPILE-FLAVOR-METHODS-LOAD-TIME calls COMPOSE-FLAVOR-
+COMBINATION (compose.lisp:1066), which WARNs \"the flavor is undefined /
+the components ... could not be fully determined\" whenever any flavor in
+the argument's transitive component graph is not yet defined; any WARN
+pre-banner is fatal (streams unbound until the banner, by design), so a
+CFM whose closure has a hole halts the boot.  This is the class that
+killed boots 30-38, one queued CFM at a time -- boot 38 was hash's
+(EQ-HASH-TABLE ...) on the QLD-only component FCL:HASH-TABLE.
+
+Walks (COLD-WORLD-DEFERRED W) in BOOT order (= its reverse -- COLD-DEFER
+pushes, and CFMs land at each file's tail, so a component's DEFFLAVOR-
+INTERNAL must precede the CFM that composes it).  Tracks a flavor as
+DEFINED when its DEFFLAVOR-INTERNAL form (defflavor.lisp:501) is seen --
+the one deferred head that materializes an explicit run-time flavor object
+(empirically the deferred heads are DEFFLAVOR-INTERNAL / CFM-LOAD-TIME /
+NOTE-SOLITARY-METHOD / FDEFINE / DEFSTRUCT / proclaim / record-source /
+add-init etc.; none but DEFFLAVOR-INTERNAL defines a flavor by name).  At
+each CFM: a flavor with NO DEFFLAVOR-INTERNAL is one the boot's mixture
+machinery auto-composes (compose.lisp:1052 ADDITIONAL-FLAVORS -- e.g.
+useful-streams' BUFFERED-*-COROUTINE/PIPE-STREAM, which appear only in
+their own CFM); it is registered defined and skipped.  Otherwise the
+transitive component+required-flavor closure is walked THROUGH the tracked
+definitions and the check FAILs naming the CFM flavor and the first
+undefined component.  Bare cold-checks: failures land in check-cold-emit's
+block (check-plist-value-cells precedent)."
+  (let ((defined (make-hash-table)))       ; flavor-vma -> component-vma list
+    (flet ((flavor-pname (vma)
+             ;; Best-effort human name for a flavor VMA (already interned).
+             ;; NIL-safe: cold-check evaluates its message args eagerly even
+             ;; on the passing (missing = NIL) path.
+             (cond ((null vma) "none")
+                   ((cold-symbol-pname-at w vma))
+                   (t (format nil "#x~8,'0X" vma)))))
+      (loop for (pkg . form) in (reverse (cold-world-deferred w))
+            when (and (consp form) (vsym-p (first form)))
+              do (let ((*cold-default-package* pkg)
+                       (head (vsym-name (first form))))
+                   (cond
+                     ((string= head "DEFFLAVOR-INTERNAL")
+                      (multiple-value-bind (name comps)
+                          (cold-defflavor-components w form)
+                        (when name (setf (gethash name defined) comps))))
+                     ((string= head "COMPILE-FLAVOR-METHODS-LOAD-TIME")
+                      (let ((fv (let ((fn (quoted (second form))))
+                                  (and (vsym-p fn) (cold-vsym w fn)))))
+                        (when fv
+                          (multiple-value-bind (comps defp)
+                              (gethash fv defined)
+                            (cond
+                              ((not defp)
+                               ;; No DEFFLAVOR-INTERNAL for FV: it is a flavor
+                               ;; the boot's mixture machinery auto-composes
+                               ;; (compose.lisp:1052 ADDITIONAL-FLAVORS; e.g.
+                               ;; useful-streams' BUFFERED-*-COROUTINE/PIPE-
+                               ;; STREAM combinations, which appear ONLY in
+                               ;; their own CFM).  Its ingredients cannot be
+                               ;; enumerated from the deferred stream and are
+                               ;; covered by the primary flavor's tracked
+                               ;; DEFFLAVOR; register it defined so dependents
+                               ;; resolve and skip the closure check.
+                               (setf (gethash fv defined) nil))
+                              (t
+                               ;; FV is a real DEFFLAVOR: BFS its transitive
+                               ;; component closure and report the first
+                               ;; component undefined at this boot point.
+                               (let ((seen (make-hash-table))
+                                     (work (copy-list comps))
+                                     (missing nil))
+                                 (dolist (c comps) (setf (gethash c seen) t))
+                                 (loop while (and work (null missing))
+                                       for node = (pop work)
+                                       do (multiple-value-bind (ncomps ndefp)
+                                              (gethash node defined)
+                                            (if (not ndefp)
+                                                (setf missing node)
+                                                (dolist (c ncomps)
+                                                  (unless (gethash c seen)
+                                                    (setf (gethash c seen) t)
+                                                    (push c work))))))
+                                 (cold-check
+                                  (null missing)
+                                  "deferred COMPILE-FLAVOR-METHODS-LOAD-TIME ~
+of ~A (~A) composes undefined component ~A -- COMPOSE-FLAVOR-COMBINATION ~
+WARNs fatally pre-banner"
+                                  (flavor-pname fv) pkg
+                                  (flavor-pname missing))))))))))))))
+  t)
 
 (defun check-linked-symbol-cells (w)
   "M3h gate: SI:*LINKED-SYMBOL-CELLS* carries the (from to type) records
@@ -2953,6 +3084,13 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "DYNAMIC-WINDOWS:*ACCEPT-ACTIVE*"
     "DYNAMIC-WINDOWS:*ACCEPT-BLIP-CHARS*"
     "DYNAMIC-WINDOWS:*ACCEPT-HELP*"
+    ;; Boot 38 (new with io/stream): the &KEY default form (CHECK-TYPE
+    ;; DW::*PRESENT-CHECKS-TYPE*) on stream.lisp:224,233 PRESENT entry
+    ;; points.  A default arg is evaluated only when the presentation call
+    ;; omits :CHECK-TYPE -- and PRESENT never runs pre-banner; DW::*PRESENT-
+    ;; CHECKS-TYPE* is (DEFVAR ... NIL) in dynamic-windows/dynamic-window-
+    ;; flavors.lisp:57, bound when that warm file loads.  Never read unbound.
+    "DYNAMIC-WINDOWS:*PRESENT-CHECKS-TYPE*"
     "FORMAT:*COMMON-LISP-FORMAT*"
     "FUTURE-COMMON-LISP:CONDITION"
     "GLOBAL:PKG-GLOBAL-PACKAGE"
@@ -3033,6 +3171,13 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "SYSTEM-INTERNALS:*QLD-MESSAGES*"
     "SYSTEM-INTERNALS:*READ-CIRCULARITY-UNRESOLVED-LABELS*"
     "SYSTEM-INTERNALS:*READ-CIRCULARITY*"
+    ;; Boot 38 (newly unbound: its (DEFVAR-RESETTABLE ... NIL) init lived in
+    ;; the pruned sys/standard-values.lisp:213).  Its sole cold referencer is
+    ;; BREAK-INTERNAL (command-loop.lisp:463), which LET-BINDS it to NIL
+    ;; (never reads it unbound) and runs only in the post-banner break loop;
+    ;; DEFVAR-RESETTABLE also registered it in *WARM-BOOT-BINDINGS* and
+    ;; standard-values reloads warm (QLD) to bind it NIL.  Never read unbound.
+    "SYSTEM-INTERNALS:*REMEMBERED-BINDING-WARNINGS*"
     "SYSTEM-INTERNALS:*RESCAN-STATE*"
     "SYSTEM-INTERNALS:*SCAVENGE-IN-PROGRESS*"
     "SYSTEM-INTERNALS:*SCL-PACKAGE*"
@@ -3064,7 +3209,8 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "SYSTEM-INTERNALS:PKG-NETWORK-PACKAGE"
     "SYSTEM-INTERNALS:PKG-SYSTEM-INTERNALS-PACKAGE"
     "SYSTEM-INTERNALS:PKG-USER-PACKAGE"
-    "SYSTEM-INTERNALS:REHASH-THESE-HASH-TABLES-BEFORE-COLD"
+    ;; REHASH-THESE-HASH-TABLES-BEFORE-COLD removed boot 38: its only
+    ;; referencer was the pruned sys2/hash.lisp (QLD, not cold).
     "SYSTEM-INTERNALS:SETSYNTAX-FUNCTION"
     "SYSTEM-INTERNALS:SETSYNTAX-SHARP-MACRO-CHARACTER"
     "SYSTEM-INTERNALS:SETSYNTAX-SHARP-MACRO-FUNCTION"
@@ -3089,7 +3235,8 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "TV:*CURRENT-PROGRESS-NOTE*"
     "TV:*FORCIBLY-SHOW-PROGRESS-NOTES*"
     "TV:KBD-LAST-ACTIVITY-TIME"
-    "TV:MAIN-SCREEN"
+    ;; TV:MAIN-SCREEN removed boot 38: its only cold referencer was the
+    ;; pruned io/interactive-stream.lisp; no longer referenced-unbound.
     "TV:WHO-LINE-RUN-LIGHT-LOC"
     "TV:WHO-LINE-RUN-STATE"
     "TV:WHO-LINE-RUN-STATE-SHEET"
@@ -3191,6 +3338,11 @@ prints the R1 unbound-function-cell audit."
         ;; deflects off the forged GF instead of driving INSTALL-GENERIC-
         ;; FUNCTION's redefinition query pre-banner (M3h boot 36).
         (check-method-generic-stub-conflicts w)
+        ;; No deferred COMPILE-FLAVOR-METHODS-LOAD-TIME composes a flavor
+        ;; whose transitive component closure has an undefined hole at that
+        ;; point in the boot order -- COMPOSE-FLAVOR-COMBINATION would WARN,
+        ;; fatal pre-banner (M3h boot 38, the systematic detector).
+        (check-deferred-flavor-composition w)
         (check-pass1-fspec-handlers w)
         ;; The flavor completion-table inits hoisted ahead of the first
         ;; deferred DEFFLAVOR-INTERNAL (M3h boot 33).
