@@ -160,8 +160,15 @@ on the host side by subtracting the QLD alists."
 ;;; UNEXPECTED-TRAP-HANDLER catch-all that fills every trap vector the
 ;;; cold set doesn't set explicitly (the 26:F8048DBB filler in the
 ;;; distribution world's trap page).
+;;; COMPILER;INNER: "parts of the compiler needed early on in system
+;;; building" -- 16/17 defuns are cold-band (882) in the distribution.
+;;; Found post-M3h: PRINT-LOCATIVE (io/print.lisp:2029) calls
+;;; COMPILER:DISASSEMBLE-DECODE-LOCATIVE for every locative it prints,
+;;; so without it the cold trap handler's "referencing ~S" recursed to
+;;; a halt on every post-banner error report.
 (defparameter *cold-set-late-found-files*
-  '("SYS: SYS; LISP-DATABASE-COLD" "SYS: DEBUGGER; ITRAP-DISPATCH"))
+  '("SYS: SYS; LISP-DATABASE-COLD" "SYS: DEBUGGER; ITRAP-DISPATCH"
+    "SYS: COMPILER; INNER"))
 
 (defun m2-compile-cold-set ()
   "Compile the SI-subsystem cold-load candidates the alist pass missed."

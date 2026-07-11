@@ -1027,14 +1027,25 @@ for the deferred forms."
     ;; obsolete METHOD-COMBINATION-METHOD-TRANSFORMER indicator before
     ;; each (:PROPERTY key METHOD-COMBINATION) fdefine: redefinition
     ;; hygiene, never set in a fresh world, boot no-op.
-    "REMPROP")
+    "REMPROP"
+    ;; compiler/inner.lisp joined the cold set (post-M3h): these were
+    ;; *cold-noop-heads* while their owner was warm-only; now they run
+    ;; for real, like the stock cold load did (plist / style-checker
+    ;; fspec bookkeeping).
+    "MAKE-OBSOLETE-1" "MAKE-MESSAGE-OBSOLETE" "DELETE-TRANSFORMER-INTERNAL")
   "Heads whose owners are cold files or cold-load stubs: safe to evaluate
 verbatim at first boot, before the banner.  PROCLAIM lives in
 SYS:SYS;LISP-DATABASE-COLD -- which the distribution cold load contained
 and the M2 file list must gain (see plan).")
 
 (defparameter *cold-guarded-heads*
-  '("ADD-OPTIMIZER-INTERNAL"
+  '(;; compiler/inner.lisp joined the cold set (post-M3h), so the
+    ;; FBOUNDP guards on these three now pass at first boot (fcells
+    ;; are stamped at build time) and the registrations run for real,
+    ;; as in the stock cold load.  They stay guarded rather than
+    ;; deferred so a future re-prune of INNER degrades silently
+    ;; instead of trapping.
+    "ADD-OPTIMIZER-INTERNAL"
     ;; seqfns' FILL-FAST-OPTIMIZER registration (M3h boot 32): same
     ;; compiler-owned class as ADD-OPTIMIZER-INTERNAL.
     "ADD-COMPILE-ONLY-OPTIMIZER-INTERNAL"
@@ -1043,15 +1054,17 @@ and the M2 file list must gain (see plan).")
     "ADD-PROMPT-AND-READ-KEYWORD"
     ;; CLI:INTERNAL deftype records (octet-structure): owner is CLCP.
     "START-DEFTYPE-DEFINITION" "FINISH-DEFTYPE-DEFINITION")
-  "Heads owned by QLD-era systems (flavors, compiler, LOOP, CLCP io):
-deferred behind (IF (FBOUNDP ...)) so first boot skips them silently.
-Their registrations are re-established when the owning system loads --
-KNOWN GAP for anything QLD does not reload; tracked in the plan.")
+  "Heads deferred behind (IF (FBOUNDP ...)): they run at first boot when
+their owner is cold (compiler/inner.lisp) and skip silently when the
+owner is QLD-era (LOOP, CLCP io).  Skipped registrations are
+re-established when the owning system loads -- KNOWN GAP for anything
+QLD does not reload; tracked in the plan.")
 
 (defparameter *cold-noop-heads*
-  '("MAKE-OBSOLETE-1" "MAKE-MESSAGE-OBSOLETE" "DELETE-TRANSFORMER-INTERNAL")
-  "Development-environment style-checker bookkeeping; their functions are
-compiler-side and have no cold definition or boot effect.")
+  '()
+  "Heads dropped at build time with no boot effect.  Emptied post-M3h:
+the style-checker/obsolete bookkeeping trio moved to the deferred class
+when their owner compiler/inner.lisp joined the cold set.")
 
 (defun cold-eval-toplevel (w form)
   (let ((head (form-head-name form))

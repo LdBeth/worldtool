@@ -26,6 +26,21 @@
     "SYS: METERING; METERING-COLD" "SYS: METERING; METERING-MACROS"
     "SYS: I-SYS; BLOCK-FUNCTIONS" "SYS: SYS; AARRAY" "SYS: SYS2; ADVISE"
     "SYS: SYS; COLD-LOAD" "SYS: SYS; COMMAND-LOOP" "SYS: SYS; EXPAND-DO"
+    ;; Post-M3h: "parts of the compiler needed early on in system
+    ;; building" -- band roster 16/17 defuns 882-cold in the dist (the
+    ;; 17th, DISASSEMBLE-DECODE-LOCATIVE, is 882 by hand: fcell
+    ;; 05->88213FBF).  PRINT-LOCATIVE (io/print.lisp:2029) calls
+    ;; DISASSEMBLE-DECODE-LOCATIVE for every locative it prints, so
+    ;; every post-banner error report ("... referencing ~S") recursed
+    ;; on its unbound fcell to an AUX-HALT.  CONSTANT-FORM-P is "called
+    ;; by the debugger & flavors, so must be loaded early" -- before
+    ;; the FLAVOR block.  Runtime deps verified: the
+    ;; *SYSTEM-SYMBOL-CELL-TABLE* pair is SETQ'd by cold
+    ;; BOOTSTRAP-FORWARD-SYMBOL-CELLS, LT:NAMED-CONSTANT-P is the boot
+    ;; FSET stub NAMED-CONSTANT-P-COLD (cold-load.lisp:220).  No vbin
+    ;; ships; the user compiles it (m2-compile
+    ;; *cold-set-late-found-files*).
+    "SYS: COMPILER; INNER"
     ;; Inner flavor runtime (M3h boot 26).  Pass 1 of
     ;; BOOTSTRAP-FORWARD-SYMBOL-CELLS FDEFINEDPs every walked CCA name;
     ;; method-family names validate through (GET head
