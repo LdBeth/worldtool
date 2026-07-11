@@ -1032,7 +1032,11 @@ for the deferred forms."
     ;; *cold-noop-heads* while their owner was warm-only; now they run
     ;; for real, like the stock cold load did (plist / style-checker
     ;; fspec bookkeeping).
-    "MAKE-OBSOLETE-1" "MAKE-MESSAGE-OBSOLETE" "DELETE-TRANSFORMER-INTERNAL")
+    "MAKE-OBSOLETE-1" "MAKE-MESSAGE-OBSOLETE" "DELETE-TRANSFORMER-INTERNAL"
+    ;; bignum.lisp:2388 top-level (SETUP-BOOLE-OP-SWAP) fills the
+    ;; BOOLE-OP-SWAP art-4b array whose defvar MAKE-ARRAY init is
+    ;; itself deferred just before it; owner is cold (post-M3h).
+    "SETUP-BOOLE-OP-SWAP")
   "Heads whose owners are cold files or cold-load stubs: safe to evaluate
 verbatim at first boot, before the banner.  PROCLAIM lives in
 SYS:SYS;LISP-DATABASE-COLD -- which the distribution cold load contained

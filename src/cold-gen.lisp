@@ -155,6 +155,19 @@
     ;; DEFINE-INSTRUCTION-EXCEPTION-HANDLERs ride the same trap-vector
     ;; machinery as ISTACK/LARITH.
     "SYS: I-SYS; FLOAT"
+    ;; Post-M3h: the generic-arithmetic layer.  All four are in
+    ;; INNER-SYSTEM-FILE-ALIST (mini-alists.lisp:113-117), so their
+    ;; dist fcell bands are QLD-reload artifacts (0x822) -- the oracle's
+    ;; known blind spot; reachability decides.  Reading ANY float at
+    ;; the cold REPL runs XR-READ-FLONUM -> ZL:FLOAT -> FLOAT-RATIONAL
+    ;; (rat.lisp) -> bignum consing for long fractions (bignum.lisp);
+    ;; generic dispatch and the rest of the pre-QLD number surface are
+    ;; numer/lnumer.  LARITH already referenced the BIGNUM-* family
+    ;; (long-standing R1 rows).  bignum.lisp's one live eager init
+    ;; ("Initialize FPA" :WARM :NOW -> CLI::INITIALIZE-W3X64) is
+    ;; #+VLM NIL -- a no-op in vbins compiled on the VLM.  Vbins ship.
+    "SYS: SYS2; BIGNUM" "SYS: SYS2; RAT" "SYS: SYS2; NUMER"
+    "SYS: SYS2; LNUMER"
     ;; Boot 43: SYS2; DOUBLE and its cluster sibling SYS2; COMPLEX removed.
     ;; DOUBLE carries an eager top-level (ADD-INITIALIZATION "Make
     ;; *DFLOAT-AND-SCALE-TABLE*" '(setq *dfloat-and-scale-table*
@@ -172,6 +185,19 @@
     ;; definitions) so no deferred COMPILE-FLAVOR-METHODS coupling.  See the
     ;; new check-eager-initialization-callees gate (cold-diff.lisp).
     "SYS: SYS; WIRED" "SYS: DEBUGGER; ITRAP-DISPATCH"
+    ;; Post-M3h: the crude cold debugger the banner itself advertises
+    ;; ("Use (DBG:EMERGENCY-DEBUGGER) to do crude debugging" is PRINC'd
+    ;; by cold-load.lisp:569).  In INNER-SYSTEM-FILE-ALIST
+    ;; (mini-alists.lisp:95, ";Get a debugger as early as possible"),
+    ;; so its QLD-band fcells are reload artifacts; the file is all
+    ;; COLD-* frame walkers and plain defvars.  FRAME-SUPPORT
+    ;; (mini-alists.lisp:137) owns its backtrace core
+    ;; (SPARTAN-FRAME-FUNCTION / BOTTOM-FRAME-P) and loads first.
+    ;; PROCEED-TYPES-on-a-condition / DOCUMENT-PROCEED-TYPE / PROCEED
+    ;; stay warm: the m-P and c-m-H commands need the condition
+    ;; system, pre-QLD they print a readable unbound error -- stock
+    ;; behavior.  Both vbins ship.
+    "SYS: DEBUGGER; FRAME-SUPPORT" "SYS: DEBUGGER; MINI-DEBUGGER"
     ;; The compiled error tables (COMPILE-ERROR-TABLES output; original
     ;; *TRAP-DISPATCH-TABLE-FILE*): SETQs of DBG:*TRAP-DISPATCH-TABLES* /
     ;; *TRAP-ON-EXIT-MICROSTATES* / *TRAP-DISPATCH-TABLE-VERSIONS*, which

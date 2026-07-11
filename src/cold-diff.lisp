@@ -3575,6 +3575,22 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
 (defparameter *cold-reviewed-unbound-value-cells*
   '(
     "CLOS-INTERNALS:*DECL-TYPES-INHERITED-FROM-METHOD*"
+    ;; frame-support.lisp (post-M3h): every read is BOUNDP-guarded
+    ;; ((when (and (boundp '*stack-frame-array*) ...) at 176;
+    ;; frame-array-index cache at 390/408).
+    "DEBUGGER:*FRAME-ARRAY-INDEX-CACHED-FRAME*"
+    "DEBUGGER:*FRAME-ARRAY-INDEX-CACHED-INDEX*"
+    "DEBUGGER:*STACK-FRAME-ARRAY*"
+    ;; mini-debugger.lisp:58-68 (post-M3h): argless (DEFVAR v) frame
+    ;; cursors.  EMERGENCY-DEBUGGER / DESCRIBE-ERROR SETQ them from the
+    ;; trap state before any reader (cold-backtrace etc.) runs; never
+    ;; read unbound.
+    "DEBUGGER:*COLD-FRAME*"
+    "DEBUGGER:*COLD-INITIAL-FRAME*"
+    "DEBUGGER:*COLD-NEXT-FRAME*"
+    "DEBUGGER:*COLD-NEXT-INITIAL-FRAME*"
+    "DEBUGGER:*COLD-NEXT-NEXT-FRAME*"
+    "DEBUGGER:*COLD-NEXT-NEXT-INITIAL-FRAME*"
     ;; Flavor runtime (M3h boot 26): argless (DEFVAR v) dynamic
     ;; bindings.  *TRANSFORM-FLAVOR-WARNINGS* is LET-bound by its own
     ;; wrapper macro (defflavor.lisp:390); the three *COMBINED-METHOD-*
