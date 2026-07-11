@@ -126,7 +126,7 @@ returns that value."
 ;;; store NIL and queue a first-boot patch of the stored Q.
 
 (defparameter *cold-patch-value-heads*
-  '("FIND-RESOURCE" "FIND-GENERIC-FUNCTION-AS-CONSTANT"
+  '("FIND-GENERIC-FUNCTION-AS-CONSTANT"
     "LOAD-TIME-FIND-FLAVOR"
     "DEFSELECT-CONS-WHICH-OPERATIONS")
   "Value forms whose result can only be computed at run time; the Q gets
@@ -173,6 +173,53 @@ it pre-built (array header 43:C0800002 at #xF0003597, structs
             (let ((vma (cold-array w cache "SAFEGUARDED-OBJECTS-AREA")))
               (cold-set-symbol-value w var (tag 0 (cold-dtp w "ARRAY")) vma)
               vma))))))
+
+(defun cold-find-resource-marker (w)
+  "VMA of the uninterned SI:*COLD-FIND-RESOURCE-MARKER* symbol, creating
+and stamping it on first use.  resour.lisp:1052 -- (DEFVAR
+SI:*COLD-FIND-RESOURCE-MARKER*) ;filled in by cold-load generator -- is an
+explicit generator obligation, the FIND-RESOURCE sibling of the boot-28
+generic-function marker.  BOOTSTRAP-RESOURCE-REFERENCES (resour.lisp:1054)
+runs unconditionally at boot -- resour is cold and its (:ONCE)
+ADD-INITIALIZATION EVALs the form the instant it registers (WHEN=FIRST,
+fresh flag, ltop.lisp:363-366) -- MAP-COMPILED-FUNCTIONS-walking constants,
+EQ-testing (FIRST VAL) against this marker and SETFing the location to
+\(FIND-RESOURCE (SECOND VAL)).  Dist value: an uninterned symbol named
+COLD-FIND-RESOURCE-MARKER (mirror of FIND-GENERIC-FUNCTION-AS-CONSTANT-COLD,
+cold-load.lisp:411).  The same uninterned symbol is reused as the FIRST of
+every (marker name) constant, so cache it in the symbol's own value cell."
+  (let ((var (si-vsym "*COLD-FIND-RESOURCE-MARKER*")))
+    (multiple-value-bind (tag data boundp) (cold-symbol-value-q w var)
+      (declare (ignore tag))
+      (if boundp
+          data
+          (let ((marker (cold-symbol w "COLD-FIND-RESOURCE-MARKER" nil)))
+            (cold-set-symbol-value w var (tag 0 (cold-dtp w "SYMBOL")) marker)
+            marker)))))
+
+(defun cold-find-resource-constant (w name-form)
+  "The 2-Q (marker name) LIST standing in for a (FIND-RESOURCE 'name)
+compiled constant (resour.lisp:232 :FASD-FORM).  There is NO FIND-RESOURCE
+FSET stub (unlike FIND-GENERIC-FUNCTION-AS-CONSTANT, cold-load.lisp:203) --
+the real FIND-RESOURCE runs at boot and never yields a marker list -- so
+the genuine cold-load generator built the marker list itself at load time,
+which is what we do here.  BOOTSTRAP-RESOURCE-REFERENCES snaps it to
+\(FIND-RESOURCE name); RESOUR loads before io/stream's DEFRESOUREs, so at
+that instant the resource is undefined and FIND-RESOURCE mints a dummy --
+but the later DEFRESOURCE mutates that same object in place (INITIALIZE-
+RESOURCE's redefine branch, resour.lisp:506), preserving identity.  Cdr-
+coded like %LIST-n, in a LIST-representation area (M3h boot 34)."
+  (let ((name (quoted name-form)))
+    (unless (vsym-p name)
+      (error "FIND-RESOURCE constant name not a symbol: ~S" name-form))
+    (let* ((marker (cold-find-resource-marker w))
+           (name-vma (cold-vsym w name))
+           (dtp-symbol (cold-dtp w "SYMBOL"))
+           (vma (cold-alloc w "WORKING-STORAGE-AREA" 2 :list)))
+      (cw-set w vma (logior (ash +cdr-next+ 6) dtp-symbol) marker)
+      (cw-set w (1+ vma) (logior (ash +cdr-nil+ 6) dtp-symbol) name-vma)
+      (push (cons vma name-vma) (cold-world-find-resource-sites w))
+      (values (tag 0 (cold-dtp w "LIST")) vma))))
 
 (defun cold-eval-value (w form &key (area "PERMANENT-STORAGE-AREA"))
   (typecase form
@@ -320,6 +367,14 @@ it pre-built (array header 43:C0800002 at #xF0003597, structs
               (error "Unsupported MAKE-MOUSE-CHAR form ~S" form))
             (cw-ref w (+ (cold-mouse-char-cache w)
                          8 (* button 32) bits))))
+         ((string= head "FIND-RESOURCE")
+          ;; A resource used as a compiled constant fasdumps as
+          ;; (FIND-RESOURCE 'name); the generator replaces it with the
+          ;; (marker name) list BOOTSTRAP-RESOURCE-REFERENCES snaps at boot
+          ;; (M3h boot 41).  NOT a first-boot patch: the real FIND-RESOURCE
+          ;; would mint a resource object, not the marker list, and would
+          ;; never feed the boot walker.
+          (cold-find-resource-constant w (first args)))
          ((member head *cold-patch-value-heads* :test #'string=)
           (values nil :patch))
          (t (values nil :defer)))))
@@ -1240,6 +1295,12 @@ collected into *COLD-EVAL-STATS* under \"fixup failures\")."
             (var (cold-symbol w "*COLD-FIND-GENERIC-FUNCTION-MARKER*"
                               "SYSTEM-INTERNALS")))
         (cw-set w (1+ var) (tag 0 (cold-dtp w "SYMBOL")) marker))
+      ;; SI:*COLD-FIND-RESOURCE-MARKER* (resour.lisp:1052): stamp
+      ;; unconditionally.  BOOTSTRAP-RESOURCE-REFERENCES always runs
+      ;; (resour cold, :ONCE ADD-INITIALIZATION EVALs on registration) and
+      ;; reads the marker even when no FIND-RESOURCE constant forced it into
+      ;; existence during the vbin load above (M3h boot 41).
+      (cold-find-resource-marker w)
       ;; Late-bound references: retry until quiescent.
       (let ((failures 0))
         (loop repeat 4

@@ -94,7 +94,13 @@
   ;; MAKE-INSTANCE-COLD marker (cold-load.lisp:404): instances in the cold
   ;; world are (marker flavor . init-plist) lists until
   ;; DBG:BOOTSTRAP-FASD-INSTANCES rebuilds them.  Created lazily.
-  (instance-marker 0))
+  (instance-marker 0)
+  ;; SI:*COLD-FIND-RESOURCE-MARKER* (resour.lisp:1052, "filled in by
+  ;; cold-load generator"): a (FIND-RESOURCE 'name) compiled constant
+  ;; becomes a 2-Q (marker name) LIST at load time, snapped by
+  ;; BOOTSTRAP-RESOURCE-REFERENCES at boot.  Each list vma is recorded
+  ;; here so check-cold-markers can verify FIRST = the marker (M3h boot 41).
+  (find-resource-sites nil))
 
 ;;; Layout shorthands
 

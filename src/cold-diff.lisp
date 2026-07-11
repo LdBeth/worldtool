@@ -643,6 +643,50 @@ got #x~8,'0X" button bits shd))
                                            :test #'string=)))
                          "no first-boot mouse-char patch: ~S" form))))
 
+(defun check-cold-markers (w)
+  "M3h boot-28/41 gate: both cold-load-generator marker DEFVARs --
+*COLD-FIND-GENERIC-FUNCTION-MARKER* (cold-load.lisp:409) and
+*COLD-FIND-RESOURCE-MARKER* (resour.lisp:1052) -- are bound to UNINTERNED
+DTP-SYMBOLs (home package NIL).  Adopting the (marker name) constant
+convention for FIND-RESOURCE, every recorded compiled constant is a 2-Q
+cdr-coded LIST whose FIRST is the resource marker and SECOND the resource
+name -- exactly what BOOTSTRAP-RESOURCE-REFERENCES (resour.lisp:1054)
+EQ-tests and snaps to (FIND-RESOURCE name) at boot."
+  (let ((dtp-symbol (cold-dtp w "SYMBOL"))
+        (nil-vma (cold-world-nil-vma w)))
+    (flet ((marker-vma (name)
+             (multiple-value-bind (tag data boundp)
+                 (cold-symbol-value-q w (si-vsym name))
+               (cold-check (and boundp (= (tag-type tag) dtp-symbol))
+                           "~A bound to a DTP-SYMBOL" name)
+               (when (and boundp (= (tag-type tag) dtp-symbol))
+                 ;; Uninterned: the symbol block's package cell (block+4) is
+                 ;; NIL, not a package-name STRING (cold-symbol, else branch).
+                 (multiple-value-bind (pt pd) (cw-ref w (+ data 4))
+                   (declare (ignore pt))
+                   (cold-check (= pd nil-vma)
+                               "~A value is UNINTERNED (home NIL)" name)))
+               (and boundp (= (tag-type tag) dtp-symbol) data))))
+      (marker-vma "*COLD-FIND-GENERIC-FUNCTION-MARKER*")
+      (let ((rmarker (marker-vma "*COLD-FIND-RESOURCE-MARKER*"))
+            (sites (cold-world-find-resource-sites w)))
+        (cold-check (plusp (length sites))
+                    "at least one (FIND-RESOURCE 'name) marker constant built ~
+(io/stream THIN/FAT-STRING-BUFFER); got ~D" (length sites))
+        (when rmarker
+          (dolist (site sites)
+            (destructuring-bind (list-vma . name-vma) site
+              (multiple-value-bind (ft fd) (cw-ref w list-vma)
+                (cold-check (and (= (tag-type ft) dtp-symbol) (= fd rmarker))
+                            "FIND-RESOURCE list #x~X FIRST is the marker"
+                            list-vma))
+              (multiple-value-bind (st sd) (cw-ref w (1+ list-vma))
+                (cold-check (and (= (tag-type st) dtp-symbol) (= sd name-vma))
+                            "FIND-RESOURCE list #x~X SECOND is the resource name"
+                            list-vma)))))
+        (format t "  ~D FIND-RESOURCE marker constant~:P~%"
+                (length sites))))))
+
 (defun check-record-definition-kludge (w)
   "M3h boot-30 gate: simulate the interim kludge in
 RECORD-DEFINITION-SOURCE-FILE (fspec.lisp:718) over every deferred call
@@ -3456,6 +3500,10 @@ prints the R1 unbound-function-cell audit."
         ;; deflects off the forged GF instead of driving INSTALL-GENERIC-
         ;; FUNCTION's redefinition query pre-banner (M3h boot 36).
         (check-method-generic-stub-conflicts w)
+        ;; Both cold-load-generator marker DEFVARs bound to uninterned
+        ;; symbols, and every FIND-RESOURCE compiled constant a (marker
+        ;; name) list BOOTSTRAP-RESOURCE-REFERENCES snaps (M3h boot 41).
+        (check-cold-markers w)
         ;; No deferred COMPILE-FLAVOR-METHODS-LOAD-TIME composes a flavor
         ;; whose transitive component closure has an undefined hole at that
         ;; point in the boot order -- COMPOSE-FLAVOR-COMBINATION would WARN,
