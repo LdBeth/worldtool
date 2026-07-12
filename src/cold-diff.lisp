@@ -3899,6 +3899,15 @@ prints the R1 unbound-function-cell audit."
         ;; symbols, and every FIND-RESOURCE compiled constant a (marker
         ;; name) list BOOTSTRAP-RESOURCE-REFERENCES snaps (M3h boot 41).
         (check-cold-markers w)
+        ;; HALT's unguarded CLI:*CONSOLES* read (post-M3h issue 6):
+        ;; stamped NIL by cold-stamp-storage-values in lieu of the QLD
+        ;; console flavor stack.
+        (multiple-value-bind (tag data boundp)
+            (cold-symbol-value-q
+             w (make-vsym "COMMON-LISP-INTERNALS" "*CONSOLES*"))
+          (cold-check (and boundp (= data (cold-world-nil-vma w)))
+                      "CLI:*CONSOLES* stamped NIL for HALT ~
+(got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
         ;; No deferred COMPILE-FLAVOR-METHODS-LOAD-TIME composes a flavor
         ;; whose transitive component closure has an undefined hole at that
         ;; point in the boot order -- COMPOSE-FLAVOR-COMBINATION would WARN,

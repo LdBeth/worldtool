@@ -690,6 +690,18 @@ wired-table forwards, so they land in the comm slots or wired cells."
            w (make-vsym "SYSTEM" "*DEFAULT-FLOAT-OPERATING-MODE*"))
         (stamp "SYSTEM" "FLOAT-OPERATING-MODE" fixnum
                (if (and boundp (= (tag-type tag) fixnum)) data #x6C000000)))
+      ;; HALT (storage/user-storage.lisp:444) reads CLI:*CONSOLES*
+      ;; unguarded under WITHOUT-INTERRUPTS before halting -- the
+      ;; mini-debugger's c-H trapped on it (post-M3h issue 6).  The
+      ;; owner sys/console.lisp ((DEFVAR *CONSOLES* NIL), :113) is the
+      ;; 50KB TV console flavor stack, QLD territory
+      ;; (mini-alists.lisp:139) nothing else pre-banner needs; the
+      ;; dist's saved value is NIL too.  Stamp the defvar's own initial
+      ;; value instead of pulling the flavor stack cold.  (Second
+      ;; R2-audit blind-spot instance, after *DATA-TYPE-NAME*.)
+      (multiple-value-bind (ntag ndata) (cold-nil-q w)
+        (cold-set-symbol-value
+         w (make-vsym "COMMON-LISP-INTERNALS" "*CONSOLES*") ntag ndata))
       ;; Reserved-region identities (storage.lisp:249; nothing in the
       ;; sources sets these -- generator contract).  initialize-storage-
       ;; globals resets PAGE-TABLE-AREA's free pointer through them and
