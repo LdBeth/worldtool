@@ -3575,6 +3575,20 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
 (defparameter *cold-reviewed-unbound-value-cells*
   '(
     "CLOS-INTERNALS:*DECL-TYPES-INHERITED-FROM-METHOD*"
+    ;; defs.lisp (post-M3h): the full debugger's dynamic state --
+    ;; unbound BY DESIGN (RESET-DEBUGGER-VARIABLES, defs.lisp:283-296,
+    ;; MAKUNBOUNDs exactly these), LET-bound by the debugger's binding
+    ;; lists (defs.lisp:255-281) before any reader runs; the
+    ;; mini-debugger uses the spartan-* paths precisely to avoid them.
+    "DEBUGGER:*CURRENT-FRAME*"
+    "DEBUGGER:*CURRENT-LANGUAGE*"
+    "DEBUGGER:*ERROR*"
+    "DEBUGGER:*FRAME*"
+    "DEBUGGER:*INNERMOST-INTERESTING-FRAME*"
+    "DEBUGGER:*INNERMOST-VISIBLE-FRAME*"
+    "DEBUGGER:OLD-STANDARD-INPUT"
+    "DEBUGGER:OLD-STANDARD-OUTPUT"
+    "DEBUGGER:OLD-TERMINAL-IO"
     ;; frame-support.lisp (post-M3h): every read is BOUNDP-guarded
     ;; ((when (and (boundp '*stack-frame-array*) ...) at 176;
     ;; frame-array-index cache at 390/408).

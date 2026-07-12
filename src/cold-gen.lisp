@@ -197,6 +197,14 @@
     ;; stay warm: the m-P and c-m-H commands need the condition
     ;; system, pre-QLD they print a readable unbound error -- stock
     ;; behavior.  Both vbins ship.
+    ;; DEBUGGER;DEFS (mini-alists.lisp:94, directly above
+    ;; MINI-DEBUGGER): the debugger specials the mini-debugger reads --
+    ;; EMERGENCY-DEBUGGER-1's first form is (OR *DEBUG-IO-OVERRIDE*
+    ;; ...), defvar'd NIL at defs.lisp:146, which trapped unbound at
+    ;; the first live (DBG:EMERGENCY-DEBUGGER).  Plain
+    ;; defvar/defconst/defmacro file; its one ADD-INITIALIZATION is
+    ;; :WARM-only (not eager).  Vbin ships.
+    "SYS: DEBUGGER; DEFS"
     "SYS: DEBUGGER; FRAME-SUPPORT" "SYS: DEBUGGER; MINI-DEBUGGER"
     ;; The compiled error tables (COMPILE-ERROR-TABLES output; original
     ;; *TRAP-DISPATCH-TABLE-FILE*): SETQs of DBG:*TRAP-DISPATCH-TABLES* /
