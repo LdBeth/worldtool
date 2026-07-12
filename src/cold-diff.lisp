@@ -4074,9 +4074,7 @@ number of failed stages (0 = success)."
       (unless (check-materializers w2)
         (incf failures))
       (when sysdir
-        (setup-sys-host (if (char= (char sysdir (1- (length sysdir))) #\/)
-                            sysdir
-                            (concatenate 'string sysdir "/")))
+        (setup-sys-host sysdir)
         (format t "~&package graph: ~D pkgdcl packages~%"
                 (cold-build-package-graph
                  (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
@@ -4129,9 +4127,7 @@ oracle and the IFEP vector grafts come from the reference.  Returns 0."
     (multiple-value-bind (homes aliases) (world-symbol-homes reference-model)
       (setf *cold-symbol-homes* homes
             *cold-package-aliases* aliases))
-    (setup-sys-host (if (char= (char sysdir (1- (length sysdir))) #\/)
-                        sysdir
-                        (concatenate 'string sysdir "/")))
+    (setup-sys-host sysdir)
     (format t "~&package graph: ~D pkgdcl packages~%"
             (cold-build-package-graph
              (sys-pathname "SYS: SYS; PKGDCL" "lisp")))

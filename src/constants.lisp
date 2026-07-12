@@ -22,7 +22,18 @@
 (defconstant +array-element-type-character+ 1)
 ;; Byte-packing field (bits 27..29): P => 2^P elements per 32-bit word,
 ;; i.e. (32 >> P) bits per element.  Character strings use P=2 (8-bit).
-(defconstant +array-length-bits+     25)        ; data word bits 0..24
+;;
+;; Full data-word layout, as packed by CW-MAKE-ARRAY (cold-object.lisp):
+;;   bits 26..31  array type code (element type 30..31, packing 27..29)
+;;   bit  25      named-structure
+;;   bit  23      long prefix
+;;   bits 15..22  leader length
+;;   bits  0..14  length -- SHORT PREFIX ONLY
+;; A long-prefix array (rank > 1, or length >= 2^15) holds its length in a
+;; separate prefix Q and bits 0..14 hold the rank instead, so every reader of
+;; the inline length must first check +array-long-prefix-bit+.
+(defconstant +array-length-bits+     15)        ; data word bits 0..14
+(defconstant +array-long-prefix-bit+ 23)
 
 ;;; Cdr codes (emulator/aihead.h)
 (defconstant +cdr-next+   0)

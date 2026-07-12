@@ -10,7 +10,7 @@ WT="$here/worldtool"
 
 fail=0
 
-for f in VLM_debugger Genera-8-5e.vlod Concordia.ilod Initial.vlod pascal.ilod; do
+for f in VLM_debugger Genera-8-5e.vlod Concordia.vlod Initial.vlod Pascal.vlod; do
     if [ -f "$VLMDIR/$f" ]; then
         "$WT" roundtrip "$VLMDIR/$f" || fail=1
     else

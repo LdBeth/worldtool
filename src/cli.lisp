@@ -30,7 +30,8 @@
              ~7T worldtool roundtrip FILE~%~
              ~7T worldtool coldtest LAYOUT.sexp TMPDIR [--reference WORLD]~%~
              ~7T worldtool coldgen LAYOUT.sexp OUT.ilod --reference WORLD ~
---sys SYSDIR~%")
+[--sys SYSDIR]~%~
+             ~7T   --sys defaults to $GENERA_SYS_ROOT~%")
   1)
 
 (defun main (args)
@@ -94,7 +95,9 @@
                             (and p (nth (1+ p) args))))
                (sysdir (let ((p (position "--sys" args :test #'string=)))
                          (and p (nth (1+ p) args)))))
-           (unless (and layout out reference sysdir)
+           ;; SYSDIR may be omitted; SETUP-SYS-HOST then falls back to
+           ;; GENERA_SYS_ROOT, and errors clearly if that is unset too.
+           (unless (and layout out reference)
              (return-from main (usage)))
            (coldgen layout out :reference reference :sysdir sysdir)))
         ((string= (first args) "coldtest")

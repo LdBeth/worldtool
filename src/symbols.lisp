@@ -41,6 +41,7 @@ NEXT-INDEX); otherwise (values NIL (1+ I))."
               (packing (ldb (byte 3 27) data))
               (len (ldb (byte +array-length-bits+ 0) data)))
           (when (and (= elt +array-element-type-character+)
+                     (not (logbitp +array-long-prefix-bit+ data)) ; inline LEN only
                      (member packing '(0 1 2))     ; 32/16/8-bit characters
                      (plusp len) (<= len 1024))
             (let* ((per-word (ash 1 packing))

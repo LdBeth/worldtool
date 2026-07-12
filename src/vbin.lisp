@@ -489,10 +489,22 @@
 ;; its own sources, so track our takeover with a flag rather than probing.
 (defvar *sys-host-root* nil)
 
-(defun setup-sys-host (&optional (root "/Users/ldbeth/Public/symbolics/rel-8-5/sys/"))
-  (setf (logical-pathname-translations "SYS")
-        `(("SYS:**;*.*" ,(merge-pathnames "**/*.*" root))))
-  (setf *sys-host-root* root))
+(defun setup-sys-host (&optional root)
+  "Point the SYS logical host at the restored Genera source tree.  ROOT is a
+directory namestring, with or without its trailing slash; it defaults to the
+GENERA_SYS_ROOT environment variable.  There is deliberately no built-in
+default: the tree lives outside this repo and its location is per-checkout."
+  (let* ((root (or root
+                   (sb-ext:posix-getenv "GENERA_SYS_ROOT")
+                   (error "No Genera source tree.  Pass --sys SYSDIR, set ~
+GENERA_SYS_ROOT, or call SETUP-SYS-HOST with a root.")))
+         (root (if (pathnamep root) (namestring root) root))
+         (root (if (char= (char root (1- (length root))) #\/)
+                   root
+                   (concatenate 'string root "/"))))
+    (setf (logical-pathname-translations "SYS")
+          `(("SYS:**;*.*" ,(merge-pathnames "**/*.*" root))))
+    (setf *sys-host-root* root)))
 
 (defun sys-pathname (spec &optional (type "vbin"))
   "Translate a Genera pathname string like \"SYS: IO; RDDEFS\" to a host

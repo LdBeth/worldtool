@@ -8,7 +8,7 @@
 ;;;   FILELIST.txt: one "SYS: DIR; NAME" per line (blank/;-comment skipped).
 ;;; Env not needed.  Prints a table + a machine block per file.
 
-(let ((here #p"/Users/ldbeth/Public/Projects/linux-vlm/worldtool/"))
+(let ((here (make-pathname :name nil :type nil :defaults *load-truename*)))
   (dolist (f '("src/package" "src/constants" "src/image" "src/ilod"
                "src/vlod" "src/dump" "src/inspect" "src/symbols" "src/vbin"
                "src/emit" "src/wdecode"))
