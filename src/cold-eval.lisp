@@ -124,6 +124,48 @@ returns that value."
 ;;; (values nil :defer) when the value only exists at boot (caller defers
 ;;; the whole enclosing form), (values nil :patch) when the caller should
 ;;; store NIL and queue a first-boot patch of the stored Q.
+;;;
+;;; Those two shapes are one sum type: a WITNESS in the first value (the
+;;; tag, or T where the payload is a list) and a PAYLOAD in the second, or
+;;; NIL and a REASON.  COLD-Q-BIND sequences it -- a failure becomes the
+;;; value of the whole form, so it propagates without a non-local exit and
+;;; composes inside a lambda.
+
+(declaim (inline cold-q-defer cold-q-patch))
+
+(defun cold-q-defer () (values nil :defer))
+(defun cold-q-patch () (values nil :patch))
+
+(defmacro cold-q-bind (((witness payload) form) &body body)
+  "Run BODY with the two values of FORM bound, or yield FORM's failure
+\(values NIL reason) unchanged."
+  `(multiple-value-bind (,witness ,payload) ,form
+     (if ,witness
+         (progn ,@body)
+         (values nil ,payload))))
+
+(defmacro cold-q-bind* (bindings &body body)
+  "Sequential COLD-Q-BINDs, LET*-style: the first failure is the result."
+  (if (null bindings)
+      `(progn ,@body)
+      `(cold-q-bind ,(first bindings)
+         (cold-q-bind* ,(rest bindings) ,@body))))
+
+(defun cold-eval-values (w forms &key (area "PERMANENT-STORAGE-AREA"))
+  "Evaluate FORMS left to right: (values T list-of-(tag . data)), or the
+failure of the first form that has no value."
+  (let ((qs '()))
+    (dolist (form forms (values t (nreverse qs)))
+      (multiple-value-bind (tag data) (cold-eval-value w form :area area)
+        (unless tag (return (values nil data)))
+        (push (cons tag data) qs)))))
+
+(defun cold-value-for-kind (w value kind &key (area "PERMANENT-STORAGE-AREA"))
+  "The value Q of an operand under KIND: :FORM evaluates, :OBJECT
+materializes with quote semantics."
+  (if (eq kind :form)
+      (cold-eval-value w value :area area)
+      (cold-value-of-object w value :area area)))
 
 (defparameter *cold-patch-value-heads*
   '("FIND-GENERIC-FUNCTION-AS-CONSTANT"
@@ -221,152 +263,153 @@ coded like %LIST-n, in a LIST-representation area (M3h boot 34)."
       (push (cons vma name-vma) (cold-world-find-resource-sites w))
       (values (tag 0 (cold-dtp w "LIST")) vma))))
 
+(defun cold-value-symbol (w vsym)
+  (let ((pkg (canonical-package-name (vsym-package vsym))))
+    (cond ((equal pkg "KEYWORD") (cold-symbol-ref w vsym))
+          ((and (string= (vsym-name vsym) "NIL") pkg) (cold-nil-q w))
+          ((and (string= (vsym-name vsym) "T") pkg)
+           (values (tag 0 (cold-dtp w "SYMBOL")) (cold-world-t-vma w)))
+          (t (multiple-value-bind (tag data boundp) (cold-symbol-value-q w vsym)
+               (if boundp
+                   (values tag data)
+                   (cold-q-defer)))))))
+
+(defun cold-value-function (w fspec)
+  (multiple-value-bind (tag data)
+      (cw-ref w (cold-follow-cell w (cold-fdefinition-cell w fspec)))
+    (if (= (tag-type tag) (cold-dtp w "NULL"))
+        (cold-q-defer)                  ; caller may register a fixup
+        (values tag data))))
+
+(defun cold-value-copytree (w args area)
+  "(COPYTREE-AND-LEAVES 'tree area-symbol): load-time deep copy.  Host
+conses are fresh per decode, so a plain materialization in the requested
+area already has copy semantics."
+  (cold-ref w (quoted (first args))
+            :area (if (vsym-p (second args)) (vsym-name (second args)) area)))
+
+(defun cold-%list-head-p (head)
+  (and (= (length head) 7) (string= head "%LIST-" :end1 6)))
+
+(defun cold-value-%list (w args area)
+  "(%LIST-n el ...): fixed-arity list of evaluated elements."
+  (cold-q-bind ((okp qs) (cold-eval-values w args :area area))
+    (let* ((n (length qs))
+           (vma (cold-alloc w "WORKING-STORAGE-AREA" n :list)))
+      (loop for (tag . data) in qs
+            for i from 0
+            do (cw-set w (+ vma i)
+                       (logior (ash (if (= i (1- n)) +cdr-nil+ +cdr-next+) 6)
+                               (tag-type tag))
+                       data))
+      (values (tag 0 (cold-dtp w "LIST")) vma))))
+
+(defun cold-value-make-area (w args form)
+  "Load-time area creation; all 67 area numbers are architectural facts
+recorded in the layout, so the value is just the number."
+  (let ((name (loop for (k v) on args by #'cddr
+                    when (vsym-named-p k "NAME")
+                      return (quoted v))))
+    (unless (vsym-p name)
+      (error "MAKE-AREA without :NAME in ~S" form))
+    ;; Area numbers are architectural facts in the layout's
+    ;; :AREAS section (M2 exported all 67).
+    (let ((n (cold-area-number (cold-area w (vsym-name name)))))
+      ;; Beyond the generator's own areas, MAKE-AREA's side
+      ;; effect matters too: the five ARRAY-PUSHes into the area
+      ;; tables (allocate-common.lisp:647).  Record the area so
+      ;; cold-fill-storage-tables registers its rows -- else
+      ;; (N-AREAS), the *AREA-NAME* fill pointer, rejects it at
+      ;; first cons and the %ALLOCATE-*-BLOCK escape handler
+      ;; FERRORs recursively pre-banner (M3h boot 31).
+      (when (and (>= n +cold-area-count+)
+                 (not (assoc n (cold-world-boot-areas w))))
+        (cold-note "make-area registered")
+        (push (cons n name) (cold-world-boot-areas w)))
+      (values (tag 0 (cold-dtp w "FIXNUM")) n))))
+
+(defun cold-value-make-pc (w args form)
+  "(%MAKE-PC function offset), sys/lcode.lisp:1060: offset in halfword
+instructions; even/odd tag from its parity."
+  (let ((fn-obj (first args))
+        (offset (second args)))
+    (unless (and (vfun-p fn-obj) (integerp offset))
+      (error "Unsupported %MAKE-PC form ~S" form))
+    (let ((fn (cold-fun w fn-obj)))
+      (values (tag 0 (cold-dtp w (if (oddp offset) "ODD-PC" "EVEN-PC")))
+              (+ fn (floor offset 2))))))
+
+(defun cold-value-member-fast (w args)
+  (cold-q-bind* (((it id) (cold-eval-value w (first args)))
+                 ((lt ld) (cold-eval-list-arg w (second args))))
+    (let ((hit (cold-map-list w lt ld
+                              (lambda (ct cd vma)
+                                (when (cold-q-eq ct cd it id)
+                                  (cons (tag 0 (cold-dtp w "LIST")) vma))))))
+      (if hit
+          (values (car hit) (cdr hit))
+          (cold-nil-q w)))))
+
+(defun cold-value-cons (w args adjoinp)
+  (cold-q-bind* (((it id) (cold-eval-value w (first args)))
+                 ((lt ld) (cold-eval-list-arg w (second args))))
+    (if (and adjoinp
+             (cold-map-list w lt ld
+                            (lambda (ct cd vma)
+                              (declare (ignore vma))
+                              (cold-q-eq ct cd it id))))
+        (values lt ld)
+        (values (tag 0 (cold-dtp w "LIST")) (cold-cons w it id lt ld)))))
+
+(defun cold-value-not (w form)
+  (cold-q-bind ((tag data) (cold-eval-value w form))
+    (if (cold-q-nil-p w tag data)
+        (values (tag 0 (cold-dtp w "SYMBOL")) (cold-world-t-vma w))
+        (cold-nil-q w))))
+
+(defun cold-value-setq (w args)
+  (cold-q-bind ((tag data) (cold-eval-value w (second args)))
+    (cold-set-symbol-value w (first args) tag data)
+    (values tag data)))
+
+(defun cold-value-mouse-char (w args form)
+  "The :FASD-FORM of a mouse-char constant (string.lisp:2171).
+CHAR-MOUSE-EQUAL is EQ, so the constant must resolve INTO the cache; a
+first-boot patch called MAKE-MOUSE-CHAR before the deferred SET bound the
+cache (M3h boot 29, trap 71)."
+  (let ((button (first args))
+        (bits (or (second args) 0)))
+    (unless (and (integerp button) (<= 0 button 2)
+                 (integerp bits) (<= 0 bits 31))
+      (error "Unsupported MAKE-MOUSE-CHAR form ~S" form))
+    (cw-ref w (+ (cold-mouse-char-cache w) 8 (* button 32) bits))))
+
 (defun cold-eval-value (w form &key (area "PERMANENT-STORAGE-AREA"))
   (typecase form
     (veval (cold-eval-value w (veval-form form) :area area))
-    (vsym
-     (let ((pkg (canonical-package-name (vsym-package form))))
-       (cond ((equal pkg "KEYWORD") (cold-symbol-ref w form))
-             ((and (string= (vsym-name form) "NIL") pkg) (cold-nil-q w))
-             ((and (string= (vsym-name form) "T") pkg)
-              (values (tag 0 (cold-dtp w "SYMBOL")) (cold-world-t-vma w)))
-             (t (multiple-value-bind (tag data boundp)
-                    (cold-symbol-value-q w form)
-                  (if boundp
-                      (values tag data)
-                      (values nil :defer)))))))
+    (vsym (cold-value-symbol w form))
     (cons
      (let ((head (form-head-name form))
            (args (rest form)))
        (cond
-         ((null head) (values nil :defer))
+         ((null head) (cold-q-defer))
          ((string= head "QUOTE") (cold-ref w (first args) :area area))
-         ((string= head "FUNCTION")
-          (let ((cell (cold-follow-cell
-                       w (cold-fdefinition-cell w (first args)))))
-            (multiple-value-bind (tag data) (cw-ref w cell)
-              (if (= (tag-type tag) (cold-dtp w "NULL"))
-                  (values nil :defer)     ; caller may register a fixup
-                  (values tag data)))))
-         ((string= head "VALUES")
-          (cold-eval-value w (first args) :area area))
-         ((string= head "COPYTREE-AND-LEAVES")
-          ;; (COPYTREE-AND-LEAVES 'tree area-symbol): load-time deep copy.
-          ;; Host conses are fresh per decode, so a plain materialization
-          ;; in the requested area already has copy semantics.
-          (let ((tree (quoted (first args)))
-                (target (if (vsym-p (second args))
-                            (vsym-name (second args))
-                            area)))
-            (cold-ref w tree :area target)))
-         ((and (= (length head) 7) (string= head "%LIST-" :end1 6))
-          ;; (%LIST-n el ...): fixed-arity list of evaluated elements.
-          (let ((qs (mapcar (lambda (a)
-                              (multiple-value-bind (tag data)
-                                  (cold-eval-value w a :area area)
-                                (unless tag
-                                  (return-from cold-eval-value
-                                    (values nil data)))
-                                (cons tag data)))
-                            args)))
-            (let ((vma (cold-alloc w "WORKING-STORAGE-AREA" (length qs)
-                                   :list)))
-              (loop for (tag . data) in qs
-                    for i from 0
-                    for lastp = (= i (1- (length qs)))
-                    do (cw-set w (+ vma i)
-                               (logior (ash (if lastp +cdr-nil+ +cdr-next+) 6)
-                                       (tag-type tag))
-                               data))
-              (values (tag 0 (cold-dtp w "LIST")) vma))))
-         ((string= head "MAKE-AREA")
-          ;; Load-time area creation; all 67 area numbers are architectural
-          ;; facts recorded in the layout, so the value is just the number.
-          (let ((name (loop for (k v) on args by #'cddr
-                            when (vsym-named-p k "NAME")
-                              return (quoted v))))
-            (unless (vsym-p name)
-              (error "MAKE-AREA without :NAME in ~S" form))
-            ;; Area numbers are architectural facts in the layout's
-            ;; :AREAS section (M2 exported all 67).
-            (let ((n (cold-area-number (cold-area w (vsym-name name)))))
-              ;; Beyond the generator's own areas, MAKE-AREA's side
-              ;; effect matters too: the five ARRAY-PUSHes into the area
-              ;; tables (allocate-common.lisp:647).  Record the area so
-              ;; cold-fill-storage-tables registers its rows -- else
-              ;; (N-AREAS), the *AREA-NAME* fill pointer, rejects it at
-              ;; first cons and the %ALLOCATE-*-BLOCK escape handler
-              ;; FERRORs recursively pre-banner (M3h boot 31).
-              (when (and (>= n +cold-area-count+)
-                         (not (assoc n (cold-world-boot-areas w))))
-                (cold-note "make-area registered")
-                (push (cons n name) (cold-world-boot-areas w)))
-              (values (tag 0 (cold-dtp w "FIXNUM")) n))))
-         ((string= head "%MAKE-PC")
-          ;; (%MAKE-PC function offset), sys/lcode.lisp:1060: offset in
-          ;; halfword instructions; even/odd tag from its parity.
-          (let ((fn-obj (first args))
-                (offset (second args)))
-            (unless (and (vfun-p fn-obj) (integerp offset))
-              (error "Unsupported %MAKE-PC form ~S" form))
-            (let ((fn (cold-fun w fn-obj)))
-              (values (tag 0 (cold-dtp w (if (oddp offset) "ODD-PC" "EVEN-PC")))
-                      (+ fn (floor offset 2))))))
-         ((string= head "MEMBER-FAST")
-          (multiple-value-bind (it id) (cold-eval-value w (first args))
-            (unless it (return-from cold-eval-value (values nil id)))
-            (multiple-value-bind (lt ld) (cold-eval-list-arg w (second args))
-              (unless lt (return-from cold-eval-value (values nil ld)))
-              (let ((hit (cold-map-list
-                          w lt ld
-                          (lambda (ct cd vma)
-                            (when (cold-q-eq ct cd it id)
-                              (cons (tag 0 (cold-dtp w "LIST")) vma))))))
-                (if hit
-                    (values (car hit) (cdr hit))
-                    (cold-nil-q w))))))
+         ((string= head "FUNCTION") (cold-value-function w (first args)))
+         ((string= head "VALUES") (cold-eval-value w (first args) :area area))
+         ((string= head "COPYTREE-AND-LEAVES") (cold-value-copytree w args area))
+         ((cold-%list-head-p head) (cold-value-%list w args area))
+         ((string= head "MAKE-AREA") (cold-value-make-area w args form))
+         ((string= head "%MAKE-PC") (cold-value-make-pc w args form))
+         ((string= head "MEMBER-FAST") (cold-value-member-fast w args))
          ((or (string= head "ADJOIN-FAST") (string= head "CONS"))
-          (multiple-value-bind (it id) (cold-eval-value w (first args))
-            (unless it (return-from cold-eval-value (values nil id)))
-            (multiple-value-bind (lt ld) (cold-eval-list-arg w (second args))
-              (unless lt (return-from cold-eval-value (values nil ld)))
-              (when (string= head "ADJOIN-FAST")
-                (let ((hit (cold-map-list
-                            w lt ld
-                            (lambda (ct cd vma)
-                              (declare (ignore vma))
-                              (when (cold-q-eq ct cd it id) t)))))
-                  (when hit (return-from cold-eval-value (values lt ld)))))
-              (values (tag 0 (cold-dtp w "LIST"))
-                      (cold-cons w it id lt ld)))))
-         ((string= head "NOT")
-          (multiple-value-bind (tag data) (cold-eval-value w (first args))
-            (unless tag (return-from cold-eval-value (values nil data)))
-            (if (cold-q-nil-p w tag data)
-                (values (tag 0 (cold-dtp w "SYMBOL")) (cold-world-t-vma w))
-                (cold-nil-q w))))
-         ((string= head "SETQ")
-          (multiple-value-bind (tag data)
-              (cold-eval-value w (second args))
-            (unless tag (return-from cold-eval-value (values nil data)))
-            (cold-set-symbol-value w (first args) tag data)
-            (values tag data)))
+          (cold-value-cons w args (string= head "ADJOIN-FAST")))
+         ((string= head "NOT") (cold-value-not w (first args)))
+         ((string= head "SETQ") (cold-value-setq w args))
          ((string= head "MAKE-MOUSE-CHAR-CACHE")
           ;; (DEFVAR *MOUSE-CHAR-CACHE* (MAKE-MOUSE-CHAR-CACHE)),
           ;; sys2/string.lisp:2185: built natively, like the dist.
           (values (tag 0 (cold-dtp w "ARRAY")) (cold-mouse-char-cache w)))
-         ((string= head "MAKE-MOUSE-CHAR")
-          ;; The :FASD-FORM of a mouse-char constant (string.lisp:2171).
-          ;; CHAR-MOUSE-EQUAL is EQ, so the constant must resolve INTO
-          ;; the cache; a first-boot patch called MAKE-MOUSE-CHAR before
-          ;; the deferred SET bound the cache (M3h boot 29, trap 71).
-          (let ((button (first args))
-                (bits (or (second args) 0)))
-            (unless (and (integerp button) (<= 0 button 2)
-                         (integerp bits) (<= 0 bits 31))
-              (error "Unsupported MAKE-MOUSE-CHAR form ~S" form))
-            (cw-ref w (+ (cold-mouse-char-cache w)
-                         8 (* button 32) bits))))
+         ((string= head "MAKE-MOUSE-CHAR") (cold-value-mouse-char w args form))
          ((string= head "FIND-RESOURCE")
           ;; A resource used as a compiled constant fasdumps as
           ;; (FIND-RESOURCE 'name); the generator replaces it with the
@@ -376,8 +419,8 @@ coded like %LIST-n, in a LIST-representation area (M3h boot 34)."
           ;; never feed the boot walker.
           (cold-find-resource-constant w (first args)))
          ((member head *cold-patch-value-heads* :test #'string=)
-          (values nil :patch))
-         (t (values nil :defer)))))
+          (cold-q-patch))
+         (t (cold-q-defer)))))
     ;; Self-evaluating host data (strings, numbers, characters, arrays...)
     (t (cold-ref w form :area area))))
 
@@ -408,6 +451,14 @@ Same return convention as COLD-EVAL-VALUE."
           (t (cold-note "operand patches")
              (setf *cold-eval-patch-form* form)
              (cold-nil-q w)))))
+
+(defun cold-eval-arm (w form what)
+  "Evaluate a conditional arm for effect; an unevaluable one is a hard
+error -- the idiom's functions are cold, so it must run natively."
+  (multiple-value-bind (tag data) (cold-eval-value w form)
+    (declare (ignore data))
+    (unless tag (error "Unevaluable ~A ~S" what form))
+    nil))
 
 ;;; ---------------- defvar / defconst / defconstant ----------------
 
@@ -442,9 +493,7 @@ An unevaluable value defers a boot-time (SET 'sym form)."
     (let ((store (or (not (eq kind :defvar))
                      (not (nth-value 2 (cold-symbol-value-q w sym))))))
       (multiple-value-bind (tag data)
-          (if (eq value-kind :form)
-              (cold-eval-value w value)
-              (cold-value-of-object w value))
+          (cold-value-for-kind w value value-kind)
         (cond ((and tag store)
                (cold-set-symbol-value w sym tag data)
                ;; Remember eager :defvar stamps with their boot SET form:
@@ -513,10 +562,7 @@ before calling); VALUE is an object or, with :FORM, a source form."
   (cold-note "putprop")
   (multiple-value-bind (it id) (cold-value-of-object w indicator)
     (unless it (error "Unevaluable PUTPROP indicator ~S" indicator))
-    (multiple-value-bind (vt vd)
-        (if (eq value-kind :form)
-            (cold-eval-value w value)
-            (cold-value-of-object w value))
+    (multiple-value-bind (vt vd) (cold-value-for-kind w value value-kind)
       (let* ((ind-key (fspec-key indicator))
              (cell (cold-property-cell w sym it id ind-key))
              (value-form (if (veval-p value) (veval-form value) value)))
@@ -526,22 +572,23 @@ before calling); VALUE is an object or, with :FORM, a source form."
         ;; EXISTING value cell before storing the replacement
         ;; (functions.lisp:423), and CAR of a DTP-NULL cell is trap 71.  Stamp
         ;; NIL instead -- the boot store overwrites it in place (M3h boot 35).
-        (cond (vt (cold-store-contents w cell vt vd))
-              ((eq vd :patch)
-               (multiple-value-bind (nt nd) (cold-nil-q w)
-                 (cold-store-contents w cell nt nd))
-               (cold-note-patch w cell value-form))
-              (t
-               ;; Value exists only at boot: leave the property NIL (not
-               ;; unbound-null) and defer the whole putprop (replaces in
-               ;; place at boot).
-               (multiple-value-bind (nt nd) (cold-nil-q w)
-                 (cold-store-contents w cell nt nd))
-               (cold-defer w (list (si-vsym "PUTPROP")
-                                   (list (si-vsym "QUOTE") sym)
-                                   value-form
-                                   (list (si-vsym "QUOTE") indicator))
-                           "deferred putprops")))))))
+        (flet ((store-nil ()
+                 (multiple-value-bind (nt nd) (cold-nil-q w)
+                   (cold-store-contents w cell nt nd))))
+          (cond (vt (cold-store-contents w cell vt vd))
+                ((eq vd :patch)
+                 (store-nil)
+                 (cold-note-patch w cell value-form))
+                (t
+                 ;; Value exists only at boot: leave the property NIL (not
+                 ;; unbound-null) and defer the whole putprop (replaces in
+                 ;; place at boot).
+                 (store-nil)
+                 (cold-defer w (list (si-vsym "PUTPROP")
+                                     (list (si-vsym "QUOTE") sym)
+                                     value-form
+                                     (list (si-vsym "QUOTE") indicator))
+                             "deferred putprops"))))))))
 
 ;;; ---------------- fdefine ----------------
 
@@ -669,10 +716,7 @@ has no DERIVED-FUNCTION-PROPERTY (yet)."
             ;; the retry a no-op.
             (push #'stamp-derived (cold-world-fixups w))))))
     (flet ((store (tag data) (cold-store-contents w cell tag data))
-           (value (thing)
-             (if (eq def-kind :form)
-                 (cold-eval-value w thing)
-                 (cold-value-of-object w thing))))
+           (value (thing) (cold-value-for-kind w thing def-kind)))
       (typecase def
         (vfun
          (let ((fn (cold-fun w def)))
@@ -1121,19 +1165,13 @@ when their owner compiler/inner.lisp joined the cold set.")
                ((string= head "OR")
                 (when (cold-q-nil-p w tag data)
                   (dolist (f (rest args))
-                    (multiple-value-bind (tag2 data2) (cold-eval-value w f)
-                      (declare (ignore data2))
-                      (unless tag2
-                        (error "Unevaluable OR arm ~S" f)))))
+                    (cold-eval-arm w f "OR arm")))
                 (cold-note "or"))
                (t                        ; IF
                 (let ((arm (if (cold-q-nil-p w tag data)
                                (third args)
                                (second args))))
-                  (when arm
-                    (multiple-value-bind (tag2 data2) (cold-eval-value w arm)
-                      (declare (ignore data2))
-                      (unless tag2 (error "Unevaluable IF arm ~S" arm))))
+                  (when arm (cold-eval-arm w arm "IF arm"))
                   (cold-note "if"))))))
       ((string= head "LOAD-MULTIPLE-DEFINITION")
        ;; (LMD 'name 'type 'body env) evaluates the body forms in order
