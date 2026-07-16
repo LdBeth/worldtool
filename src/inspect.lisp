@@ -16,9 +16,12 @@
                   (< vma (+ (map-entry-address e) (map-entry-count e))))
           return e))
 
-(defun world-q (model vma)
-  "Read the Q at VMA via the load maps (wired, then unwired).  Returns
-\(values tag data) or NIL if the address is not mapped."
+(defgeneric world-q (model vma)
+  (:documentation "Read the Q at VMA via the load maps (wired, then
+unwired).  Returns (values tag data) or NIL if the address is not mapped.
+Also accepts a refdata/refrec reference oracle (src/refdata.lisp)."))
+
+(defmethod world-q ((model world-model) vma)
   (let ((e (find-wired-entry model vma)))
     (when e
       (let ((i (- vma (map-entry-address e))))

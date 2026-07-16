@@ -62,6 +62,17 @@ coldsys=""
 [ -d "$SYSDIR" ] && coldsys="--sys $SYSDIR"
 "$WT" coldtest "$here/cold-layout.sexp" "$tmp" $coldref $coldsys || { echo "FAIL: coldtest"; fail=1; }
 "$WT" roundtrip "$tmp/cold-skeleton.ilod" || { echo "FAIL: cold skeleton roundtrip"; fail=1; }
+
+# Replay: the frozen reference data must carry the full gate suite without
+# the distribution world present.  A replay MISS (unrecorded datum) means a
+# gate or the cold set changed: re-run `worldtool extract-reference`.
+if [ -f "$here/reference-data.lisp" ]; then
+    "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+        --reference-data "$here/reference-data.lisp" $coldsys \
+        || { echo "FAIL: coldtest replay (reference-data)"; fail=1; }
+else
+    echo "skip: reference-data.lisp not found"
+fi
 rm -rf "$tmp"
 
 [ $fail -eq 0 ] && echo "all tests passed" || echo "TESTS FAILED"

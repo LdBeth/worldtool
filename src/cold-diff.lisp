@@ -4045,15 +4045,20 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
 
 ;;; Stage-test driver (CLI: worldtool coldtest TMPDIR [REFERENCE-WORLD])
 
-(defun cold-test (tmpdir &key reference layout-path sysdir)
+(defun cold-test (tmpdir &key reference reference-data reference-model
+                              layout-path sysdir)
   "Build the current-stage cold world, emit, re-read, check.  Returns the
-number of failed stages (0 = success)."
+number of failed stages (0 = success).  The reference oracle comes from
+REFERENCE-MODEL (a world-model, refrec or refdata), REFERENCE-DATA (a
+generated reference-data file) or REFERENCE (the distribution world)."
   (let* ((layout (read-layout layout-path))
          (failures 0)
          (w (make-skeleton-world layout))
          (out (format nil "~A/cold-skeleton.ilod" tmpdir))
          (model (cold-world-model w))
-         (reference-model (when reference (read-world reference))))
+         (reference-model (or reference-model
+                              (when reference-data (load-refdata reference-data))
+                              (when reference (read-world reference)))))
     (multiple-value-bind (homes aliases)
         (if reference-model
             (world-symbol-homes reference-model)
@@ -4117,13 +4122,20 @@ number of failed stages (0 = success)."
 
 ;;; Generator driver (CLI: worldtool coldgen LAYOUT OUT --reference R --sys D)
 
-(defun coldgen (layout-path out &key reference sysdir)
+(defun coldgen (layout-path out &key reference reference-data reference-model
+                                     sysdir)
   "Build a fresh world end to end and write OUT (.ilod) plus
-OUT.unbound-fcells.txt (the full R1 audit).  REFERENCE (the unpatched
-distribution world) and SYSDIR are required inputs: the symbol-home
-oracle and the IFEP vector grafts come from the reference.  Returns 0."
+OUT.unbound-fcells.txt (the full R1 audit).  A reference oracle and SYSDIR
+are required inputs: the symbol-home oracle and the IFEP vector grafts come
+from it.  The oracle is REFERENCE-MODEL (a world-model, refrec or refdata),
+REFERENCE-DATA (a generated reference-data file) or REFERENCE (the
+unpatched distribution world).  Returns 0."
   (let* ((layout (read-layout layout-path))
-         (reference-model (read-world reference)))
+         (reference-model (or reference-model
+                              (when reference-data (load-refdata reference-data))
+                              (when reference (read-world reference))
+                              (error "coldgen needs a reference oracle ~
+\(--reference or --reference-data)"))))
     (multiple-value-bind (homes aliases) (world-symbol-homes reference-model)
       (setf *cold-symbol-homes* homes
             *cold-package-aliases* aliases))
@@ -4181,4 +4193,30 @@ unreviewed) -> ~A~%"
                                         :test #'equal))
                               rows)
                 report)))
+    0))
+
+;;; Reference-data extractor (CLI: worldtool extract-reference)
+
+(defun extract-reference (layout-path reference out tmpdir &key sysdir)
+  "Run the coldtest and coldgen pipelines against the live distribution
+world REFERENCE under a recording wrapper, then write every reference datum
+they read to OUT as Lisp definitions (loadable via --reference-data).  Both
+pipelines must pass -- extract only from a green build.  Returns 0."
+  (let ((rec (make-refrec :model (read-world reference))))
+    (let ((failures (cold-test (pathname tmpdir) :layout-path layout-path
+                               :reference-model rec :sysdir sysdir)))
+      (unless (zerop failures)
+        (error "extract-reference: coldtest failed ~D stage~:P; not ~
+writing ~A" failures out)))
+    (coldgen layout-path (format nil "~A/refextract.ilod" tmpdir)
+             :reference-model rec :sysdir sysdir)
+    (let ((rd (refrec-data rec)))
+      (write-refdata rd out :source reference)
+      (format t "~&~A: ~:D Qs, ~:D symbol scans, ~:D oracle pnames, ~
+~:D package aliases~%"
+              out
+              (hash-table-count (refdata-qs rd))
+              (hash-table-count (refdata-symbol-vmas rd))
+              (hash-table-count (refdata-homes rd))
+              (hash-table-count (refdata-aliases rd))))
     0))

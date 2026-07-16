@@ -4,7 +4,7 @@
 (let ((here (make-pathname :name nil :type nil :defaults *load-truename*)))
   (dolist (f '("src/package" "src/constants" "src/image" "src/ilod"
                "src/vlod" "src/dump" "src/inspect" "src/symbols" "src/vbin"
-               "src/emit" "src/wdecode"
+               "src/emit" "src/wdecode" "src/refdata"
                "src/cold-model" "src/cold-wired" "src/cold-object"
                "src/cold-fun" "src/cold-gen" "src/cold-eval"
                "src/cold-machinery" "src/cold-pkg" "src/cold-diff"

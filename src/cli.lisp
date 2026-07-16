@@ -28,9 +28,12 @@
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
              ~7T worldtool roundtrip FILE~%~
-             ~7T worldtool coldtest LAYOUT.sexp TMPDIR [--reference WORLD]~%~
-             ~7T worldtool coldgen LAYOUT.sexp OUT.ilod --reference WORLD ~
-[--sys SYSDIR]~%~
+             ~7T worldtool coldtest LAYOUT.sexp TMPDIR [--reference WORLD | ~
+--reference-data FILE]~%~
+             ~7T worldtool coldgen LAYOUT.sexp OUT.ilod (--reference WORLD | ~
+--reference-data FILE) [--sys SYSDIR]~%~
+             ~7T worldtool extract-reference LAYOUT.sexp WORLD OUT.lisp ~
+TMPDIR [--sys SYSDIR]~%~
              ~7T   --sys defaults to $GENERA_SYS_ROOT~%")
   1)
 
@@ -93,25 +96,42 @@
                (out (third args))
                (reference (let ((p (position "--reference" args :test #'string=)))
                             (and p (nth (1+ p) args))))
+               (refdata (let ((p (position "--reference-data" args
+                                           :test #'string=)))
+                          (and p (nth (1+ p) args))))
                (sysdir (let ((p (position "--sys" args :test #'string=)))
                          (and p (nth (1+ p) args)))))
            ;; SYSDIR may be omitted; SETUP-SYS-HOST then falls back to
            ;; GENERA_SYS_ROOT, and errors clearly if that is unset too.
-           (unless (and layout out reference)
+           (unless (and layout out (or reference refdata))
              (return-from main (usage)))
-           (coldgen layout out :reference reference :sysdir sysdir)))
+           (coldgen layout out :reference reference :reference-data refdata
+                    :sysdir sysdir)))
         ((string= (first args) "coldtest")
          (let ((layout (second args))
                (tmpdir (third args))
                (reference (let ((p (position "--reference" args :test #'string=)))
                             (and p (nth (1+ p) args))))
+               (refdata (let ((p (position "--reference-data" args
+                                           :test #'string=)))
+                          (and p (nth (1+ p) args))))
                (sysdir (let ((p (position "--sys" args :test #'string=)))
                          (and p (nth (1+ p) args)))))
            (unless (and layout tmpdir) (return-from main (usage)))
            (if (zerop (cold-test (pathname tmpdir)
                                  :layout-path layout :reference reference
-                                 :sysdir sysdir))
+                                 :reference-data refdata :sysdir sysdir))
                0 1)))
+        ((string= (first args) "extract-reference")
+         (let ((layout (second args))
+               (world (third args))
+               (out (fourth args))
+               (tmpdir (fifth args))
+               (sysdir (let ((p (position "--sys" args :test #'string=)))
+                         (and p (nth (1+ p) args)))))
+           (unless (and layout world out tmpdir)
+             (return-from main (usage)))
+           (extract-reference layout world out tmpdir :sysdir sysdir)))
         (t (usage)))
     (error (e)
       (format *error-output* "~&worldtool: ~A~%" e)

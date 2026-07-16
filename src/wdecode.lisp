@@ -129,10 +129,13 @@ numbers decode structurally; everything else comes back as (:Q tag data)."
                                         :depth (1- depth) :budget budget))
                         (return head)))))))))))
 
-(defun world-find-symbols (model pname)
-  "All symbol-block VMAs in MODEL whose pname is PNAME (case-sensitive).
-Scans every data-pages entry -- wired and unwired; fresh.ilod keeps its
-heap in the unwired map -- for the 5-Q symbol shape."
+(defgeneric world-find-symbols (model pname)
+  (:documentation "All symbol-block VMAs in MODEL whose pname is PNAME
+\(case-sensitive).  Scans every data-pages entry -- wired and unwired;
+fresh.ilod keeps its heap in the unwired map -- for the 5-Q symbol shape.
+Also accepts a refdata/refrec reference oracle (src/refdata.lisp)."))
+
+(defmethod world-find-symbols ((model world-model) pname)
   (let ((hits nil)
         (len (length pname)))
     (dolist (e (append (world-model-wired-map model)
@@ -177,9 +180,12 @@ PKG-NAME-LIST is defstruct slot 0 = leader element 0 (package.lisp:125)."
                      (and ct (= (tag-type ct) +type-string+)
                           (w-string model cd))))))))
 
-(defun world-symbol-homes (model)
-  "(values HOMES ALIASES): HOMES maps pname -> list of home package primary
-names; ALIASES maps every package name/nickname -> primary name."
+(defgeneric world-symbol-homes (model)
+  (:documentation "(values HOMES ALIASES): HOMES maps pname -> list of home
+package primary names; ALIASES maps every package name/nickname -> primary
+name.  Also accepts a refdata/refrec reference oracle (src/refdata.lisp)."))
+
+(defmethod world-symbol-homes ((model world-model))
   (let ((homes (make-hash-table :test #'equal))
         (aliases (make-hash-table :test #'equal))
         (pkg-names (make-hash-table)))
