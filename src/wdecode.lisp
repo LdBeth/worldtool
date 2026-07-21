@@ -81,8 +81,10 @@
 (defun w-decode (model tag data &key (depth 24) (budget (list *w-decode-limit*)))
   "Host representation of the Q TAG:DATA in MODEL.  Conses/symbols/strings/
 numbers decode structurally; everything else comes back as (:Q tag data)."
-  (when (or (<= depth 0) (<= (decf (first budget)) 0))
-    (return-from w-decode (list :depth-cut tag data)))
+  (cond ((<= depth 0)
+         (return-from w-decode (list :depth-cut tag data)))
+        ((<= (decf (first budget)) 0)
+         (return-from w-decode (list :budget-cut tag data))))
   (let ((type (tag-type tag)))
     (cond
       ((= type +type-fixnum+)

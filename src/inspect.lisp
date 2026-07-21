@@ -21,18 +21,21 @@
 unwired).  Returns (values tag data) or NIL if the address is not mapped.
 Also accepts a refdata/refrec reference oracle (src/refdata.lisp)."))
 
+(defun map-entry-q (model e vma)
+  "The Q at VMA as mapped by entry E; :copy re-reads through MODEL."
+  (let ((i (- vma (map-entry-address e))))
+    (ecase (map-entry-opcode e)
+      (#.+op-data-pages+ (qref (map-entry-payload e) i))
+      (#.+op-constant+ (values (map-entry-data-tag e)
+                               (map-entry-data-data e)))
+      (#.+op-constant-incremented+
+       (values (map-entry-data-tag e)
+               (ldb (byte 32 0) (+ (map-entry-data-data e) i))))
+      (#.+op-copy+ (world-q model (+ (map-entry-data-data e) i))))))
+
 (defmethod world-q ((model world-model) vma)
   (let ((e (find-wired-entry model vma)))
-    (when e
-      (let ((i (- vma (map-entry-address e))))
-        (ecase (map-entry-opcode e)
-          (#.+op-data-pages+ (qref (map-entry-payload e) i))
-          (#.+op-constant+ (values (map-entry-data-tag e)
-                                   (map-entry-data-data e)))
-          (#.+op-constant-incremented+
-           (values (map-entry-data-tag e)
-                   (ldb (byte 32 0) (+ (map-entry-data-data e) i))))
-          (#.+op-copy+ (world-q model (+ (map-entry-data-data e) i))))))))
+    (when e (map-entry-q model e vma))))
 
 ;;; Layout tables (cold-layout.sexp)
 
