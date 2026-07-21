@@ -34,6 +34,18 @@ done
 echo "$syms" | grep -q "COMPRESSED-PNAME-ARRAY" \
     || { echo "FAIL: symbols missing packed debug-info pname"; fail=1; }
 
+# functions: compiled-function census.  The debugger world's symbols keep
+# compressed pnames, so every name decodes opaque: 677 compound specs are
+# lists of opaque symbol markers, the rest fail -- the census still proves
+# the header scan, suffix bounds, and cut/opaque accounting.
+funs=$("$WT" functions "$VLMDIR/VLM_debugger")
+echo "$funs" | grep -q "1,729 compiled-function candidates" \
+    || { echo "FAIL: functions candidate count"; fail=1; }
+echo "$funs" | grep -q "names: 0 simple symbols, 677 compound function specs, 0 instance-named (method objects), 1,052 nil/failed" \
+    || { echo "FAIL: functions name classes"; fail=1; }
+echo "$funs" | grep -q "suffix decodes: 0 clean, 0 depth-cut, 0 budget-cut, 1,729 with opaque objects, 0 with unmapped Qs" \
+    || { echo "FAIL: functions cut accounting"; fail=1; }
+
 # vbin: decode Genera compiler output (skipped when the source tree is absent)
 SYSDIR="${SYSDIR:-/Users/ldbeth/Public/symbolics/rel-8-5/sys}"
 if [ -f "$SYSDIR/io/lmini.vbin" ]; then

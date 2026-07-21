@@ -8,9 +8,11 @@
 (defconstant +type-fixnum+            8)
 (defconstant +type-small-ratio+       9)
 (defconstant +type-single-float+     10)
+(defconstant +type-instance+         16)
 (defconstant +type-nil+              20)
 (defconstant +type-locative+         25)
 (defconstant +type-compiled-function+ 28)
+(defconstant +type-generic-function+ 29)
 (defconstant +type-character+        35)
 (defconstant +type-even-pc+          38)
 

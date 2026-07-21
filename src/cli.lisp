@@ -24,6 +24,8 @@
              ~7T worldtool inspect FILE LAYOUT.sexp [--vma HEXADDR[:COUNT]]~%~
              ~7T worldtool symbols FILE [--min N]~%~
              ~7T worldtool symval FILE PNAME~%~
+             ~7T worldtool functions FILE [--depth N] [--budget N] ~
+[--listing OUT]~%~
              ~7T worldtool vbin FILE... [--trace]~%~
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
@@ -72,6 +74,18 @@ TMPDIR [--sys SYSDIR]~%~
                  (world-symbol-value model pname)
                (format t "~&~A (symbol #x~8,'0X~@[, ~D candidates~]): ~S~%"
                        pname vma (and (> n 1) n) value)))
+           0))
+        ((string= (first args) "functions")
+         (let ((file (second args))
+               (depth (let ((p (position "--depth" args :test #'string=)))
+                        (if p (parse-integer (nth (1+ p) args)) 24)))
+               (budget (let ((p (position "--budget" args :test #'string=)))
+                         (if p (parse-integer (nth (1+ p) args))
+                             *w-decode-limit*)))
+               (listing (let ((p (position "--listing" args :test #'string=)))
+                          (and p (nth (1+ p) args)))))
+           (unless file (return-from main (usage)))
+           (functions-world file :depth depth :budget budget :listing listing)
            0))
         ((string= (first args) "vbin")
          (let* ((rest (rest args))
