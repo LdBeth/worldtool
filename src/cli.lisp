@@ -26,6 +26,7 @@
              ~7T worldtool symval FILE PNAME~%~
              ~7T worldtool functions FILE [--depth N] [--budget N] ~
 [--listing OUT]~%~
+             ~7T worldtool disasm FILE [--vma HEXADDR | --name STRING]~%~
              ~7T worldtool vbin FILE... [--trace]~%~
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~
@@ -86,6 +87,15 @@ TMPDIR [--sys SYSDIR]~%~
                           (and p (nth (1+ p) args)))))
            (unless file (return-from main (usage)))
            (functions-world file :depth depth :budget budget :listing listing)
+           0))
+        ((string= (first args) "disasm")
+         (let ((file (second args))
+               (vma (let ((p (position "--vma" args :test #'string=)))
+                      (and p (parse-integer (nth (1+ p) args) :radix 16))))
+               (name (let ((p (position "--name" args :test #'string=)))
+                       (and p (nth (1+ p) args)))))
+           (unless file (return-from main (usage)))
+           (disasm-world file :vma vma :name name)
            0))
         ((string= (first args) "vbin")
          (let* ((rest (rest args))
