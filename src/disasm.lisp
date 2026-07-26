@@ -353,49 +353,119 @@
     (let ((sym (w-symbol w (- vma k))))
       (when sym (return (values sym k))))))
 
+(defun render-symbol-cell (name k)
+  (case k
+    (0 (format nil "'~A" name))
+    (1 name)                                ; value cell
+    (2 (format nil "#'~A" name))            ; function cell
+    (3 (format nil "~A(plist)" name))
+    (4 (format nil "~A(package)" name))))
+
+(defun gf-name (w gf-vma)
+  "A generic function's name: the Q at the object head is a dtp-symbol
+pointer to the naming symbol."
+  (multiple-value-bind (tag data) (world-q w gf-vma)
+    (when (and tag (= (tag-type tag) +type-symbol+))
+      (let ((sym (w-symbol w data)))
+        (and sym (wsym-name sym))))))
+
 (defun render-locative (w vma &optional fnmap)
   "Render the locative operand of PUSH-INDIRECT / START-CALL-INDIRECT.
-When the symbol block is undecodable (Minima worlds leave pnames at
-unshipped build-time addresses) but FNMAP is given, follow the cell and
-name the compiled function it holds."
+Resolution order: a cell inside a symbol block; a link-table cell some
+symbol block forwards to (FNMAP's lazily built reverse map); then by the
+cell's content -- generic functions name themselves, DTP-NULL unbound
+cells back-point at their symbol, and compiled-function targets fall back
+to the census (Minima worlds, whose pnames dangle in unshipped build
+space, reach only this last arm)."
   (multiple-value-bind (sym cell) (decode-symbol-cell w vma)
     (cond
-      (sym
-       (case cell
-         (0 (format nil "'~A" (wsym-name sym)))
-         (1 (wsym-name sym))                     ; value cell
-         (2 (format nil "#'~A" (wsym-name sym))) ; function cell
-         (3 (format nil "~A(plist)" (wsym-name sym)))
-         (4 (format nil "~A(package)" (wsym-name sym)))))
+      (sym (render-symbol-cell (wsym-name sym) cell))
+      ((let ((link (fnmap-link fnmap vma)))
+         (and link (render-symbol-cell (car link) (cdr link)))))
       (fnmap
        (multiple-value-bind (tag data) (w-follow-cell w vma)
-         (let ((rec (and tag
-                         (member (tag-type tag)
-                                 (list +type-compiled-function+
-                                       +type-even-pc+ +type-odd-pc+))
-                         (fnmap-containing fnmap data))))
-           (cond ((null rec) (format nil "@#x~8,'0X" vma))
-                 ;; A real (symbol-named or donor-named) target reads
-                 ;; better by name; marker-named ones (Minima) by their
-                 ;; listing address.
-                 ((or (fnmap-donor-name fnmap (cfun-fn rec))
-                      (member (cfun-name-class rec) (list :symbol :compound)))
-                  (format nil "@#x~8,'0X -> FN-#x~8,'0X ~A"
-                          vma (cfun-fn rec) (render-fn-name rec fnmap)))
-                 (t (format nil "@#x~8,'0X -> FN-#x~8,'0X"
-                            vma (cfun-fn rec)))))))
+         (cond
+           ((null tag) (format nil "@#x~8,'0X" vma))
+           ((= (tag-type tag) +type-generic-function+)
+            (let ((name (gf-name w data)))
+              (if name
+                  (format nil "@#x~8,'0X -> GENERIC ~A" vma name)
+                  (format nil "@#x~8,'0X -> GF-#x~8,'0X" vma data))))
+           ((= (tag-type tag) +type-null+)
+            (let ((owner (w-symbol w data)))
+              (if owner
+                  (format nil "@#x~8,'0X -> ~A(unbound)"
+                          vma (wsym-name owner))
+                  (format nil "@#x~8,'0X" vma))))
+           ((member (tag-type tag)
+                    (list +type-compiled-function+
+                          +type-even-pc+ +type-odd-pc+))
+            (let ((rec (fnmap-containing fnmap data)))
+              (cond ((null rec) (format nil "@#x~8,'0X" vma))
+                    ;; A real (symbol-named or donor-named) target reads
+                    ;; better by name; marker-named ones (Minima) by
+                    ;; their listing address.
+                    ((or (fnmap-donor-name fnmap (cfun-fn rec))
+                         (member (cfun-name-class rec)
+                                 (list :symbol :compound)))
+                     (format nil "@#x~8,'0X -> FN-#x~8,'0X ~A"
+                             vma (cfun-fn rec) (render-fn-name rec fnmap)))
+                    (t (format nil "@#x~8,'0X -> FN-#x~8,'0X"
+                               vma (cfun-fn rec))))))
+           (t (format nil "@#x~8,'0X" vma)))))
       (t (format nil "@#x~8,'0X" vma)))))
 
 ;;; ---- Function map (for call-target resolution) --------------------------
 
-(defstruct (fnmap (:constructor %make-fnmap (ccas recs names)))
+(defstruct (fnmap (:constructor %make-fnmap (ccas recs names world)))
   ccas    ; simple-vector of cca, ascending
   recs    ; simple-vector of cfun, same order
-  names)  ; hash fn-vma -> donor name string, or NIL
+  names   ; hash fn-vma -> donor name string, or NIL
+  world   ; windexed world for the lazy link map, or NIL
+  (linkmap :unbuilt)) ; hash cell-vma -> (pname . cell-index), built on demand
 
-(defun make-fnmap (recs &optional names)
+(defun make-fnmap (recs &optional names world)
   (let ((v (coerce recs 'simple-vector)))
-    (%make-fnmap (map 'simple-vector #'cfun-cca v) v names)))
+    (%make-fnmap (map 'simple-vector #'cfun-cca v) v names world)))
+
+(defun build-linkmap (w)
+  "Reverse map of forwarded symbol cells.  Genera worlds relocate
+special-variable value cells and function cells into dense link tables
+(the block cell holds an EVCP to the table entry) and compiled references
+name only the table entry; scan every symbol block and record where each
+of its four cells forwards."
+  (let ((map (make-hash-table))
+        (model (windexed-model w)))
+    (dolist (e (append (world-model-wired-map model)
+                       (world-model-unwired-map model)))
+      (when (= (map-entry-opcode e) +op-data-pages+)
+        (let ((qv (map-entry-payload e))
+              (base (map-entry-address e)))
+          (dotimes (i (map-entry-count e))
+            (multiple-value-bind (tag data) (qref qv i)
+              (declare (ignore data))
+              (when (and (= (tag-type tag) +type-header-p+)
+                         (= (ash tag -6) 0))
+                (let ((sym (w-symbol w (+ base i))))
+                  (when sym
+                    (loop for k from 1 to 4
+                          do (multiple-value-bind (ctag cdata)
+                                 (world-q w (+ base i k))
+                               (when (and ctag
+                                          (member (tag-type ctag)
+                                                  (list +type-evcp+
+                                                        +type-1q-forward+)))
+                                 (setf (gethash cdata map)
+                                       (cons (wsym-name sym) k)))))))))))))
+    map))
+
+(defun fnmap-link (m vma)
+  "(pname . cell-index) when some symbol's cell forwards to VMA."
+  (let ((w (and m (fnmap-world m))))
+    (when w
+      (when (eq (fnmap-linkmap m) :unbuilt)
+        (setf (fnmap-linkmap m) (build-linkmap w)))
+      (gethash vma (fnmap-linkmap m)))))
 
 (defun read-names-file (path)
   "Donor-name map: one `#xVMA NAME` pair per line, `;` starts a comment.
@@ -687,7 +757,7 @@ READ-NAMES-FILE) supplying names for worlds whose own name Qs dangle."
   (let* ((model (read-world path))
          (w (windexed model))
          (recs (world-compiled-functions model :depth depth :budget budget))
-         (fnmap (make-fnmap recs (and names (read-names-file names))))
+         (fnmap (make-fnmap recs (and names (read-names-file names)) w))
          (selected
            (cond (vma (let ((r (fnmap-containing fnmap vma)))
                         (unless r
