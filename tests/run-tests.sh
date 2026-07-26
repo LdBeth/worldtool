@@ -46,6 +46,13 @@ echo "$funs" | grep -q "names: 0 simple symbols, 677 compound function specs, 0 
 echo "$funs" | grep -q "suffix decodes: 0 clean, 0 depth-cut, 0 budget-cut, 1,729 with opaque objects, 0 with unmapped Qs" \
     || { echo "FAIL: functions cut accounting"; fail=1; }
 
+# disasm: donor names (vlm-debugger.names, recovered from the distribution
+# world's FEPComm slots and trap-vector grafts) label the kernel entry points
+# whose own name Qs dangle in Minima build space.
+dis=$("$WT" disasm "$VLMDIR/VLM_debugger" --names "$here/vlm-debugger.names" --vma F8010F3C)
+echo "$dis" | grep -q "#xF8010F3C WIRED-FORMAT #<Q 58:FA060815>" \
+    || { echo "FAIL: disasm donor name"; fail=1; }
+
 # vbin: decode Genera compiler output (skipped when the source tree is absent)
 SYSDIR="${SYSDIR:-/Users/ldbeth/Public/symbolics/rel-8-5/sys}"
 if [ -f "$SYSDIR/io/lmini.vbin" ]; then

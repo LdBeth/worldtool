@@ -1,0 +1,38 @@
+; Donor names for og2vlm/VLM_debugger (worldtool disasm --names).
+;
+; The debugger is a Minima world whose own name Qs dangle at unshipped
+; #xF9/#xFA build-space addresses, but the distribution world carries a
+; copy of the same IFEP kernel and NAMES its entry points: sweeping every
+; symbol in Genera-8-5.vlod (109,842) for function cells targeting
+; #xF8006400..#xF80170FF yields exactly the 19 FEPComm debugger-kernel
+; entries (slots #x1F-#x31, layout FEP-COMMUNICATION-AREA) plus
+; SYSTEM:FEP-STARTUP (slot 2, the Q VLM_debugger's own load map plants).
+; The last three come from the grafted IFEP trap vectors
+; (reference-data.lisp Qs; see cold-machinery.lisp *cold-ifep-vector-slots*).
+;
+; All names are SYSTEM-package Genera symbols; the trap handlers are
+; descriptive labels for anonymous vector targets, not symbol names.
+;
+#xF8017033 FEP-STARTUP
+#xF8010DA9 FEP-COMMAND-STRING
+#xF8010EED FEP-CRASH-DATA-REQUEST
+#xF8011152 COLD-LOAD-STREAM-READ-CHARACTER
+#xF801111E COLD-LOAD-STREAM-LISTEN
+#xF8011105 COLD-LOAD-STREAM-READ-HARDWARE-CHARACTER
+#xF80110E5 COLD-LOAD-STREAM-DRAW-CHARACTER
+#xF80110D0 COLD-LOAD-STREAM-DISPLAY-LOZENGED-STRING
+#xF80110AC COLD-LOAD-STREAM-SELECT
+#xF8011099 COLD-LOAD-STREAM-BEEP
+#xF8011086 COLD-LOAD-STREAM-FINISH
+#xF8011066 COLD-LOAD-STREAM-INSIDE-SIZE
+#xF801102E COLD-LOAD-STREAM-SET-CURSORPOS
+#xF801101B COLD-LOAD-STREAM-READ-CURSORPOS
+#xF8011000 COLD-LOAD-STREAM-COMPUTE-MOTION
+#xF8010FE9 COLD-LOAD-STREAM-CLEAR-BETWEEN-CURSORPOSES
+#xF801104F COLD-LOAD-STREAM-SET-EDGES
+#xF8010FB9 MAIN-SCREEN-PARAMETERS
+#xF8010F3C WIRED-FORMAT
+#xF8010FD8 FEP-SEQUENCE-BREAK
+#xF8011487 RESET-TRAP-HANDLER               ; %RESET-TRAP-VECTOR (slot 2625) target
+#xF8011A07 FEP-MODE-TRAP-HANDLER            ; %FEP-MODE-TRAP-VECTOR (slot 2631) target
+#xF80139C2 HALT-INSTRUCTION-EXCEPTION-HANDLER ; instruction-exception vector slot #o57 (%HALT)

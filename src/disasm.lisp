@@ -375,24 +375,65 @@ name the compiled function it holds."
                                        +type-even-pc+ +type-odd-pc+))
                          (fnmap-containing fnmap data))))
            (cond ((null rec) (format nil "@#x~8,'0X" vma))
-                 ;; A real (symbol-named) target reads better by name;
-                 ;; marker-named ones (Minima) by their listing address.
-                 ((member (cfun-name-class rec) (list :symbol :compound))
+                 ;; A real (symbol-named or donor-named) target reads
+                 ;; better by name; marker-named ones (Minima) by their
+                 ;; listing address.
+                 ((or (fnmap-donor-name fnmap (cfun-fn rec))
+                      (member (cfun-name-class rec) (list :symbol :compound)))
                   (format nil "@#x~8,'0X -> FN-#x~8,'0X ~A"
-                          vma (cfun-fn rec) (render-fn-name rec)))
+                          vma (cfun-fn rec) (render-fn-name rec fnmap)))
                  (t (format nil "@#x~8,'0X -> FN-#x~8,'0X"
                             vma (cfun-fn rec)))))))
       (t (format nil "@#x~8,'0X" vma)))))
 
 ;;; ---- Function map (for call-target resolution) --------------------------
 
-(defstruct (fnmap (:constructor %make-fnmap (ccas recs)))
+(defstruct (fnmap (:constructor %make-fnmap (ccas recs names)))
   ccas    ; simple-vector of cca, ascending
-  recs)   ; simple-vector of cfun, same order
+  recs    ; simple-vector of cfun, same order
+  names)  ; hash fn-vma -> donor name string, or NIL
 
-(defun make-fnmap (recs)
+(defun make-fnmap (recs &optional names)
   (let ((v (coerce recs 'simple-vector)))
-    (%make-fnmap (map 'simple-vector #'cfun-cca v) v)))
+    (%make-fnmap (map 'simple-vector #'cfun-cca v) v names)))
+
+(defun read-names-file (path)
+  "Donor-name map: one `#xVMA NAME` pair per line, `;` starts a comment.
+Returns a hash of vma -> name."
+  (let ((names (make-hash-table)))
+    (with-open-file (s path)
+      (loop for line = (read-line s nil)
+            while line
+            do (let* ((text (subseq line 0 (position #\; line)))
+                      (fields (let ((acc nil) (start 0))
+                                (loop
+                                  (let ((pos (position #\Space text
+                                                       :start start
+                                                       :test-not #'eql)))
+                                    (unless pos (return (nreverse acc)))
+                                    (let ((end (or (position #\Space text
+                                                             :start pos)
+                                                   (length text))))
+                                      (push (subseq text pos end) acc)
+                                      (setf start end)))))))
+                 (when fields
+                   (unless (= (length fields) 2)
+                     (error "names file ~A: malformed line ~S" path line))
+                   (let ((addr (first fields)))
+                     (setf (gethash (parse-integer
+                                     addr
+                                     :start (if (and (> (length addr) 2)
+                                                     (string-equal "#x" addr
+                                                                   :end2 2))
+                                                2 0)
+                                     :radix 16)
+                                    names)
+                           (second fields)))))))
+    names))
+
+(defun fnmap-donor-name (m vma)
+  (let ((names (and m (fnmap-names m))))
+    (and names (gethash vma names))))
 
 (defun fnmap-containing (m vma)
   "The cfun whose block [cca, cca+total) contains VMA, or NIL."
@@ -408,19 +449,21 @@ name the compiled function it holds."
         (when (< (- vma (cfun-cca r)) (cfun-total r))
           r)))))
 
-(defun render-fn-name (rec)
-  (if (cfun-name rec)
-      (render-decoded (cfun-name rec))
-      (format nil "FN-#x~8,'0X" (cfun-fn rec))))
+(defun render-fn-name (rec &optional fnmap)
+  (or (and fnmap (fnmap-donor-name fnmap (cfun-fn rec)))
+      (if (cfun-name rec)
+          (render-decoded (cfun-name rec))
+          (format nil "FN-#x~8,'0X" (cfun-fn rec)))))
 
 (defun render-call-target (fnmap word-vma odd)
   (let ((rec (and fnmap (fnmap-containing fnmap word-vma))))
     (cond ((null rec)
            (format nil "#x~8,'0X~:[~;.ODD~]" word-vma odd))
           ((and (= word-vma (cfun-fn rec)) (not odd))
-           (render-fn-name rec))
+           (render-fn-name rec fnmap))
           (t (format nil "~A+~D~:[~;.ODD~]"
-                     (render-fn-name rec) (- word-vma (cfun-fn rec)) odd)))))
+                     (render-fn-name rec fnmap) (- word-vma (cfun-fn rec))
+                     odd)))))
 
 ;;; ---- Packed-halfword rendering ------------------------------------------
 
@@ -566,8 +609,11 @@ with min args, odd half low bits = max args (sysdef.lisp
   "Print REC's instructions to STREAM, one line per instruction."
   (let* ((cca (cfun-cca rec))
          (code-words (- (cfun-total rec) (cfun-suffix rec) 2)))
-    (format stream "~&#x~8,'0X ~A~@[~50T;~D code words, suffix ~D~]~%"
-            (cfun-fn rec) (render-fn-name rec) code-words (cfun-suffix rec))
+    ;; A donor name (--names) leads; the world's own name rendering (for
+    ;; Minima worlds, the dangling build-space marker) stays visible after it.
+    (format stream "~&#x~8,'0X ~@[~A ~]~A~@[~50T;~D code words, suffix ~D~]~%"
+            (cfun-fn rec) (fnmap-donor-name fnmap (cfun-fn rec))
+            (render-fn-name rec) code-words (cfun-suffix rec))
     (dotimes (i code-words)
       (let ((vma (+ cca 2 i))
             (pc (* 2 i)))
@@ -631,15 +677,17 @@ with min args, odd half low bits = max args (sysdef.lisp
 
 ;;; ---- Driver -------------------------------------------------------------
 
-(defun disasm-world (path &key vma name (depth 24) (budget *w-decode-limit*)
+(defun disasm-world (path &key vma name names (depth 24)
+                               (budget *w-decode-limit*)
                                (stream *standard-output*))
   "The `disasm` subcommand.  VMA restricts to the function whose block
 contains it; NAME restricts to functions whose rendered name contains the
-string (case-insensitive)."
+string (case-insensitive); NAMES is a donor-name file (see
+READ-NAMES-FILE) supplying names for worlds whose own name Qs dangle."
   (let* ((model (read-world path))
          (w (windexed model))
          (recs (world-compiled-functions model :depth depth :budget budget))
-         (fnmap (make-fnmap recs))
+         (fnmap (make-fnmap recs (and names (read-names-file names))))
          (selected
            (cond (vma (let ((r (fnmap-containing fnmap vma)))
                         (unless r
@@ -647,7 +695,8 @@ string (case-insensitive)."
                         (list r)))
                  (name (remove-if-not
                         (lambda (r)
-                          (search name (render-fn-name r) :test #'char-equal))
+                          (search name (render-fn-name r fnmap)
+                                  :test #'char-equal))
                         recs))
                  (t recs))))
     (format stream "~&;;; ~A: disassembling ~:D of ~:D compiled function~:P~%"
