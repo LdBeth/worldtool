@@ -27,7 +27,7 @@
              ~7T worldtool functions FILE [--depth N] [--budget N] ~
 [--listing OUT]~%~
              ~7T worldtool disasm FILE [--vma HEXADDR | --name STRING] ~
-[--names FILE]~%~
+[--names FILE]  (FILE may be a world or a .vbin)~%~
              ~7T worldtool vbin FILE... [--trace]~%~
              ~7T worldtool export FILE OUT.sexp OUT.qs~%~
              ~7T worldtool emit SPEC.sexp OUT~%~

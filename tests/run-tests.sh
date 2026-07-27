@@ -62,6 +62,17 @@ if [ -f "$SYSDIR/io/lmini.vbin" ]; then
     echo "$vb" | grep -q "SETQ MINI-DESTINATION-ADDRESS 257" \
         || { echo "FAIL: lmini patched setq missing"; fail=1; }
     echo "$vb" | grep -q "2 files, 0 failures" || { echo "FAIL: vbin decode failures"; fail=1; }
+
+    # disasm on a .vbin: the wire-format path.  INITIALIZATION-LIST-SYMBOL-P
+    # must render the same instruction stream the world disassembler prints
+    # for it out of Genera-8-5.vlod (verified A/B 2026-07-27).
+    vdis=$("$WT" disasm "$SYSDIR/sys/ltop.vbin" --name initialization-list-symbol-p)
+    echo "$vdis" | grep -q "disassembling 1 of 27 compiled functions" \
+        || { echo "FAIL: vbin disasm selection"; fail=1; }
+    echo "$vdis" | grep -q "START-CALL-INDIRECT-PREFETCH #'GET" \
+        || { echo "FAIL: vbin disasm indirect call"; fail=1; }
+    echo "$vdis" | grep -q "PUSH-CONSTANT INITIALIZATION-LIST" \
+        || { echo "FAIL: vbin disasm constant"; fail=1; }
 else
     echo "skip: $SYSDIR .vbins not found"
 fi

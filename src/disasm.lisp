@@ -675,6 +675,15 @@ with min args, odd half low bits = max args (sysdef.lisp
 (defun entry-instruction-p (bits)
   (member (insn-opcode bits) (list #o176 #o177)))
 
+(defun seq-marks (seq)
+  "The even/odd halfword margin marks for sequencing code SEQ, as Genera
+prints them: cdr 3 is the full-word-follows glue (even half falls into
+the next word, \"++\"; the odd half skips over it, \"+++\"); cdr 2 runs
+backwards (\"-\"); cdr 1 (fence) inside the code region means the header
+lied."
+  (values (case seq (0 "   ") (1 "###") (2 "-  ") (3 "++ "))
+          (case seq (0 "   ") (1 "###") (2 "-  ") (3 "+++"))))
+
 (defun disassemble-cfun (w rec fnmap stream)
   "Print REC's instructions to STREAM, one line per instruction."
   (let* ((cca (cfun-cca rec))
@@ -692,24 +701,17 @@ with min args, odd half low bits = max args (sysdef.lisp
             ((null tag)
              (format stream "~4D      #<UNMAPPED>~%" pc))
             ((>= (tag-type tag) +type-packed-instruction-low+)
-             ;; Sequencing markers, as Genera prints them: cdr 3 is the
-             ;; full-word-follows glue (even half falls into the next word,
-             ;; "++"; the odd half skips over it, "+++"); cdr 2 runs
-             ;; backwards ("-"); cdr 1 (fence) inside the code region means
-             ;; the header lied.
-             (let* ((seq (ash tag -6))
-                    (even (q-even-instruction data))
-                    (odd (q-odd-instruction tag data))
-                    (even-mark (case seq (0 "   ") (1 "###") (2 "-  ") (3 "++ ")))
-                    (odd-mark  (case seq (0 "   ") (1 "###") (2 "-  ") (3 "+++"))))
-               (cond ((and (zerop i) (entry-instruction-p even))
-                      (format stream "~4D      ~A~%"
-                              pc (render-entry-word tag data)))
-                     (t
-                      (format stream "~4D ~A ~A~%"
-                              pc even-mark (render-packed even pc))
-                      (format stream "~4D ~A ~A~%"
-                              (1+ pc) odd-mark (render-packed odd (1+ pc)))))))
+             (multiple-value-bind (even-mark odd-mark) (seq-marks (ash tag -6))
+               (let ((even (q-even-instruction data))
+                     (odd (q-odd-instruction tag data)))
+                 (cond ((and (zerop i) (entry-instruction-p even))
+                        (format stream "~4D      ~A~%"
+                                pc (render-entry-word tag data)))
+                       (t
+                        (format stream "~4D ~A ~A~%"
+                                pc even-mark (render-packed even pc))
+                        (format stream "~4D ~A ~A~%"
+                                (1+ pc) odd-mark (render-packed odd (1+ pc))))))))
             (t
              ;; Full-word instruction (one line, even pc).
              (let ((type (tag-type tag)))
@@ -745,7 +747,207 @@ with min args, odd half low bits = max args (sysdef.lisp
                          (t (format nil "PUSH-CONSTANT ~A"
                                     (render-q w tag data fnmap)))))))))))))
 
+;;; ---- .vbin input ----------------------------------------------------------
+;;;
+;;; A BIN file's compiled functions arrive as VFUN structs (vbin.lisp)
+;;; whose code Qs are VWORDs in the l-bin wire format cold-fun.lisp
+;;; materializes: op bits 0-7 = tag byte (cdr bits 6-7 are the sequencing
+;;; code), bit 8 TYPE-FROM-TAG, bit 9 IMMEDIATE (raw 32-bit datum), bit 10
+;;; RELATIVE (datum = word offset from the function address).  Operands
+;;; are decoded loader objects rather than world Qs, so this path renders
+;;; them directly; addresses do not exist yet, so functions go by their
+;;; fspec and self-references by halfword pc.
+
+(defun vfun-fspec (vf)
+  (let ((ns (vfun-name-and-storage vf)))
+    (if (consp ns) (first ns) ns)))
+
+(defun vbin-vfuns (vbin)
+  "Every VFUN in the file's object graph, in encounter order.  Walks
+through conses, vops, arrays, instances, evals, locatives, and other
+functions' operands (embedded and shared functions arrive that way);
+the visited table doubles as the cycle guard for INITIALIZE-LIST
+structure."
+  (let ((seen (make-hash-table :test #'eq))
+        (acc nil))
+    (labels ((walk (x)
+               (typecase x
+                 (cons (unless (gethash x seen)
+                         (setf (gethash x seen) t)
+                         (walk (car x))
+                         (walk (cdr x))))
+                 (vfun (unless (gethash x seen)
+                         (setf (gethash x seen) t)
+                         (push x acc)
+                         (map nil (lambda (vw) (walk (vword-data vw)))
+                              (vfun-words x))))
+                 (vop (walk (vop-args x)))
+                 (varray (walk (varray-dimensions x))
+                         (walk (varray-options x))
+                         (when (varray-contents x)
+                           (map nil #'walk (varray-contents x))))
+                 (vinstance (walk (vinstance-flavor x))
+                            (walk (vinstance-plist x)))
+                 (veval (walk (veval-form x)))
+                 (vloc (walk (vloc-target x))))))
+      (dolist (event (vbin-file-events vbin))
+        (walk (cdr event)))
+      (nreverse acc))))
+
+(defun render-vbin-object (x)
+  "Compact one-line print of a decoded loader object.  Depth and length
+caps stand in for the cycle guard: BIN list structure can be circular."
+  (with-output-to-string (s)
+    (labels ((emit (x depth)
+               (cond ((vsym-p x) (write-string (vsym-print-name x) s))
+                     ((stringp x) (prin1 x s))
+                     ((null x) (write-string "NIL" s))
+                     ((integerp x) (format s "~D" x))
+                     ((consp x)
+                      (if (zerop depth)
+                          (write-string "..." s)
+                          (progn
+                            (write-char #\( s)
+                            (loop for head = x then (cdr head)
+                                  for n from 0
+                                  do (cond ((null head) (return))
+                                           ((not (consp head))
+                                            (write-string " . " s)
+                                            (emit head (1- depth))
+                                            (return))
+                                           ((>= n 32)
+                                            (write-string " ..." s)
+                                            (return))
+                                           (t (when (plusp n)
+                                                (write-char #\Space s))
+                                              (emit (car head) (1- depth)))))
+                            (write-char #\) s))))
+                     (t (format s "~A" x)))))   ; V* print-object methods
+      (emit x 8))))
+
+(defun render-vbin-locative (datum)
+  "The operand of PUSH-INDIRECT / START-CALL-INDIRECT: a vloc, rendered
+like the world path's symbol cells."
+  (if (vloc-p datum)
+      (ecase (vloc-kind datum)
+        (:value (render-vbin-object (vloc-target datum)))
+        (:function (format nil "#'~A" (render-vbin-object (vloc-target datum)))))
+      (render-vbin-object datum)))
+
+(defun render-vbin-call-target (datum rel odd)
+  (cond ((and rel (integerp datum))
+         ;; Offset from the function address = code word index = pc/2.
+         (format nil "SELF ~D" (+ (* 2 datum) (if odd 1 0))))
+        ((vfun-p datum) (render-vbin-object (vfun-fspec datum)))
+        ((vembed-p datum)
+         (format nil "EMBEDDED-FN CCA+~D~:[~;.ODD~]" (vembed-offset datum) odd))
+        (t (format nil "~A~:[~;.ODD~]" (render-vbin-object datum) odd))))
+
+(defun render-vbin-fullword (tagbyte tft imm rel datum)
+  (let ((type (tag-type tagbyte)))
+    (cond
+      ;; Type-from-object: the Q's type comes from the operand itself, so
+      ;; whatever the tag byte holds this is a constant load.
+      ((not tft)
+       (format nil "PUSH-CONSTANT ~A" (render-vbin-object datum)))
+      ((= type +type-evcp+)
+       (format nil "PUSH-INDIRECT ~A" (render-vbin-locative datum)))
+      ((member type (list +type-call-compiled-even+
+                          +type-call-compiled-odd+
+                          +type-call-compiled-even-prefetch+
+                          +type-call-compiled-odd-prefetch+))
+       (format nil "START-CALL-DIRECT~:[~;-PREFETCH~] ~A"
+               (member type (list +type-call-compiled-even-prefetch+
+                                  +type-call-compiled-odd-prefetch+))
+               (render-vbin-call-target
+                datum rel
+                (member type (list +type-call-compiled-odd+
+                                   +type-call-compiled-odd-prefetch+)))))
+      ((member type (list +type-call-indirect+ +type-call-indirect-prefetch+))
+       (format nil "START-CALL-INDIRECT~:[~;-PREFETCH~] ~A"
+               (= type +type-call-indirect-prefetch+)
+               (render-vbin-locative datum)))
+      ((member type (list +type-call-generic+ +type-call-generic-prefetch+))
+       (format nil "START-CALL-GENERIC~:[~;-PREFETCH~] ~A"
+               (= type +type-call-generic-prefetch+)
+               (render-vbin-object datum)))
+      ((= type +type-native-instruction+)
+       (format nil "NATIVE-INSTRUCTION #x~8,'0X"
+               (if (vnative-p datum) (vnative-word datum) datum)))
+      ((and rel (integerp datum)
+            (member type (list +type-even-pc+ +type-odd-pc+)))
+       (format nil "PUSH-CONSTANT PC ~D"
+               (+ (* 2 datum) (if (= type +type-odd-pc+) 1 0))))
+      ((and imm (= type +type-single-float+))
+       (format nil "PUSH-CONSTANT ~F" (decode-ieee-single datum)))
+      ((and imm (= type +type-fixnum+))
+       (format nil "PUSH-CONSTANT ~D" (sign-extend datum 32)))
+      ((and imm (= type +type-character+))
+       (format nil "PUSH-CONSTANT #<CHAR #x~8,'0X>" datum))
+      (imm (format nil "PUSH-CONSTANT #<~A #x~8,'0X>"
+                   (aref *data-type-names* type) datum))
+      (t (format nil "PUSH-CONSTANT ~A" (render-vbin-object datum))))))
+
+(defun disassemble-vfun (vf stream)
+  "Print VF's instructions to STREAM, one line per instruction."
+  (let* ((total (vfun-total-size vf))
+         (suffix (vfun-suffix-size vf))
+         (code-words (- total suffix 2))
+         (words (vfun-words vf)))
+    (format stream "~&~A~50T;~D code words, suffix ~D~%"
+            (render-vbin-object (vfun-fspec vf)) code-words suffix)
+    (dotimes (i code-words)
+      (let* ((vw (aref words i))
+             (op (vword-op vw))
+             (tagbyte (ldb (byte 8 0) op))
+             (tft (logbitp 8 op))
+             (imm (logbitp 9 op))
+             (rel (logbitp 10 op))
+             (datum (vword-data vw))
+             (pc (* 2 i)))
+        (if (and imm
+                 (>= (tag-type tagbyte) +type-packed-instruction-low+))
+            (multiple-value-bind (even-mark odd-mark)
+                (seq-marks (ash tagbyte -6))
+              (let ((even (q-even-instruction datum))
+                    (odd (q-odd-instruction tagbyte datum)))
+                (cond ((and (zerop i) (entry-instruction-p even))
+                       (format stream "~4D      ~A~%"
+                               pc (render-entry-word tagbyte datum)))
+                      (t
+                       (format stream "~4D ~A ~A~%"
+                               pc even-mark (render-packed even pc))
+                       (format stream "~4D ~A ~A~%"
+                               (1+ pc) odd-mark (render-packed odd (1+ pc)))))))
+            (format stream "~4D     ~A~%" pc
+                    (render-vbin-fullword tagbyte tft imm rel datum)))))))
+
+(defun disasm-vbin (path &key name (stream *standard-output*))
+  (let* ((vbin (read-vbin path))
+         (vfuns (vbin-vfuns vbin))
+         (selected (if name
+                       (remove-if-not
+                        (lambda (vf)
+                          (search name (render-vbin-object (vfun-fspec vf))
+                                  :test #'char-equal))
+                        vfuns)
+                       vfuns)))
+    (format stream "~&;;; ~A: disassembling ~:D of ~:D compiled function~:P~%"
+            path (length selected) (length vfuns))
+    (dolist (vf selected)
+      (terpri stream)
+      (disassemble-vfun vf stream))
+    (length selected)))
+
 ;;; ---- Driver -------------------------------------------------------------
+
+(defun bin-file-p (path)
+  "True when PATH starts with the BIN-OP-FORMAT-VERSION escape command
+\(word #xF013) -- the first word of every BIN file."
+  (with-open-file (f path :element-type '(unsigned-byte 8))
+    (let* ((b0 (read-byte f nil))
+           (b1 (read-byte f nil)))
+      (and b0 b1 (= (logior b0 (ash b1 8)) #xF013)))))
 
 (defun disasm-world (path &key vma name names (depth 24)
                                (budget *w-decode-limit*)
@@ -753,7 +955,15 @@ with min args, odd half low bits = max args (sysdef.lisp
   "The `disasm` subcommand.  VMA restricts to the function whose block
 contains it; NAME restricts to functions whose rendered name contains the
 string (case-insensitive); NAMES is a donor-name file (see
-READ-NAMES-FILE) supplying names for worlds whose own name Qs dangle."
+READ-NAMES-FILE) supplying names for worlds whose own name Qs dangle.
+A BIN file (compiler output; no addresses yet) takes the DISASM-VBIN
+path: NAME still filters, VMA and NAMES do not apply."
+  (when (bin-file-p path)
+    (when vma
+      (error "--vma needs a world's address space; ~A is a BIN file" path))
+    (when names
+      (error "--names maps world addresses; ~A is a BIN file" path))
+    (return-from disasm-world (disasm-vbin path :name name :stream stream)))
   (let* ((model (read-world path))
          (w (windexed model))
          (recs (world-compiled-functions model :depth depth :budget budget))
