@@ -74,8 +74,15 @@ TMPDIR [--sys SYSDIR]~%~
            (let ((model (read-world file)))
              (multiple-value-bind (value vma n)
                  (world-symbol-value model pname)
-               (format t "~&~A (symbol #x~8,'0X~@[, ~D candidates~]): ~S~%"
-                       pname vma (and (> n 1) n) value)))
+               ;; An undecoded (:Q tag data) also prints its data word in
+               ;; hex: every vma in this system is quoted in hex, and a
+               ;; decimal-only pointer invites hand-conversion slips.
+               (format t "~&~A (symbol #x~8,'0X~@[, ~D candidates~]): ~S~
+~@[ = #x~8,'0X~]~%"
+                       pname vma (and (> n 1) n) value
+                       (and (consp value) (eq (first value) :q)
+                            (integerp (third value))
+                            (third value)))))
            0))
         ((string= (first args) "functions")
          (let ((file (second args))

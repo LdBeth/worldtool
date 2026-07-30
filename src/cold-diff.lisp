@@ -1866,6 +1866,131 @@ expected ~D" name i lt ld lv)))
                           always (zerop (nth-value 1 (cw-ref w (+ base i)))))))
                  "~A data matches its spec" name)))))))))
 
+(defun cold-q-string (tag data)
+  "TAG:DATA for a check message, or \"unmapped\" when the read missed."
+  (if tag (format nil "~2,'0X:~8,'0X" tag data) "unmapped"))
+
+(defun cold-existing-symbol-vma (w vsym)
+  "Symbol-block vma already interned for VSYM, or NIL.  Unlike COLD-VSYM
+this never allocates: a post-emit gate that interned would mint a symbol
+the emitted file cannot contain."
+  (let* ((name (vsym-name vsym))
+         (package (canonical-package-name (vsym-package vsym))))
+    (and package
+         (gethash (cons name (cold-resolve-home name package))
+                  (cold-world-symbols w)))))
+
+(defun cold-wired-array-geometry (w spec)
+  "Expected file geometry of a *COLD-WIRED-ARRAYS* SPEC, mirroring
+COLD-ARRAY's layout rules (none of these specs is named-structure or
+displaced).  Returns (values header-word leader-length first-offset
+last-offset), the offsets relative to the array's HEADER vma:
+FIRST-OFFSET is negative when the array carries a leader (the leader
+header Q sits leader-length+1 Qs below the header) and LAST-OFFSET names
+the array's last data Q."
+  (destructuring-bind (package name type dims
+                       &key fill-pointer leader-length leader-list
+                            contents symbol-contents words fill-fixnum
+                            last-cdr-nil area)
+      spec
+    (declare (ignore package name contents symbol-contents words fill-fixnum
+                     last-cdr-nil area))
+    (let* ((code (cold-array-type-code w type))
+           (packing (ldb (byte 3 1) code))
+           (len (if (listp dims) (reduce #'* dims) dims))
+           (ndims (if (listp dims) (length dims) 1))
+           (longp (or (> ndims 1) (>= len (ash 1 15))))
+           (nwords (if (zerop packing) len (ceiling len (ash 1 packing))))
+           (prefix-extra (if longp (+ 3 (* 2 ndims)) 0))
+           ;; cold-array: explicit :LEADER-LENGTH wins, a fill pointer
+           ;; forces >= 1, an implicit leader grows to hold :LEADER-LIST.
+           (ll (or leader-length 0)))
+      (when fill-pointer (setf ll (max ll 1)))
+      (unless leader-length (setf ll (max ll (length leader-list))))
+      (values (logior (ash code 26)
+                      (ash ll 15)
+                      (if longp (logior (ash 1 23) ndims) len))
+              ll
+              (if (zerop ll) 0 (- (1+ ll)))
+              (+ prefix-extra nwords)))))
+
+(defun file-page-wired-p (fresh vma)
+  "True when VMA's Ivory page is present in FRESH's WIRED load map (an
+unwired-map hit does not count: the wired region is never pageable)."
+  (loop for e in (world-model-wired-map fresh)
+        thereis (and (= (map-entry-opcode e) +op-data-pages+)
+                     (<= (map-entry-address e) vma)
+                     (< vma (+ (map-entry-address e) (map-entry-count e))))))
+
+(defun check-wired-arrays-in-file (w fresh)
+  "Post-emit gate: CHECK-WIRED-ARRAYS validates the generator-owned wired
+arrays in the world under construction, which cannot see a write that
+never reaches the emitted file.  For every *COLD-WIRED-ARRAYS* spec,
+resolve the value cell in the RE-READ file and assert (a) it holds a
+DTP-ARRAY, (b) the Q at that vma is a real HEADER-I whose header word is
+the spec's type / leader-length / length, (c) EVERY Ivory page of the
+array's whole extent -- leader header Q through last data Q -- is present
+in the file's wired map, and (d) the emitted *REGION-FREE-POINTER* row for
+the array's region ends at or past the array, so the boot allocator cannot
+cons over it (the boot-47 fp discipline, on the file this time).  A hole
+here is fatal at run time and invisible from the model: the emulator
+materializes the absent tail of a host page as 00:FFFFFFFF poison, and a
+wired reader -- INITIALIZE-INTERRUPTS' ARRAY-SHORT-LENGTH-FIELD, say --
+would build its structures on poison geometry."
+  (let ((array (cold-dtp w "ARRAY"))
+        (header-i (cold-dtp w "HEADER-I"))
+        (fp-tbl (cold-machinery w :region-free-pointer)))
+    (dolist (spec *cold-wired-arrays*)
+      (destructuring-bind (package name type dims
+                           &key (area "WIRED-CONTROL-TABLES") &allow-other-keys)
+          spec
+        (declare (ignore type dims))
+        (let ((symvma (cold-existing-symbol-vma w (make-vsym package name))))
+          (cold-check symvma "~A is interned" name)
+          (when symvma
+            (multiple-value-bind (tag data) (w-follow-cell fresh (1+ symvma))
+              (cold-check (and tag (= (tag-type tag) array))
+                          "~A: file value cell is ~A, expected DTP-ARRAY ~
+(~2,'0X)" name (cold-q-string tag data) array)
+              (when (and tag (= (tag-type tag) array))
+                (multiple-value-bind (expect-header ll first-off last-off)
+                    (cold-wired-array-geometry w spec)
+                  (declare (ignore ll))
+                  (multiple-value-bind (ht hd) (world-q fresh data)
+                    (cold-check (and ht (= (tag-type ht) header-i)
+                                     (eql hd expect-header))
+                                "~A: file header at #x~8,'0X is ~A, ~
+expected ~2,'0X:~8,'0X"
+                                name data (cold-q-string ht hd)
+                                (tag 1 header-i) expect-header))
+                  ;; (c) the whole extent, page by page.
+                  (let ((absent nil))
+                    (loop for vma from (logandc2 (+ data first-off) #xFF)
+                            to (+ data last-off)
+                          by +ivory-page-size-qs+
+                          unless (file-page-wired-p fresh vma)
+                            do (push vma absent))
+                    (cold-check (null absent)
+                                "~A: extent #x~8,'0X..#x~8,'0X missing ~D ~
+page~:P from the file's wired map (first #x~8,'0X)"
+                                name (+ data first-off) (+ data last-off)
+                                (length absent) (car (last absent))))
+                  ;; (d) the emitted region free pointer covers it.
+                  (let ((region (cold-area-current-region w area)))
+                    (cold-check region "~A: area ~A has a region" name area)
+                    (when region
+                      (let ((r (cold-region-number region))
+                            (origin (cold-region-origin region)))
+                        (multiple-value-bind (ft fd)
+                            (world-q fresh (+ fp-tbl 1 r))
+                          (cold-check
+                           (and ft (<= origin (+ data first-off))
+                                (< (+ data last-off) (+ origin fd)))
+                           "~A: extent #x~8,'0X..#x~8,'0X outside region ~
+~D's emitted free pointer #x~8,'0X~@[+~X~]"
+                           name (+ data first-off) (+ data last-off)
+                           r origin (and ft fd)))))))))))))))
+
 (defun check-readtable-leaders (w reference)
   "M3h boot-40 gate: the named-structure readtable arrays must carry a
 real leader (dist leader-length 38), not the leaderless header the old
@@ -4198,6 +4323,11 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
               (cold-check (zerop unwired-pcs)
                           "trap page: ~D handler PCs on unwired pages"
                           unwired-pcs))
+            ;; Every generator-owned wired array, ON THE FILE: cell tagged
+            ;; DTP-ARRAY, a real header Q with the spec's type/leader/length
+            ;; bits, every page of its extent in the file's wired map, and
+            ;; the emitted region free pointer past its last Q.
+            (check-wired-arrays-in-file w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
