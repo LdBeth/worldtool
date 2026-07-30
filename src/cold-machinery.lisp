@@ -136,16 +136,24 @@ Only :PHYSICAL-ADDRESS appears in the cold set; vma=pma maps it at
           return (ldb (byte 32 0) (+ #xF8000000 value))
         finally (error "Magic block options ~S: no PHYSICAL-ADDRESS" options)))
 
-(defun cold-magic-var-cell (w var)
-  "(values cell-vma kind) for one DEFINE-MAGIC-LOCATIONS variable entry:
-a symbol forwards its value cell, (FUNCTION f) its function cell."
-  (cond ((vsym-p var)
-         (values (+ (cold-vsym w var) 1) :value))
+(defun cold-magic-var-parts (var)
+  "(values kind symbol) for one DEFINE-MAGIC-LOCATIONS variable entry: a
+bare symbol is a :VALUE (the ventry type :VARIABLE), (FUNCTION f) a
+:FUNCTION.  REDEFINE-MAGIC-LOCATIONS' third form, (QUOTE value), appears
+nowhere in the cold set (i-compiler/i-sysdef-support.lisp:360)."
+  (cond ((vsym-p var) (values :value var))
         ((and (consp var) (vsym-p (first var))
               (string= (vsym-name (first var)) "FUNCTION")
               (vsym-p (second var)))
-         (values (+ (cold-vsym w (second var)) 2) :function))
+         (values :function (second var)))
         (t (error "Unsupported magic-location entry ~S" var))))
+
+(defun cold-magic-var-cell (w var)
+  "(values cell-vma kind) for one DEFINE-MAGIC-LOCATIONS variable entry:
+a symbol forwards its value cell, (FUNCTION f) its function cell."
+  (multiple-value-bind (kind sym) (cold-magic-var-parts var)
+    (values (+ (cold-vsym w sym) (ecase kind (:value 1) (:function 2)))
+            kind)))
 
 (defun cold-do-define-magic-locations (w parsed)
   "PARSED = (block-name options var-list), already unquoted.  Forward each
@@ -170,6 +178,36 @@ but no store."
                    (multiple-value-bind (tag data) (cw-ref w cell)
                      (declare (ignore data))
                      (cw-set w cell (logior (logand tag #xC0) fwd) slot))))))))
+
+(defun cold-magic-locations-value (w)
+  "The host structure of SI:*MAGIC-LOCATIONS*, mirroring the distribution:
+one entry per magic block,
+
+    (BLOCK-NAME #<locative base> #<locative base+nvars> (TYPE sym) ...)
+
+with TYPE a KEYWORD (:VARIABLE / :FUNCTION -- REDEFINE-MAGIC-LOCATIONS
+conses (LIST TYPE VAL) out of its own (VALUES :VARIABLE ...), and
+i-sys/linker.lisp:203 tests (EQ TYPE :FUNCTION)).  The block order is the
+stash order, which is the reverse of sysdf1's BOOT/FEP/SYSTEM definition
+order and therefore the distribution alist's order (SYSTEM, FEP, BOOT).
+
+The dist's END locative is exactly BASE+NVARS: SI:DEFINE-MAGIC-LOCATIONS-1
+\(i-sysdef-support.lisp:335) re-SETFs it to (%POINTER-PLUS ADDRESS LENGTH)
+on every warm redefinition, after requiring END-ADDRESS <= LENGTH."
+  (loop with loc = (tag 0 (cold-dtp w "LOCATIVE"))
+        for (block-name options vars) in (cold-world-magic w)
+        for base = (cold-magic-block-vma options)
+        collect (list* block-name
+                       (make-vraw loc base)
+                       (make-vraw loc (ldb (byte 32 0) (+ base (length vars))))
+                       (loop for var in vars
+                             collect (multiple-value-bind (kind sym)
+                                         (cold-magic-var-parts var)
+                                       (list (make-vsym "KEYWORD"
+                                                        (ecase kind
+                                                          (:value "VARIABLE")
+                                                          (:function "FUNCTION")))
+                                             sym))))))
 
 ;;; ---------------- Packed-array element access ----------------
 
@@ -717,6 +755,24 @@ wired-table forwards, so they land in the comm slots or wired cells."
         (cold-set-symbol-value
          w (make-vsym "SYSTEM-INTERNALS" "*COLD-LOADED-FILE-PROPERTY-LISTS*")
          ntag ndata))
+      ;; SI:*MAGIC-LOCATIONS* -- argless (DEFVAR *MAGIC-LOCATIONS*)
+      ;; (sys/ldata.lisp:203, ";Set up by the cold-load generator and not
+      ;; otherwise declared").  COMPILER:DISASSEMBLE-DECODE-LOCATIVE
+      ;; (i-compiler/inner.lisp:233) loops over it to name a magic cell,
+      ;; and every wired function reaching a null-region locative --
+      ;; FLOAT's FLOAT-OPERATING-MODE, for one -- takes that path through
+      ;; VALIDATE-FUNCTION-STORAGE-CATEGORY-DECLARATIONS while QLD loads
+      ;; the file: (si:qld) trapped 57 there on SYS:I-SYS;FLOAT.VBIN.
+      ;; Stamped with the full ventry lists, not NIL: SI:DEFINE-MAGIC-
+      ;; LOCATIONS-1 ASSQs the block ("Magic block ~A not found.") and
+      ;; EQUAL-checks each existing ventry against (LIST TYPE VAL) when
+      ;; sysdf1 is reloaded warm.  Consed in PERMANENT-STORAGE-AREA's
+      ;; LIST region: the same reload RPLACDs the entry's NTHCDR 3.
+      (multiple-value-bind (tag data)
+          (cold-ref w (cold-magic-locations-value w)
+                    :area "PERMANENT-STORAGE-AREA")
+        (cold-set-symbol-value
+         w (make-vsym "SYSTEM-INTERNALS" "*MAGIC-LOCATIONS*") tag data))
       ;; Reserved-region identities (storage.lisp:249; nothing in the
       ;; sources sets these -- generator contract).  initialize-storage-
       ;; globals resets PAGE-TABLE-AREA's free pointer through them and

@@ -1224,6 +1224,127 @@ forward to #x~8,'0X"
                                (vsym-name (if (consp var) (second var) var))
                                cell tag data slot)))))))
 
+(defun cold-list-qs (w tag data)
+  "The element Qs of the cold list Q TAG:DATA as a list of (tag . data)."
+  (let ((qs nil))
+    (cold-map-list w tag data
+                   (lambda (et ed evma)
+                     (declare (ignore evma))
+                     (push (cons et ed) qs)
+                     nil))
+    (nreverse qs)))
+
+(defun check-magic-locations-stamp (w)
+  "Post-M3h issue 7 gate (QLD attempt 3): SI:*MAGIC-LOCATIONS* is a
+generator obligation -- an argless (DEFVAR *MAGIC-LOCATIONS*)
+\(sys/ldata.lisp:203) nothing in the sources ever sets.
+COMPILER:DISASSEMBLE-DECODE-LOCATIVE loops over it whenever it must name
+a locative with a null region number (i-compiler/inner.lisp:233), which
+VALIDATE-FUNCTION-STORAGE-CATEGORY-DECLARATIONS reaches for every wired
+function QLD loads: unbound, (si:qld) trapped 57 there loading
+SYS:I-SYS;FLOAT.VBIN (FLOAT-OPERATING-MODE is a SYSCOM magic cell).
+
+The shape must match the distribution exactly, because SI:DEFINE-MAGIC-
+LOCATIONS-1 re-runs on the warm sysdf1: it ASSQs the block name (\"Magic
+block ~A not found.\"), requires (END - BASE) <= NVARS, and EQUAL-checks
+every existing ventry against its freshly consed (LIST TYPE VAL)
+\(\"Entry ~S doesn't match.\").  Layout ground truth cross-checks the
+block order, the base locatives and every ventry."
+  (let* ((layout-blocks (layout-section (cold-world-layout w)
+                                        :magic-locations))
+         (dtp-list (cold-dtp w "LIST"))
+         (dtp-loc (cold-dtp w "LOCATIVE"))
+         (dtp-symbol (cold-dtp w "SYMBOL")))
+    (multiple-value-bind (tag data boundp)
+        (cold-symbol-value-q w (make-vsym "SYSTEM-INTERNALS"
+                                          "*MAGIC-LOCATIONS*"))
+      (unless (cold-check (and boundp (= (tag-type tag) dtp-list))
+                          "SI:*MAGIC-LOCATIONS* is a bound list for ~
+DISASSEMBLE-DECODE-LOCATIVE (got ~:[unbound~;~2,'0X:~8,'0X~])"
+                          boundp tag data)
+        (return-from check-magic-locations-stamp nil))
+      (let ((entries (cold-list-qs w tag data)))
+        (unless (cold-check (= (length entries) (length layout-blocks))
+                            "SI:*MAGIC-LOCATIONS* has ~D entries, layout ~D"
+                            (length entries) (length layout-blocks))
+          (return-from check-magic-locations-stamp nil))
+        (loop for (etag . edata) in entries
+              for block in layout-blocks
+              do (destructuring-bind (bname bbase bend bventries) block
+                   (let ((name (strip-package bname))
+                         (nvars (length bventries)))
+                     ;; The layout's own END is base+nvars (the dist ran
+                     ;; DEFINE-MAGIC-LOCATIONS-1's SETF of THIRD).
+                     (cold-check (= bend (ldb (byte 32 0) (+ bbase nvars)))
+                                 "~A layout end #x~8,'0X /= base+~D"
+                                 name bend nvars)
+                     (unless (cold-check (= (tag-type etag) dtp-list)
+                                         "~A entry is ~2,'0X:~8,'0X, not a list"
+                                         name etag edata)
+                       (return))
+                     (let* ((qs (cold-list-qs w etag edata))
+                            (head (first qs))
+                            (base (second qs))
+                            (end (third qs))
+                            (ventries (nthcdr 3 qs)))
+                       (cold-check
+                        (and (= (length qs) (+ 3 nvars))
+                             (= (tag-type (car head)) dtp-symbol)
+                             (equal (cold-symbol-pname-at w (cdr head)) name))
+                        "~A entry: ~D Qs (want ~D) headed by ~A"
+                        name (length qs) (+ 3 nvars)
+                        (and head (cold-symbol-pname-at w (cdr head))))
+                       (when (= (length qs) (+ 3 nvars))
+                         (cold-check
+                          (and (= (tag-type (car base)) dtp-loc)
+                               (= (cdr base) bbase))
+                          "~A base is ~2,'0X:~8,'0X, layout locative #x~8,'0X"
+                          name (car base) (cdr base) bbase)
+                         (cold-check
+                          (and (= (tag-type (car end)) dtp-loc)
+                               (= (cdr end) bend))
+                          "~A end is ~2,'0X:~8,'0X, want base+~D = #x~8,'0X"
+                          name (car end) (cdr end) nvars bend)
+                         (loop for (vtag . vdata) in ventries
+                               for (ltype lval) in bventries
+                               for slot from bbase
+                               for want-type = (if (eq ltype :function)
+                                                   "FUNCTION" "VARIABLE")
+                               do (unless
+                                      (cold-check (= (tag-type vtag) dtp-list)
+                                                  "~A slot #x~8,'0X: ventry ~
+is ~2,'0X:~8,'0X, not a list" name slot vtag vdata)
+                                    (return))
+                                  (let ((pair (cold-list-qs w vtag vdata)))
+                                    (unless
+                                        (cold-check
+                                         (and (= (length pair) 2)
+                                              (every (lambda (q)
+                                                       (= (tag-type (car q))
+                                                          dtp-symbol))
+                                                     pair))
+                                         "~A slot #x~8,'0X: ventry is not two ~
+symbols (~D Qs)" name slot (length pair))
+                                      (return))
+                                    (let ((type (cold-symbol-pname-at
+                                                 w (cdr (first pair))))
+                                          (tpkg (cold-symbol-package-name-at
+                                                 w (cdr (first pair))))
+                                          (var (cold-symbol-pname-at
+                                                w (cdr (second pair)))))
+                                      (cold-check
+                                       (and (equal type want-type)
+                                            (equal tpkg "KEYWORD"))
+                                       "~A slot #x~8,'0X: ventry type ~A:~A, ~
+want KEYWORD:~A" name slot tpkg type want-type)
+                                      ;; Layout ventry value: (:SYM "PKG:NAME").
+                                      (cold-check
+                                       (equal var
+                                              (strip-package (second lval)))
+                                       "~A slot #x~8,'0X: ventry names ~A, ~
+layout ~A" name slot var (strip-package (second lval))))))))))))))
+  t)
+
 (defun check-syscom-slots (w start)
   (let ((dtp-null (cold-dtp w "NULL"))
         (dtp-nil (cold-dtp w "NIL"))
@@ -3952,6 +4073,10 @@ prints the R1 unbound-function-cell audit."
           (cold-check (and boundp (= data (cold-world-nil-vma w)))
                       "SI:*COLD-LOADED-FILE-PROPERTY-LISTS* stamped NIL ~
 for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
+        ;; COMPILER:DISASSEMBLE-DECODE-LOCATIVE's magic-locations loop
+        ;; (QLD attempt 3 trap 57 on SYS:I-SYS;FLOAT.VBIN): stamped with
+        ;; the real ventries by cold-stamp-storage-values.
+        (check-magic-locations-stamp w)
         ;; No deferred COMPILE-FLAVOR-METHODS-LOAD-TIME composes a flavor
         ;; whose transitive component closure has an undefined hole at that
         ;; point in the boot order -- COMPOSE-FLAVOR-COMBINATION would WARN,
