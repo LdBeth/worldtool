@@ -737,6 +737,27 @@ replay~%" wrapped))
         (when (plusp snapped)
           (format t "~&  ~D compiled-code cell reference~:P re-snapped ~
 through one-q-forwards~%" snapped)))
+      ;; 6b. Handler-based fspec census.  (:LAMBDA-MACRO name) now gets a
+      ;;     real plist cell (*COLD-LAMBDA-MACRO-CELLS*); every OTHER
+      ;;     two-element list fspec still lands in a detached
+      ;;     (fspec . cell) block that no runtime reader can find.  Print
+      ;;     the roster so the next family whose handler needs a real cell
+      ;;     surfaces here instead of during QLD.
+      (when (plusp (length (cold-world-lambda-macro-cells w)))
+        (format t "~&  ~D (:LAMBDA-MACRO name) fdefine~:P given real ~
+plist cells: ~{~A~^ ~}~%"
+                (length (cold-world-lambda-macro-cells w))
+                (sort (mapcar #'first (cold-world-lambda-macro-cells w))
+                      #'string<)))
+      (let ((census (sort (loop for head being the hash-keys
+                                  of (cold-world-fspec-fallthrough w)
+                                  using (hash-value n)
+                                collect (cons head n))
+                          #'> :key #'cdr)))
+        (when census
+          (format t "~&  2-element fspec heads on the generic ~
+detached-cell branch: ~{~{~A ~D~}~^, ~}~%"
+                  (mapcar (lambda (e) (list (car e) (cdr e))) census))))
       ;; LAST: refresh the frontier-derived storage tables (docstring
       ;; point 6).  Nothing after finalize allocates (audits read, emit
       ;; writes pages); check-region-frontier-tables enforces that.

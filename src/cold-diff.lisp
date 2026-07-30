@@ -2055,6 +2055,95 @@ cell references" (length names))
 ~8,'0X~}~^, ~} (target holds a DTP-ONE-Q-FORWARD)"
                     name (reverse (gethash name violations)))))))
 
+(defparameter *cold-lambda-macro-expected*
+  '("NAMED-LAMBDA" "SUBST" "NAMED-SUBST" "DISPLACED")
+  "Every DEFLAMBDA-MACRO in the cold set: fspec.lisp:1797,1810,1813 and
+macroexpand.lisp:284 (both files are in *COLD-LOAD-ORDER*).  A new cold
+file with a DEFLAMBDA-MACRO must be added here -- the gate only knows
+what it is told to expect, and a silently-dropped one is exactly the
+defect it guards.")
+
+(defun cold-file-property-q (w fresh sym-vma ind-vma)
+  "(values tag data cell-vma) of the property on SYM-VMA's plist IN THE
+EMITTED FILE whose indicator Q names IND-VMA, or NIL if absent.  Walks
+the cdr-coded (ind val . next) chain the way boot GET does; reads only
+FRESH, so it validates the file rather than the model."
+  (let ((dtp-list (cold-dtp w "LIST"))
+        (dtp-symbol (cold-dtp w "SYMBOL")))
+    (multiple-value-bind (pt pd) (world-q fresh (+ sym-vma 3))
+      (loop with vma = (and pt (= (tag-type pt) dtp-list) pd)
+            repeat 4096
+            while vma
+            do (multiple-value-bind (it id) (world-q fresh vma)
+                 (multiple-value-bind (vt vd) (world-q fresh (1+ vma))
+                   (when (and it (= (tag-type it) dtp-symbol) (eql id ind-vma))
+                     (return (values vt vd (1+ vma))))
+                   (case (ldb (byte 2 6) (or vt 0))
+                     (0 (setf vma (+ vma 2)))
+                     (1 (setf vma nil))
+                     (t (multiple-value-bind (nt nd) (world-q fresh (+ vma 2))
+                          (setf vma (and nt (= (tag-type nt) dtp-list)
+                                         nd)))))))
+            finally (return nil)))))
+
+(defun check-lambda-macro-cells (w fresh)
+  "Post-emit gate (QLD attempt 7, SYS:SYS2;TABLES.VBIN): every
+DEFLAMBDA-MACRO in the cold set must leave its definition where the
+runtime looks for it -- a property on the NAME symbol's plist, indicator
+the plain symbol LAMBDA-MACRO, value a compiled function.
+
+DEFLAMBDA-MACRO compiles to FDEFINE of the keyword-headed two-element
+fspec (:LAMBDA-MACRO name); its FUNCTION-SPEC-HANDLER (fspec.lisp:1787)
+does (PUTPROP SYMBOL def 'LAMBDA-MACRO) and LAMBDA-MACRO-CALL-P
+(macroexpand.lisp:239) reads (GETDECL FCN 'LAMBDA-MACRO).  A
+generator-allocated detached cell satisfies the generator's own fdefs
+table and nothing else: NAMED-LAMBDA's plist stays NIL and the first
+interpreted (NAMED-LAMBDA ...) expander FERRORs \"neither a function nor
+the name of a function\" (eval.lisp:2748), which is how QLD died loading
+the flavor tables.
+
+The indicator identity is checked, not just its pname: :LAMBDA-MACRO and
+LAMBDA-MACRO are two symbols with the same pname (KEYWORD vs
+SYMBOLICS-COMMON-LISP homes), and only the latter is what the compiled
+GETDECL constant names.  Dist ground truth: NAMED-LAMBDA @800BCCEC ->
+indicator @800BC643 -> 1C:8820A78C."
+  (let ((rows (reverse (cold-world-lambda-macro-cells w)))
+        (dtp-cf (cold-dtp w "COMPILED-FUNCTION")))
+    (format t "  lambda-macro cells: ~D fdefine~:P~@[ (~{~A~^ ~})~]~%"
+            (length rows) (mapcar #'first rows))
+    ;; 1. Every DEFLAMBDA-MACRO in the cold set took the property-cell arm.
+    (dolist (name *cold-lambda-macro-expected*)
+      (cold-check (find name rows :key #'first :test #'string=)
+                  "lambda-macro cells: (:LAMBDA-MACRO ~A) got no real ~
+property cell -- its definition is in a detached fdef block the runtime ~
+cannot reach (GETDECL '~:*~A 'LAMBDA-MACRO returns NIL)" name))
+    ;; 2. Every recorded cell is really on the plist IN THE FILE, under the
+    ;;    plain LAMBDA-MACRO symbol, holding a compiled function.
+    (dolist (row rows)
+      (destructuring-bind (name sym ind cell) row
+        (let ((ind-pname (cold-symbol-pname-at w ind))
+              (ind-home (cold-symbol-package-name-at w ind)))
+          (cold-check (and (equal ind-pname "LAMBDA-MACRO")
+                           (not (equal ind-home "KEYWORD")))
+                      "lambda-macro cells: ~A's indicator @~8,'0X is ~
+~A::~A, not the plain symbol LAMBDA-MACRO"
+                      name ind (or ind-home "#") (or ind-pname "?")))
+        (multiple-value-bind (vt vd found)
+            (cold-file-property-q w fresh sym ind)
+          (cond
+            ((null found)
+             (cold-check nil "lambda-macro cells: ~A @~8,'0X has no ~
+LAMBDA-MACRO property in the emitted file" name sym))
+            (t
+             (cold-check (eql found cell)
+                         "lambda-macro cells: ~A's LAMBDA-MACRO property ~
+cell is @~8,'0X in the file, but the fdefinition cell is @~8,'0X"
+                         name found cell)
+             (cold-check (and vt (= (tag-type vt) dtp-cf))
+                         "lambda-macro cells: ~A's LAMBDA-MACRO property ~
+is ~2,'0X:~8,'0X, not a compiled function (dist: 1C:...)"
+                         name (if vt (tag-type vt) 0) (or vd 0)))))))))
+
 (defun check-readtable-leaders (w reference)
   "M3h boot-40 gate: the named-structure readtable arrays must carry a
 real leader (dist leader-length 38), not the leaderless header the old
@@ -4428,6 +4517,11 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; clobber the forwarding pointer (QLD "Interrupt task queue
             ;; is full", SI:*INTERRUPT-TASK-FREE-LIST*).
             (check-cell-ref-snapping w fresh)
+            ;; Every DEFLAMBDA-MACRO's definition sits on its name
+            ;; symbol's plist under the plain LAMBDA-MACRO indicator --
+            ;; where the handler puts it and GETDECL reads it -- not in a
+            ;; detached fdef block (QLD attempt 7, TABLES.VBIN).
+            (check-lambda-macro-cells w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
@@ -4446,7 +4540,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
 
 (defparameter *cold-defeatable-fixes*
   '(("snap-cell-refs" . *cold-snap-cell-refs*)
-    ("package-faithful-replay" . *cold-package-faithful-replay*))
+    ("package-faithful-replay" . *cold-package-faithful-replay*)
+    ("lambda-macro-cells" . *cold-lambda-macro-cells*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

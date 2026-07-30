@@ -128,6 +128,27 @@ not check-cell-ref-snapping"; fail=1; }
         || { echo "FAIL: negative test (snap-cell-refs): gate did not name \
 ENQUEUE-INTERRUPT-TASK"; fail=1; }
     rm -f "$neg"
+
+    # lambda-macro-cells: DEFLAMBDA-MACRO fdefines the keyword-headed fspec
+    # (:LAMBDA-MACRO name); its handler stores the definition as a PROPERTY
+    # on NAME's plist.  Routed to the generic detached-cell branch instead,
+    # NAMED-LAMBDA's plist stays NIL, LAMBDA-MACRO-CALL-P returns NIL, and
+    # the first interpreted (NAMED-LAMBDA ...) expander FERRORs -- QLD
+    # attempt 7, loading SYS:SYS2;TABLES.VBIN.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-lm.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat lambda-macro-cells > "$neg" 2>&1; then
+        echo "FAIL: negative test (lambda-macro-cells) built GREEN -- \
+check-lambda-macro-cells does not fire"; fail=1
+    fi
+    grep -q "FAIL lambda-macro cells" "$neg" \
+        || { echo "FAIL: negative test (lambda-macro-cells): the failure \
+was not check-lambda-macro-cells"; fail=1; }
+    grep -q "FAIL lambda-macro cells.*NAMED-LAMBDA" "$neg" \
+        || { echo "FAIL: negative test (lambda-macro-cells): gate did not \
+name NAMED-LAMBDA"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

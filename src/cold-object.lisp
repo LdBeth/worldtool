@@ -826,18 +826,82 @@ VMA of the value cell (= PROPERTY-CELL-LOCATION)."
       (cw-set w (+ sym-vma 3) (tag 0 (cold-dtp w "LIST")) block)
       (+ block 1))))
 
+(defparameter *cold-lambda-macro-cells* t
+  "T: an FDEFINE of (:LAMBDA-MACRO name) gets a REAL property cell on
+NAME's plist under the plain symbol LAMBDA-MACRO, the way its
+FUNCTION-SPEC-HANDLER would place it at run time.
+
+DEFLAMBDA-MACRO compiles to FDEFINE of the two-element keyword-headed
+fspec (:LAMBDA-MACRO name) -- fspec.vbin carries (:LAMBDA-MACRO
+NAMED-LAMBDA), (:LAMBDA-MACRO SUBST), (:LAMBDA-MACRO NAMED-SUBST), and
+macroexpand.lisp:284 adds (:LAMBDA-MACRO DISPLACED).  The handler
+\(DEFINE-FUNCTION-SPEC-HANDLER :LAMBDA-MACRO, fspec.lisp:1787) stores the
+definition with (PUTPROP SYMBOL def 'LAMBDA-MACRO) and every reader --
+LAMBDA-MACRO-CALL-P's (GETDECL FCN 'LAMBDA-MACRO), macroexpand.lisp:239 --
+looks it up on that plist.  Routed instead through the generic
+\(consp fspec) branch below, the definition lands in a detached
+\(fspec-list . cell) block reachable only from the generator's own table:
+NAMED-LAMBDA's plist stays NIL, LAMBDA-MACRO-CALL-P returns NIL, and
+funcalling an interpreted (NAMED-LAMBDA ...) expander FERRORs \"~S is
+neither a function nor the name of a function\" (eval.lisp:2748).  That is
+how QLD attempt 7 died loading SYS:SYS2;TABLES.VBIN, where the flavor
+machinery interprets a DEFMACRO-IN-FLAVOR expander.
+
+Dist ground truth: in Genera-8-5.vlod, NAMED-LAMBDA @800BCCEC carries a
+plist entry whose indicator is the PLAIN symbol LAMBDA-MACRO @800BC643
+\(home SYMBOLICS-COMMON-LISP -- the keyword :LAMBDA-MACRO is a different
+symbol with the same pname) and whose value is 1C:8820A78C.
+
+NIL exists for the gate negative test only (CHECK-LAMBDA-MACRO-CELLS;
+`worldtool coldtest ... --defeat lambda-macro-cells').")
+
+(defun lambda-macro-fspec-p (fspec)
+  "True for (:LAMBDA-MACRO name) -- keyword head, symbol name.  The head
+must be the KEYWORD; the plain symbol of the same pname is the plist
+INDICATOR, not the fspec head."
+  (and (consp fspec) (null (cddr fspec))
+       (vsym-p (first fspec)) (vsym-p (second fspec))
+       (string= (vsym-name (first fspec)) "LAMBDA-MACRO")
+       (equal (canonical-package-name (vsym-package (first fspec)))
+              "KEYWORD")))
+
 (defun property-fspec-p (fspec)
   (and (consp fspec) (vsym-p (first fspec))
        (string= (vsym-name (first fspec)) "PROPERTY")
        (= (length fspec) 3)
        (vsym-p (second fspec))))
 
+(defun cold-unbound-property-cell (w sym-vma ind-tag ind-data)
+  "Push an UNBOUND property (indicator . value) pair onto SYM-VMA's plist
+and return the value cell.  Unbound convention: DTP-NULL pointing at the
+cell itself, which is what pass 1's FDEFINEDP reads (and the dist's own
+shape for a not-yet-defined fdefinition property)."
+  (let ((cell (cold-prepend-property w sym-vma ind-tag ind-data
+                                     (tag 0 (cold-dtp w "NULL")) 0)))
+    (cold-store-contents w cell (tag 0 (cold-dtp w "NULL")) cell)
+    cell))
+
+(defun cold-note-fspec-fallthrough (w fspec)
+  "Count a 2-element list fspec that took the generic detached-cell
+branch, keyed by its head's package-qualified pname.  COLD-FINALIZE
+prints the census: a handler-based family that needs a real runtime cell
+\(the :LAMBDA-MACRO defect) then shows up as a build line."
+  (when (and (consp fspec) (null (cddr fspec)) (vsym-p (first fspec)))
+    (let* ((head (first fspec))
+           (pkg (canonical-package-name (vsym-package head)))
+           (key (if pkg
+                    (format nil "~A:~A" pkg (vsym-name head))
+                    (format nil "#:~A" (vsym-name head)))))
+      (incf (gethash key (cold-world-fspec-fallthrough w) 0)))))
+
 (defun cold-fdefinition-cell (w fspec)
   "The cell a (function FSPEC) locative or fdefine targets.  Symbols use
-the function cell; (:PROPERTY sym ind) uses a real property cell; other
-list fspecs (flavor methods, internals) get a generator-allocated cell --
-their runtime re-fdefinition location differs, which only matters if they
-are redefined after boot."
+the function cell; (:PROPERTY sym ind) and (:LAMBDA-MACRO name) use a real
+property cell on the named symbol's plist -- the location their
+FUNCTION-SPEC-HANDLER would use at run time, and the only one their
+readers consult; other list fspecs (flavor methods, internals) get a
+generator-allocated cell -- their runtime re-fdefinition location differs,
+which only matters if they are redefined after boot."
   (let ((key (fspec-key fspec)))
     (or (gethash key (cold-world-fdefs w))
         (setf (gethash key (cold-world-fdefs w))
@@ -847,15 +911,25 @@ are redefined after boot."
                  (let ((sym (cold-vsym w (second fspec))))
                    (multiple-value-bind (it id)
                        (cold-ref w (third fspec) :area "PROPERTY-LIST-AREA")
-                     (let ((cell (cold-prepend-property
-                                  w sym it id
-                                  (tag 0 (cold-dtp w "NULL")) 0)))
-                       ;; Unbound convention: dtp-null pointing at the cell.
-                       (cold-store-contents w cell (tag 0 (cold-dtp w "NULL"))
-                                            cell)
-                       cell))))
+                     (cold-unbound-property-cell w sym it id))))
+                ((and *cold-lambda-macro-cells* (lambda-macro-fspec-p fspec))
+                 ;; (PUTPROP name def 'LAMBDA-MACRO) / (GET name 'LAMBDA-MACRO)
+                 ;; -- fspec.lisp:1787.  The indicator is the PLAIN symbol:
+                 ;; resolve it through the home oracle from SYSTEM-INTERNALS,
+                 ;; the package of both fspec.lisp and macroexpand.lisp, so it
+                 ;; is the very symbol LAMBDA-MACRO-CALL-P's compiled GETDECL
+                 ;; constant names (home SYMBOLICS-COMMON-LISP, not KEYWORD).
+                 (let* ((sym (cold-vsym w (second fspec)))
+                        (ind (cold-vsym w (make-vsym "SYSTEM-INTERNALS"
+                                                     "LAMBDA-MACRO")))
+                        (cell (cold-unbound-property-cell
+                               w sym (tag 0 (cold-dtp w "SYMBOL")) ind)))
+                   (push (list (vsym-name (second fspec)) sym ind cell)
+                         (cold-world-lambda-macro-cells w))
+                   cell))
                 ((consp fspec)
                  ;; (fspec-list . cell) block; the locative points at the cell.
+                 (cold-note-fspec-fallthrough w fspec)
                  (multiple-value-bind (ft fd) (cold-ref w fspec)
                    (let ((block (cold-alloc w "PERMANENT-STORAGE-AREA" 2
                                             :list)))

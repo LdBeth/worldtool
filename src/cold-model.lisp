@@ -108,7 +108,19 @@
   ;; the whole cold set is loaded (a CCA can be materialized before the
   ;; DEFWIREDVAR that plants the cell's one-q-forward).  See
   ;; *COLD-SNAP-CELL-REFS*.
-  (cell-ref-sites nil))
+  (cell-ref-sites nil)
+  ;; Handler-based function specs the generator gave a REAL runtime cell
+  ;; instead of a detached (fspec . cell) block (cold-object):
+  ;; (name-string sym-vma indicator-vma cell-vma) per (:LAMBDA-MACRO name)
+  ;; FDEFINE.  CHECK-LAMBDA-MACRO-CELLS re-reads each row out of the
+  ;; emitted FILE.  See *COLD-LAMBDA-MACRO-CELLS*.
+  (lambda-macro-cells nil)
+  ;; Census of the 2-element list fspecs that still fall through to the
+  ;; generic detached-cell branch: head pname (package-qualified) -> count.
+  ;; COLD-FINALIZE prints it, so the next handler-based family surfaces as
+  ;; a build line instead of hiding until QLD dies (the :LAMBDA-MACRO
+  ;; lesson).
+  (fspec-fallthrough (make-hash-table :test #'equal)))
 
 ;;; Layout shorthands
 
