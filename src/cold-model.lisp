@@ -100,7 +100,15 @@
   ;; becomes a 2-Q (marker name) LIST at load time, snapped by
   ;; BOOTSTRAP-RESOURCE-REFERENCES at boot.  Each list vma is recorded
   ;; here so check-cold-markers can verify FIRST = the marker (M3h boot 41).
-  (find-resource-sites nil))
+  (find-resource-sites nil)
+  ;; Compiled-code cell-reference constants (cold-fun): the vma of every
+  ;; EVCP / DTP-LOCATIVE Q the generator emitted INTO a CCA.  Stock
+  ;; Genera's loader SNAPS such a constant to the FINAL forwarded cell;
+  ;; cold-fun snaps at emit time and cold-finalize re-snaps this list once
+  ;; the whole cold set is loaded (a CCA can be materialized before the
+  ;; DEFWIREDVAR that plants the cell's one-q-forward).  See
+  ;; *COLD-SNAP-CELL-REFS*.
+  (cell-ref-sites nil))
 
 ;;; Layout shorthands
 

@@ -33,7 +33,7 @@
              ~7T worldtool emit SPEC.sexp OUT~%~
              ~7T worldtool roundtrip FILE~%~
              ~7T worldtool coldtest LAYOUT.sexp TMPDIR [--reference WORLD | ~
---reference-data FILE]~%~
+--reference-data FILE] [--defeat FIX]~%~
              ~7T worldtool coldgen LAYOUT.sexp OUT.ilod (--reference WORLD | ~
 --reference-data FILE) [--sys SYSDIR]~%~
              ~7T worldtool extract-reference LAYOUT.sexp WORLD OUT.lisp ~
@@ -150,11 +150,16 @@ TMPDIR [--sys SYSDIR]~%~
                                            :test #'string=)))
                           (and p (nth (1+ p) args))))
                (sysdir (let ((p (position "--sys" args :test #'string=)))
+                         (and p (nth (1+ p) args))))
+               (defeat (let ((p (position "--defeat" args :test #'string=)))
                          (and p (nth (1+ p) args)))))
            (unless (and layout tmpdir) (return-from main (usage)))
-           (if (zerop (cold-test (pathname tmpdir)
-                                 :layout-path layout :reference reference
-                                 :reference-data refdata :sysdir sysdir))
+           (if (zerop (call-with-defeated-fix
+                       defeat
+                       (lambda ()
+                         (cold-test (pathname tmpdir)
+                                    :layout-path layout :reference reference
+                                    :reference-data refdata :sysdir sysdir))))
                0 1)))
         ((string= (first args) "extract-reference")
          (let ((layout (second args))

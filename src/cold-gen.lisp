@@ -602,6 +602,13 @@ cells for them -- hence the runtime PKG-FIND-PACKAGE lookup.  Returns
    6's stamped fp #x12151) -- and the boot allocator would treat the
    space past a stale fp as free, consing OVER finalize-baked objects.
    REFERENCE is needed again for the boot-created areas' template rows.
+6a. every compiled-code cell-reference constant (EVCP / DTP-LOCATIVE
+   into a symbol's value or function cell) is RE-snapped through its
+   one-q-forward chain (cold-resnap-cell-refs): a CCA materialized
+   before the referenced variable's DEFWIREDVAR saw the plain heap cell,
+   and an unsnapped constant lets a raw %MEMORY-WRITE clobber the
+   forwarding pointer itself.  Runs just before step 6 -- it rewrites
+   data words of existing Qs and allocates nothing.
 Returns (values deferred-count patch-count package-count)."
   (with-cold-materializer (w)
     (let* ((*cold-load-time-eval* #'cold-operand-eval)
@@ -721,6 +728,15 @@ Returns (values deferred-count patch-count package-count)."
       (when (plusp wrapped)
         (format t "~&  ~D deferred form~:P wrapped for package-faithful ~
 replay~%" wrapped))
+      ;; 6a. Re-snap the compiled-code cell-reference constants now that
+      ;;     every vbin has been loaded and every DEFWIREDVAR forward is
+      ;;     planted (docstring point 6a).  Rewrites data words only --
+      ;;     allocates nothing -- so it must come after the last
+      ;;     allocating step and before the free-pointer re-stamp.
+      (let ((snapped (cold-resnap-cell-refs w)))
+        (when (plusp snapped)
+          (format t "~&  ~D compiled-code cell reference~:P re-snapped ~
+through one-q-forwards~%" snapped)))
       ;; LAST: refresh the frontier-derived storage tables (docstring
       ;; point 6).  Nothing after finalize allocates (audits read, emit
       ;; writes pages); check-region-frontier-tables enforces that.

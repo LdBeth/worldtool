@@ -48,6 +48,61 @@
               (:wired "WIRED-CONTROL-TABLES")
               (:safeguarded "SAFEGUARDED-OBJECTS-AREA")))))
 
+;;; ---------------- Cell-reference constant snapping ----------------
+
+(defvar *cold-snap-cell-refs* t
+  "When true (the default), a compiled-code constant that names a CELL --
+an EVCP (SYMEVAL/PUSH-INDIRECT) or a DTP-LOCATIVE -- is emitted pointing
+at the FINAL cell of the one-q-forward chain, not at the forwarded cell
+the compiler named.  This is what stock Genera's loader does: it snaps
+invisible pointers when it builds compiled-code constants, so a compiled
+reference to a wired special variable resolves to the WIRED cell.
+
+Without the snap the constant points at the heap symbol's value cell,
+which DECLARE-STORAGE-CATEGORY-LOAD (COLD-DO-DSCL, cold-eval.lisp) has
+overwritten with a DTP-ONE-Q-FORWARD into the wired symbol-cell table.
+Reads still work -- the microcode follows the forward -- but a raw
+%MEMORY-WRITE through the unsnapped DTP-LOCATIVE constant clobbers the
+FORWARDING POINTER ITSELF, splitting the variable into two cells that
+then drift apart.  Proven instance: SI:*INTERRUPT-TASK-FREE-LIST* in
+(INTERNAL ENQUEUE-INTERRUPT-TASK 0 ENQUEUE-INTERRUPT-TASK-INTERNAL),
+whose C4/D9 constants named the heap cell #x8011287D (holding
+05:F8042739) while the distribution world names #xF8042625 directly.
+The desync corrupts the interrupt-task queue seconds into every boot and
+eventually kills QLD with \"Interrupt task queue is full\".
+
+NIL exists for the gate negative test only (CHECK-CELL-REF-SNAPPING;
+`worldtool coldtest ... --defeat snap-cell-refs').
+
+Out of scope, deliberately: DTP-CALL-INDIRECT constants (tag byte AA)
+naming function cells.  Stock also links those to the callee's CCA once
+it is defined; doing so here is a separate change with its own gate.")
+
+(defun cold-cell-ref-type-p (w type)
+  "True for the constant tag types that name a CELL and therefore get
+snapped through one-q-forwards: EVCP and DTP-LOCATIVE."
+  (or (= type (cold-dtp w "EXTERNAL-VALUE-CELL-POINTER"))
+      (= type (cold-dtp w "LOCATIVE"))))
+
+(defun cold-resnap-cell-refs (w)
+  "Re-snap every recorded compiled-code cell reference (M3h: the
+ordering hazard).  A CCA can be materialized BEFORE the cell it names is
+forwarded -- vbins load in file order, so a cross-file reference to a
+wired variable routinely sees the plain heap cell and COLD-FUN's
+emit-time snap is a no-op.  This pass runs after the last vbin, walks the
+recorded Q sites and re-follows each chain.  It only rewrites the DATA
+word of Qs that already exist; it allocates nothing, so it is safe to run
+after the last allocating finalize step and before the region
+free-pointer re-stamp.  Returns the number of Qs changed."
+  (let ((changed 0))
+    (dolist (vma (cold-world-cell-ref-sites w) changed)
+      (multiple-value-bind (tag data present) (cw-ref w vma)
+        (when (and present (cold-cell-ref-type-p w (tag-type tag)))
+          (let ((final (cold-follow-cell w data)))
+            (unless (eql final data)
+              (cw-set w vma tag final)
+              (incf changed))))))))
+
 (defun cold-fun (w vfun)
   "Materialize VFUN; returns the function address (CCA+2)."
   (or (gethash vfun *cold-object-vmas*)
@@ -86,11 +141,21 @@
                       (error "Invalid relative operand ~S in ~S"
                              datum (first (vfun-name-and-storage vfun))))
                     (setf vdata (+ fn datum)))
-                  (cw-set w (+ fn i)
-                          (if tft
-                              (ldb (byte 8 0) op)
-                              (logior (logand op #xC0) (tag-type vtag)))
-                          vdata)
+                  (let ((tagbyte (if tft
+                                     (ldb (byte 8 0) op)
+                                     (logior (logand op #xC0)
+                                             (tag-type vtag)))))
+                    ;; A constant that names a CELL is snapped through
+                    ;; one-q-forwards, as stock Genera's loader does.  The
+                    ;; tag byte (cdr bits included) is untouched; only the
+                    ;; data word moves to the final cell.  The site is
+                    ;; recorded because the forward may not exist yet --
+                    ;; cold-resnap-cell-refs revisits it at finalize.
+                    (when (and *cold-snap-cell-refs*
+                               (cold-cell-ref-type-p w (tag-type tagbyte)))
+                      (push (+ fn i) (cold-world-cell-ref-sites w))
+                      (setf vdata (cold-follow-cell w vdata)))
+                    (cw-set w (+ fn i) tagbyte vdata))
                   ;; A load-time-eval operand the mini-eval could not value
                   ;; leaves a first-boot patch request for the Q just stored.
                   (when *cold-eval-patch-form*

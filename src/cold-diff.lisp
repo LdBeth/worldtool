@@ -1991,6 +1991,70 @@ page~:P from the file's wired map (first #x~8,'0X)"
                            name (+ data first-off) (+ data last-off)
                            r origin (and ft fd)))))))))))))))
 
+(defun check-cell-ref-snapping (w fresh)
+  "Post-emit gate (QLD \"Interrupt task queue is full\"): no compiled-code
+constant that names a CELL may point at a cell holding a
+DTP-ONE-Q-FORWARD.  Stock Genera's loader snaps invisible pointers when
+it builds compiled-code constants, so a compiled reference to a wired
+special variable resolves to the WIRED cell.  An unsnapped EVCP still
+READS correctly (the microcode follows the forward), which is why this
+hid for so long -- but the paired DTP-LOCATIVE constant is handed to raw
+%MEMORY-WRITE, and that write lands ON the forwarding pointer, splitting
+the variable into two cells that drift apart from the next store on.
+
+Enumeration is CCA-scoped and independent of the fixer's own site list:
+every compiled function the generator materialized
+\(*COLD-OBJECT-VMAS*, vfun keys) is re-read out of the emitted FILE, its
+CCA header decoded for the block length, and every Q of the block whose
+type is EVCP or DTP-LOCATIVE checked against the file.  So a bug in
+COLD-FUN's recording shows up here as a violation, not as silence.
+
+DTP-CALL-INDIRECT function-cell constants are out of scope by design --
+see *COLD-SNAP-CELL-REFS*."
+  (let ((evcp (cold-dtp w "EXTERNAL-VALUE-CELL-POINTER"))
+        (loc (cold-dtp w "LOCATIVE"))
+        (fwd (cold-dtp w "ONE-Q-FORWARD"))
+        (header-i (cold-dtp w "HEADER-I"))
+        (functions 0)
+        (constants 0)
+        (violations (make-hash-table :test #'equal)))
+    (maphash
+     (lambda (obj fn)
+       (when (vfun-p obj)
+         (incf functions)
+         (let ((cca (- fn 2)))
+           (multiple-value-bind (ht hd) (world-q fresh cca)
+             (when (and ht (= (tag-type ht) header-i))
+               (loop for vma from fn below (+ cca (ldb (byte 18 0) hd))
+                     do (multiple-value-bind (tag data) (world-q fresh vma)
+                          (when (and tag (member (tag-type tag)
+                                                 (list evcp loc)))
+                            (incf constants)
+                            (multiple-value-bind (tt td) (world-q fresh data)
+                              (declare (ignore td))
+                              (when (and tt (= (tag-type tt) fwd))
+                                (push (list vma tag data)
+                                      (gethash (render-vbin-object
+                                                (vfun-fspec obj))
+                                               violations))))))))))))
+     *cold-object-vmas*)
+    (format t "  cell-ref snapping: ~:D EVCP/locative constant~:P in ~
+~:D compiled function~:P~%" constants functions)
+    (cold-check (plusp constants)
+                "cell-ref snapping: no EVCP/locative constants found -- ~
+the CCA enumeration is broken, not the world")
+    (let ((names (sort (loop for k being the hash-keys of violations
+                             collect k)
+                       #'string<)))
+      (cold-check (null names)
+                  "cell-ref snapping: ~D function~:P carry unsnapped ~
+cell references" (length names))
+      (dolist (name names)
+        (cold-check nil
+                    "~A: unsnapped cell reference~:P ~{~{#x~8,'0X ~2,'0X:~
+~8,'0X~}~^, ~} (target holds a DTP-ONE-Q-FORWARD)"
+                    name (reverse (gethash name violations)))))))
+
 (defun check-readtable-leaders (w reference)
   "M3h boot-40 gate: the named-structure readtable arrays must carry a
 real leader (dist leader-length 38), not the leaderless header the old
@@ -3770,18 +3834,35 @@ not repaired by the boot's own *COLD-LOAD-VARIABLE-INITIALIZATIONS* loop
 (cold-load.lisp:526).  Sorted \"PKG:PNAME\" strings.  A locative does not
 say whether its instruction reads, writes, or binds (that needs
 instruction decoding), so rows are review candidates, not certain traps;
-the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
+the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*.
+
+A locative names a value cell either DIRECTLY (symbol+1) or, once
+COLD-FUN has snapped it through the cell's one-q-forward
+\(*COLD-SNAP-CELL-REFS*), by the FINAL cell -- a wired symbol-cell table
+slot for a DEFWIREDVAR.  FORWARDED-VALUE-CELLS maps those final cells
+back to their symbols so snapping does not silently shrink the danger
+set."
   (let ((dtp-null (cold-dtp w "NULL"))
         (dtp-loc (cold-dtp w "LOCATIVE"))
+        (dtp-fwd (cold-dtp w "ONE-Q-FORWARD"))
         (dtp-list (cold-dtp w "LIST"))
         (dtp-symbol (cold-dtp w "SYMBOL"))
         (key-of (make-hash-table))
+        (forwarded (make-hash-table))
         (referenced (make-hash-table))
         (init (make-hash-table)))
     (maphash (lambda (key vma)
                (setf (gethash vma key-of)
                      (format nil "~A:~A" (cdr key) (car key))))
              (cold-world-symbols w))
+    (maphash (lambda (vma key)
+               (declare (ignore key))
+               (multiple-value-bind (tag data) (cw-ref w (1+ vma))
+                 (declare (ignore data))
+                 (when (= (tag-type tag) dtp-fwd)
+                   (push vma (gethash (cold-follow-cell w (1+ vma))
+                                      forwarded)))))
+             key-of)
     (maphash (lambda (pageno qv)
                (declare (ignore pageno))
                (dotimes (i +ivory-page-size-qs+)
@@ -3789,7 +3870,9 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
                    (when (= (tag-type tag) dtp-loc)
                      (let ((sym (1- data)))
                        (when (gethash sym key-of)
-                         (setf (gethash sym referenced) t)))))))
+                         (setf (gethash sym referenced) t)))
+                     (dolist (sym (gethash data forwarded))
+                       (setf (gethash sym referenced) t))))))
              (cold-world-pages w))
     (multiple-value-bind (tag data boundp)
         (cold-symbol-value-q
@@ -4056,6 +4139,17 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "SYSTEM-INTERNALS:SORT-LESSP-PREDICATE-ON-CAR"
     "SYSTEM-INTERNALS:WARM-BOOTED-PROCESSES"
     "SYSTEM-INTERNALS:XR-SHARP-ARGUMENT"
+    ;; The FIRST variable of a DEFINE-MAGIC-LOCATIONS block (sysdf1.lisp
+    ;; 169 / 282), surfaced when the R2 scan learned to map a snapped
+    ;; locative back through a forwarded value cell: SI:*MAGIC-LOCATIONS*
+    ;; carries one DTP-LOCATIVE per block BASE, and a block's base IS its
+    ;; first variable's cell, so the alist alone now reads as a
+    ;; reference.  No compiled code reads either.  Both cells belong to
+    ;; the FEP / Boot ROM, which fills them before Lisp runs
+    ;; ("intended to be read-only, so keep your fingers off!",
+    ;; sysdf1.lisp:164) -- unbound in a cold world by design.
+    "SYSTEM:*BOOT-EMB-COMMUNICATION-AREA*"
+    "SYSTEM:FEP-VERSION-NUMBER"
     "SYSTEM:*DISK-UNIT-TABLE*"
     "SYSTEM:*LISP-STATE-SAVED*"
     "SYSTEM:*LISP-STOPPED-CLEANLY*"
@@ -4328,6 +4422,12 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; bits, every page of its extent in the file's wired map, and
             ;; the emitted region free pointer past its last Q.
             (check-wired-arrays-in-file w fresh)
+            ;; No compiled-code EVCP/locative constant may name a cell
+            ;; that holds a one-q-forward: stock's loader snaps such
+            ;; constants, and an unsnapped locative lets %MEMORY-WRITE
+            ;; clobber the forwarding pointer (QLD "Interrupt task queue
+            ;; is full", SI:*INTERRUPT-TASK-FREE-LIST*).
+            (check-cell-ref-snapping w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
@@ -4341,6 +4441,29 @@ excluded)~%" (length rows))
           (when (> (length rows) 10)
             (format t "    ... ~D more (full list: coldgen writes ~
 OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
+
+;;; Negative-test harness (CLI: worldtool coldtest ... --defeat NAME)
+
+(defparameter *cold-defeatable-fixes*
+  '(("snap-cell-refs" . *cold-snap-cell-refs*)
+    ("package-faithful-replay" . *cold-package-faithful-replay*))
+  "Generator fixes a coldtest run can switch OFF, by name, so the gate
+that guards each one can be proven to fire.  A gate that has never been
+seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest
+once per entry here with the fix defeated and requires a red build naming
+the defect.  Do not add an entry without adding its negative test.")
+
+(defun call-with-defeated-fix (name thunk)
+  "Run THUNK with the *COLD-DEFEATABLE-FIXES* entry NAME bound to NIL."
+  (if (null name)
+      (funcall thunk)
+      (let ((var (cdr (assoc name *cold-defeatable-fixes* :test #'string-equal))))
+        (unless var
+          (error "--defeat ~A: unknown fix (known: ~{~A~^ ~})"
+                 name (mapcar #'car *cold-defeatable-fixes*)))
+        (format t "~&*** NEGATIVE TEST: ~A defeated (~A := NIL) -- this ~
+build is expected to FAIL ***~%" name var)
+        (progv (list var) (list nil) (funcall thunk)))))
 
 ;;; Stage-test driver (CLI: worldtool coldtest TMPDIR [REFERENCE-WORLD])
 

@@ -103,6 +103,34 @@ if [ -f "$here/reference-data.lisp" ]; then
 else
     echo "skip: reference-data.lisp not found"
 fi
+
+# Negative test: a gate that has never been seen to fail is a comment.
+# Reintroduce the defect with `--defeat NAME' and require a RED build that
+# NAMES the defect.  One entry per *COLD-DEFEATABLE-FIXES* name.
+#
+# snap-cell-refs: stock Genera's loader snaps invisible pointers when it
+# builds compiled-code constants.  Unsnapped, a DTP-LOCATIVE constant names
+# the heap value cell holding the DEFWIREDVAR one-q-forward, and raw
+# %MEMORY-WRITE clobbers the forward itself -- SI:*INTERRUPT-TASK-FREE-LIST*
+# splits in two and QLD dies with "Interrupt task queue is full".
+if [ -n "$coldsys" ] && [ -f "$here/reference-data.lisp" ]; then
+    neg="${TMPDIR:-/tmp}/worldtool-negtest.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat snap-cell-refs > "$neg" 2>&1; then
+        echo "FAIL: negative test (snap-cell-refs) built GREEN -- \
+check-cell-ref-snapping does not fire"; fail=1
+    fi
+    grep -q "FAIL cell-ref snapping" "$neg" \
+        || { echo "FAIL: negative test (snap-cell-refs): the failure was \
+not check-cell-ref-snapping"; fail=1; }
+    grep -q "ENQUEUE-INTERRUPT-TASK.*unsnapped cell reference" "$neg" \
+        || { echo "FAIL: negative test (snap-cell-refs): gate did not name \
+ENQUEUE-INTERRUPT-TASK"; fail=1; }
+    rm -f "$neg"
+else
+    echo "skip: negative tests need --sys and reference-data.lisp"
+fi
 rm -rf "$tmp"
 
 [ $fail -eq 0 ] && echo "all tests passed" || echo "TESTS FAILED"
