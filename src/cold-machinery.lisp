@@ -1235,7 +1235,18 @@ are unbound in the distribution too."
 (defparameter *cold-ignore-stub-functions*
   '(("FLAVOR" . "PRINT-FLAVOR-TRANSFORMATION-WARNINGS")
     ("FLAVOR" . "COMPOSE-INITIALIZATIONS")
-    ("FLAVOR" . "VALIDATE-CONSTRUCTOR-FUNCTIONS"))
+    ("FLAVOR" . "VALIDATE-CONSTRUCTOR-FUNCTIONS")
+    ;; QLD attempt 3 (MINI-server track 2026-07-30): DEFCONSTANT-LOAD-
+    ;; INTERNAL (lisp-database-cold.lisp:137, cold) calls this warm
+    ;; helper (lisp-database.lisp:119) whenever a bound named constant
+    ;; is redefined.  Stock QLD never reached it pre-warm; our cold-set
+    ;; additions (I-SYS;FLOAT, SYS2;BIGNUM/RAT/... -- all in INNER-
+    ;; SYSTEM-FILE-ALIST) make QLD *reload* files whose defconstants are
+    ;; already cold-bound.  Those reloads replay the very vbins the
+    ;; world was built from, so old/new values are EQUALP and IGNORE's
+    ;; NIL ("keep the old value") is exact; lisp-database.lisp's QLD
+    ;; load shadows the stub before any genuinely-changing patch.
+    ("LANGUAGE-TOOLS" . "QUERY-ABOUT-DEFCONSTANT-REDEFINITION"))
   "M3h boot-33 review: warm flavor/make.lisp functions the COLD flavor
 runtime calls unconditionally during the deferred flavor phase.  Genera's
 own *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131) builds the
