@@ -702,6 +702,21 @@ wired-table forwards, so they land in the comm slots or wired cells."
       (multiple-value-bind (ntag ndata) (cold-nil-q w)
         (cold-set-symbol-value
          w (make-vsym "COMMON-LISP-INTERNALS" "*CONSOLES*") ntag ndata))
+      ;; SI:*COLD-LOADED-FILE-PROPERTY-LISTS* -- argless DEFVAR
+      ;; (sys/ldata.lisp:113, "comes over in the cold load"): the stock
+      ;; generator bound it to the cold files' attribute-plist alist.
+      ;; MINI-STREAM-DEFAULT-HANDLER's :GENERIC-PATHNAME-AND-PLIST
+      ;; (io/lmini.lisp:284-290) ASSOCs + PUSHes it for EVERY file QLD
+      ;; loads (QLD attempt 2 trapped 0x39 there), and FS:CANONICALIZE-
+      ;; COLD-LOAD-PATHNAMES (io/logpath.lisp:1873) drains it post-QLD.
+      ;; Stamp NIL: mini accumulates QLD-loaded entries from empty; the
+      ;; only delta vs stock is the cold set's own files aren't
+      ;; pre-seeded (post-boot source-file hygiene, not a load blocker
+      ;; -- our generator never recorded their attribute plists).
+      (multiple-value-bind (ntag ndata) (cold-nil-q w)
+        (cold-set-symbol-value
+         w (make-vsym "SYSTEM-INTERNALS" "*COLD-LOADED-FILE-PROPERTY-LISTS*")
+         ntag ndata))
       ;; Reserved-region identities (storage.lisp:249; nothing in the
       ;; sources sets these -- generator contract).  initialize-storage-
       ;; globals resets PAGE-TABLE-AREA's free pointer through them and

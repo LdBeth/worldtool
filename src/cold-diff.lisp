@@ -3727,7 +3727,11 @@ the reviewed classification is *COLD-REVIEWED-UNBOUND-VALUE-CELLS*."
     "SYSTEM-INTERNALS:*COLD-BOOT-MICROSECOND-TIME-LOW*"
     "SYSTEM-INTERNALS:*COLD-LOAD-DUPLICATED-SYMBOLS*"
     "SYSTEM-INTERNALS:*COLD-LOAD-STREAM-RUBOUT-HANDLER-BUFFER*"
-    "SYSTEM-INTERNALS:*COLD-LOADED-FILE-PROPERTY-LISTS*"
+    ;; *COLD-LOADED-FILE-PROPERTY-LISTS* removed 2026-07-30 (QLD attempt
+    ;; 2): the review was wrong -- the mini streams ASSOC it unguarded
+    ;; for every QLD-loaded file.  Now stamped NIL by
+    ;; cold-stamp-storage-values (generator obligation, ldata.lisp:113
+    ;; "comes over in the cold load").
     "SYSTEM-INTERNALS:*COUNT*"
     "SYSTEM-INTERNALS:*CURRENT-SELF-EVALUATING-SYMBOL-TABLE*"
     ;; Removed boot 39 -- six SI input-editor specials (*ECHOPLEX*,
@@ -3936,6 +3940,18 @@ prints the R1 unbound-function-cell audit."
           (cold-check (and boundp (= data (cold-world-nil-vma w)))
                       "CLI:*CONSOLES* stamped NIL for HALT ~
 (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
+        ;; MINI-STREAM-DEFAULT-HANDLER's unguarded ASSOC on
+        ;; SI:*COLD-LOADED-FILE-PROPERTY-LISTS* for every QLD-loaded
+        ;; file (QLD attempt 2): stamped NIL by
+        ;; cold-stamp-storage-values in lieu of the stock generator's
+        ;; cold-file plist alist.
+        (multiple-value-bind (tag data boundp)
+            (cold-symbol-value-q
+             w (make-vsym "SYSTEM-INTERNALS"
+                          "*COLD-LOADED-FILE-PROPERTY-LISTS*"))
+          (cold-check (and boundp (= data (cold-world-nil-vma w)))
+                      "SI:*COLD-LOADED-FILE-PROPERTY-LISTS* stamped NIL ~
+for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
         ;; No deferred COMPILE-FLAVOR-METHODS-LOAD-TIME composes a flavor
         ;; whose transitive component closure has an undefined hole at that
         ;; point in the boot order -- COMPOSE-FLAVOR-COMBINATION would WARN,
