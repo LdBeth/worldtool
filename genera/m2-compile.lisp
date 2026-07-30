@@ -144,7 +144,9 @@ on the host side by subtracting the QLD alists."
     "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
-    "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"))
+    "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"
+    ;; MINI-server track 2026-07-30: the NETI:MINI-* primitives for QLD.
+    "SYS: NETWORK; IVORY-ETHERNET-DRIVER"))
 
 ;;; :readtable-type modules: SCT compiles these with SI:RTC-FILE, not
 ;;; COMPILE-FILE (sct/module-types.lisp, readtable-compile-driver).

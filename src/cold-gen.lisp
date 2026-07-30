@@ -253,6 +253,14 @@
     ;; NETWORK-CONS-AREA (22) and ETHER-BUFFER-AREA (23) -- the first
     ;; two boot-created areas, ahead of the flavor areas (M3h boot 31).
     "SYS: NETWORK; PKTS"
+    ;; The common low-level Ivory ethernet substrate ("this code needs to
+    ;; run in the cold load" -- its own header).  Defines the NETI:MINI-*
+    ;; primitives lmini calls during QLD (the R1 MINI block) plus
+    ;; PROTO-NETWORK-INTERFACE, which emb-ethernet-driver's struct
+    ;; :includes.  sysdcl.lisp:619-628 serial order: pkts ->
+    ;; i-basic-driver (this) -> i-embedded-driver.  .vbin was lost;
+    ;; recompiled in the user's Genera 8.5 2026-07-30 (MINI-server track).
+    "SYS: NETWORK; IVORY-ETHERNET-DRIVER"
     ;; In the original cold set (dist has its functions wired) but the
     ;; .vbin was lost; recompiled from source in the user's Genera 8.5
     ;; 2026-07-04.  initialize-disk's VLM branch calls
