@@ -141,6 +141,9 @@ on the host side by subtracting the QLD alists."
     ;; QLD-warm PROCESS:RESET-LOCK/MAKE-LOCK -> trap 71.  See cold-gen.lisp
     ;; *cold-load-order* + check-eager-initialization-callees.
     "SYS: STORAGE; EMBEDDED-DISK-DRIVER"
+    ;; MINI-server track 2026-07-30: the runtime .vbin loader QLD drives
+    ;; (BIN-LOAD-FILE-INTERNAL & co).  DEFS before LOAD (sysdcl serial).
+    "SYS: L-BIN; DEFS" "SYS: L-BIN; LOAD"
     "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"

@@ -992,8 +992,12 @@ their DEFVAR-SAFEGUARDED (sys/ldata.lisp:210) carries no initializer and
 no cold file makes them.  Ground truth (Genera-8-5.vlod) holds ART-Q
 #o2000-element arrays, header 43:C0000400.")
 
-(defun cold-do-aset (w value array-form index)
-  "(ASET value array-symbol index) on a boxed 1-D ART-Q array."
+(defun cold-do-aset (w value array-form index &optional form)
+  "(ASET value array-symbol index) on a boxed 1-D ART-Q array.
+If the target symbol is still unbound (its DEFVAR initializer was itself
+deferred -- l-bin defs *BIN-OP-COMMAND-NAME-TABLE*), the mutation defers
+too and follows the SET in deferred order, like the *FLAVOR-FLAGS*
+RPLACA2/RPLACD2s.  A bound non-array target is still a hard error."
   (cold-note "aset")
   (unless (and (vsym-p array-form) (integerp index))
     (error "Unsupported ASET target ~S[~S]" array-form index))
@@ -1007,6 +1011,9 @@ no cold file makes them.  Ground truth (Genera-8-5.vlod) holds ART-Q
          w array-form (tag 0 (cold-dtp w "ARRAY"))
          (cold-array w arr "SAFEGUARDED-OBJECTS-AREA")))))
   (multiple-value-bind (at ad boundp) (cold-symbol-value-q w array-form)
+    (when (and (not boundp) form)
+      (cold-defer w form "deferred asets")
+      (return-from cold-do-aset nil))
     (unless (and boundp (= (tag-type at) (cold-dtp w "ARRAY")))
       (error "ASET into ~S which is not a bound array" array-form))
     (multiple-value-bind (ht hd) (cw-ref w ad)
@@ -1141,7 +1148,7 @@ when their owner compiler/inner.lisp joined the cold set.")
       ((string= head "DECLARE-STORAGE-CATEGORY-LOAD")
        (cold-do-dscl w (first args) (second args) (third args)))
       ((string= head "ASET")
-       (cold-do-aset w (first args) (second args) (third args)))
+       (cold-do-aset w (first args) (second args) (third args) form))
       ((string= head "FDEFINE")
        ;; LOAD-MULTIPLE-DEFINITION sub-form: args are source forms.
        (cold-do-fdefine w (quoted (first args)) (second args)

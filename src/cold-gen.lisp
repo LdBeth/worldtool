@@ -243,6 +243,16 @@
     ;; user-disk-driver.  See check-eager-initialization-callees
     ;; (cold-diff.lisp).
     "SYS: STORAGE; EMBEDDED-DISK-DRIVER"
+    ;; The runtime .vbin loader QLD drives (MINI-LOAD-FILE ->
+    ;; LOAD-BINARY-FILE-INTERNAL, a DEFF to BIN-LOAD-FILE-INTERNAL in
+    ;; l-bin/load.lisp) -- first fresh-world QLD trapped 0x39 on that DEFF
+    ;; cell 2026-07-30.  Band oracle: BIN-LOAD-TOP-LEVEL / BIN-LOAD-FILE /
+    ;; BIN-LOAD-FILE-INTERNAL / LOAD-I-COMPILED-FUNCTION all 0x882 in the
+    ;; dist world (dump/unbin are 0x822 QLD -- excluded).  DEFS must
+    ;; precede LOAD (sysdcl.lisp:375-382 (:definitions defs ...), "the
+    ;; cold loader uses this"): load.lisp reads defs' *NO-VALUE-MARKER*
+    ;; at runtime.  .vbins were lost; recompiled on the user's Genera 8.5.
+    "SYS: L-BIN; DEFS" "SYS: L-BIN; LOAD"
     "SYS: IO; LMINI" "SYS: IO; USEFUL-STREAMS"
     "SYS: I-SYS; INTERRUPTS" "SYS: I-SYS; V-INTERRUPTS" "SYS: I-SYS; AUDIO"
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
