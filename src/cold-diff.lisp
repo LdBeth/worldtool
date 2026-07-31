@@ -2443,84 +2443,133 @@ before the hook"
                     cell (if tag (tag-type tag) 0) (or data 0))))))
 
 (defun check-block-write-functions (w fresh)
-  "Post-emit gate (QLD attempts 13 and 14, SYS:SCHEDULER;COMETH.VBIN):
-the three SI:%BLOCK-n-WRITE Ivory instructions must carry COMPILED
-function definitions, and each one must disassemble back to the
-one-instruction wrapper the generator meant.
+  "Post-emit gate (QLD attempts 13, 14 and 15, SYS:SCHEDULER;COMETH.VBIN):
+the shadow-cursor protocol the INTERPRETED flavor constructors of a
+from-scratch world run on must be fully installed -- six compiled
+wrappers in the fcells of %MAKE-STRUCTURE, %BLOCK-1/2/3-WRITE and
+%READ/%WRITE-INTERNAL-REGISTER, the three originals aliased under the
+-PRIMITIVE names those wrappers funcall, and the three cursor variables
+bound.
 
-A from-scratch world runs its flavor constructors interpreted.
-VALIDATE-CONSTRUCTOR-FUNCTIONS (flavor/make.lisp:953) EQUAL-compares the
-vbin-dumped CONSTRUCTOR-DERIVATION -- which embeds the Symbolics BUILD
-WORLD's historical instance-variable slot order -- against a freshly
-computed FLAVOR-CONSTRUCTOR-DERIVATION.  Our world composes its flavors
-fresh from the 8.5 sources and legitimately gets a different storage
-order for the non-:ORDERED instance variables, so validation fails and
+Why the constructors are interpreted.  VALIDATE-CONSTRUCTOR-FUNCTIONS
+\(flavor/make.lisp:953) EQUAL-compares the vbin-dumped
+CONSTRUCTOR-DERIVATION -- which embeds the Symbolics BUILD WORLD's
+historical instance-variable slot order -- against a freshly computed
+FLAVOR-CONSTRUCTOR-DERIVATION.  Our world composes its flavors fresh
+from the 8.5 sources and legitimately gets a different storage order for
+the non-:ORDERED instance variables, so validation fails and
 COMPOSE-CONSTRUCTOR-FUNCTIONS regenerates the constructors; with no
 compiler loaded COMPILE-FUNCTION-LIST is (MAPC #'EVAL forms).  That is
 correct and necessary -- the vbin's compiled constructor would write
-slots in the historical order -- but the digested body evaluates
-SI:%BLOCK-1-WRITE forms, and that symbol has no function definition in
-ANY Genera world (DEFOPCODE, i-sys/opdef.lisp:287; stock never runs a
-constructor interpreted because Symbolics' builds always pass
-validation).  Attempt 13 trapped 71 there, FSYMEVAL of
+slots in the historical order -- but it leaves the Ivory BAR protocol
+running under the interpreter.  Stock never gets here: Symbolics' builds
+always pass validation.
+
+ATTEMPT 13: SI:%BLOCK-1-WRITE has no function definition in ANY Genera
+world (DEFOPCODE, i-sys/opdef.lisp:287) -- trap 71, FSYMEVAL of
 #'SI:%BLOCK-1-WRITE, from the eager (ADD-INITIALIZATION \"Process\"
 '(PROCESS-INITIALIZE) '(:ONCE)) at the end of cometh.vbin ->
 INITIALIZE-SCHEDULER -> MAKE-PROCESS \"Idle Process\" -> the interpreted
 MAKE-PROCESS-INTERNAL.
 
-Attempt 13's fix grafted INTERPRETED (NAMED-LAMBDA ...) definitions, and
-attempt 14 proved that shape can never work: a constructor writes an
+ATTEMPT 14: an INTERPRETED graft can never work.  A constructor writes an
 unbound instance-variable slot as (SI:%BLOCK-WRITE 1 (SI:%SET-TAG 'VAR
 DTP-NULL)) (make.lisp:836, 850, 858), so the argument is a DTP-NULL Q,
-and SI:APPLY-LAMBDA's argument-taking (the ARGBIND fast loop, instruction
-334 of APPLY-LAMBDA, `CAR FP|4' over the stack ARGUMENTS list) reads each
-argument through the DATA-READ BARRIER -- trap 71 naming a control-stack
-locative.  A compiled callee adopts its arguments as frame slots without
-reading them, and the instruction itself is tag-blind (the emulator's
-DoBlock1Write, linux-vlm stub/ifuncom1.c:3803, is a raw operand fetch, a
-raw tag+data store through BAR-n, and a post-increment of BAR-n done by
-the instruction).  Hence: the graft MUST be compiled.
+and SI:APPLY-LAMBDA's argument-taking (the ARGBIND fast loop, `CAR FP|4'
+over the stack ARGUMENTS list) reads each argument through the DATA-READ
+BARRIER -- trap 71 naming a control-stack locative.  Hence the graft must
+be COMPILED: a compiled callee adopts its arguments as frame slots
+without reading them, and %BLOCK-n-WRITE is tag-blind (the emulator's
+DoBlock1Write, linux-vlm stub/ifuncom1.c:3803).
+
+ATTEMPT 15: compiled wrappers writing through the REAL BAR-1 are not
+enough either.  EVERY Ivory allocation instruction caches the fresh block
+address into BAR-1 (DoAllocateListBlock / DoAllocateStructureBlock,
+stub/ifunsubp.c:249,358), and the interpreter allocates BETWEEN the
+constructor's write calls -- macroexpanding each (SI:%BLOCK-WRITE 1 v)
+form conses.  The slot writes scattered into fresh conses, the instance
+tail stayed DTP-NULL, and the first instance-variable read trapped 71
+\(PUSH-INSTANCE-VARIABLE 0 at PC 4 of (FLAVOR:METHOD MAKE-INSTANCE
+PROCESS)).  The digester's .BAR. save/restore idiom guards the FORM's
+clobber, not the interpreter's own consing.
+
+The fix is the shadow-cursor protocol: the cursor lives in
+*INTERPRETED-BAR-1/2/3* and is loaded into a real BAR only inside a
+COMPILED body, where nothing can allocate in between.  The six functions
+are compiled on the OG2 world's own compiler
+\(SYS:SYS;INTERPRETED-CONSTRUCTOR-SUPPORT, in the cold set) and
+COLD-GRAFT-INTERPRETED-CONSTRUCTOR-SUPPORT only repoints function cells.
 
 Checked ON THE FILE, forward-followed, and deliberately blind to
 *COLD-BLOCK-WRITE-FUNCTIONS*: the gate must fire when the fix is
-defeated.  The disassembly is done with the world's own decoder, so this
-also proves the hand-assembled encoding (COLD-BLOCK-WRITE-CCA) round
-trips."
-  (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
-        (wf (windexed fresh)))
+defeated.  Every wrapper is disassembled with the world's own decoder,
+so a fcell pointing at the wrong function, a truncated vbin or a
+mis-loaded CCA all surface here; the -PRIMITIVE rows are checked by NAME,
+which is what proves the alias captured the ORIGINALS and not the
+wrappers (aliasing after the redirect would be a silent infinite loop at
+run time)."
+  (let ((wf (windexed fresh)))
+    ;; The three Ivory instruction names, and their cursor discipline.
     (loop for n from 1 to 3
-          for name = (format nil "%BLOCK-~D-WRITE" n)
-          for sym = (cold-find-symbol-vma w name "SYSTEM-INTERNALS")
-          do (cond
-               ((null sym)
-                (cold-check nil "block write functions: SI:~A is not even ~
-interned -- the interpreted flavor constructors a from-scratch world ~
-regenerates call it, and FSYMEVAL of #'SI:~:*~A traps 71 (QLD attempt ~
-13, SYS:SCHEDULER;COMETH.VBIN)" name))
-               (t
-                (let ((cell (cold-file-follow-cell w fresh (+ sym 2))))
-                  (multiple-value-bind (tag data) (world-q fresh cell)
-                    (cond
-                      ((not (and tag (= (tag-type tag) dtp-cf)))
-                       (cold-check nil "block write functions: SI:~A's ~
-function cell @#x~8,'0X is ~2,'0X:~8,'0X, not a compiled function -- ~
-SI:~4:*~A is an Ivory instruction (DEFOPCODE, i-sys/opdef.lisp:287) with ~
-no definition in any Genera world, a regenerated interpreted constructor ~
-calls it (QLD attempt 13, trap 71 in MAKE-PROCESS of the Idle Process), ~
-and the definition cannot be interpreted because the unbound-slot ~
-argument is a DTP-NULL Q that SI:APPLY-LAMBDA's argument-taking rejects ~
-(QLD attempt 14)"
-                                   name cell (if tag (tag-type tag) 0)
-                                   (or data 0)))
-                      (t
-                       (check-block-write-listing w wf name n data))))))))))
+          do (check-block-write-fcell
+              w fresh wf (format nil "%BLOCK-~D-WRITE" n)
+              (format nil "%INTERPRETED-BLOCK-~D-WRITE" n)
+              (list (format nil "%BLOCK-~D-WRITE FP|2" n)
+                    (format nil "PUSH-INDIRECT *INTERPRETED-BAR-~D*" n)
+                    "RETURN-SINGLE-NIL")))
+    ;; The three redirected originals ...
+    (check-block-write-fcell
+     w fresh wf "%MAKE-STRUCTURE" "%INTERPRETED-MAKE-STRUCTURE"
+     (list "START-CALL-INDIRECT #'%MAKE-STRUCTURE-PRIMITIVE"))
+    (check-block-write-fcell
+     w fresh wf "%READ-INTERNAL-REGISTER"
+     "%INTERPRETED-READ-INTERNAL-REGISTER" nil)
+    (check-block-write-fcell
+     w fresh wf "%WRITE-INTERNAL-REGISTER"
+     "%INTERPRETED-WRITE-INTERNAL-REGISTER" nil)
+    ;; ... whose original definitions the wrappers reach through these.
+    (dolist (row '(("%MAKE-STRUCTURE-PRIMITIVE" "%MAKE-STRUCTURE")
+                   ("%READ-INTERNAL-REGISTER-PRIMITIVE"
+                    "%READ-INTERNAL-REGISTER")
+                   ("%WRITE-INTERNAL-REGISTER-PRIMITIVE"
+                    "%WRITE-INTERNAL-REGISTER")))
+      (check-block-write-fcell w fresh wf (first row) (second row) nil))
+    ;; The cursor variables themselves.
+    (check-block-write-cursor-variables w fresh)))
 
-(defun check-block-write-listing (w wf name n fn)
-  "The compiled SI:NAME at function address FN must disassemble back to
-the ENTRY / %BLOCK-N-WRITE FP|2 / RETURN wrapper COLD-BLOCK-WRITE-CCA
-assembled.  Uses the world's own census + disassembler, so a mis-packed
-halfword, a wrong sequencing code or a bad CCA header all surface here."
-  (declare (ignore w))
+(defun check-block-write-fcell (w fresh wf name expect wants)
+  "SI:NAME's function cell must hold the compiled function named EXPECT,
+whose disassembly contains every string in WANTS."
+  (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
+        (sym (cold-find-symbol-vma w name "SYSTEM-INTERNALS")))
+    (cond
+      ((null sym)
+       (cold-check nil "block write functions: SI:~A is not even interned ~
+-- the interpreted flavor constructors a from-scratch world regenerates ~
+need it, and the shadow-cursor protocol grafts it (QLD attempts 13-15, ~
+SYS:SCHEDULER;COMETH.VBIN)" name))
+      (t
+       (let ((cell (cold-file-follow-cell w fresh (+ sym 2))))
+         (multiple-value-bind (tag data) (world-q fresh cell)
+           (cond
+             ((not (and tag (= (tag-type tag) dtp-cf)))
+              (cold-check nil "block write functions: SI:~A's function ~
+cell @#x~8,'0X is ~2,'0X:~8,'0X, not a compiled function -- the ~
+shadow-cursor graft must leave SI:~A there (QLD attempts 13-15: ~
+%BLOCK-n-WRITE has no definition in any Genera world, an interpreted ~
+definition cannot take the DTP-NULL Q of an unbound slot, and a wrapper ~
+writing through the real BAR-1 loses the cursor to the interpreter's ~
+own consing)"
+                          name cell (if tag (tag-type tag) 0) (or data 0)
+                          expect))
+             (t
+              (check-block-write-listing wf name expect wants data)))))))))
+
+(defun check-block-write-listing (wf name expect wants fn)
+  "The compiled function at address FN must be named EXPECT and contain
+every string in WANTS.  Uses the world's own census + disassembler, so a
+wrong CCA, a lost name list or a wrapper whose body is not the one the
+protocol needs all surface here."
   (let* ((cca (- fn 2))
          (rec (multiple-value-bind (htag hdata) (world-q wf cca)
                 (and htag (= htag +cca-header-tag+)
@@ -2533,17 +2582,50 @@ CCA header at #x~8,'0X, or its total/suffix sizes or self-pointer do not ~
 check out)" name fn cca))
       (t
        (cfun-decode-suffix wf rec 4 64)
-       (let ((listing (substitute
-                       #\Space #\Newline
-                       (with-output-to-string (s)
-                         (disassemble-cfun wf rec nil s)))))
-         (dolist (want (list "ENTRY: 1 REQUIRED, 0 OPTIONAL"
-                             (format nil "%BLOCK-~D-WRITE FP|2" n)
-                             "RETURN"))
-           (cold-check
-            (search want listing)
-            "block write functions: SI:~A @#x~8,'0X does not disassemble ~
-to the expected wrapper -- no ~S in: ~A" name fn want listing)))))))
+       (let ((got (render-fn-name rec)))
+         (cond
+           ((not (string= got expect))
+            ;; The wrong function entirely: naming it is the whole
+            ;; diagnosis, and dumping its (arbitrarily long) listing
+            ;; would bury it.
+            (cold-check nil "block write functions: SI:~A's function cell ~
+points at #x~8,'0X, whose name list says ~A -- expected SI:~A"
+                        name fn got expect))
+           (t
+            (let ((listing (substitute
+                            #\Space #\Newline
+                            (with-output-to-string (s)
+                              (disassemble-cfun wf rec nil s)))))
+              (dolist (want wants)
+                (cold-check
+                 (search want listing)
+                 "block write functions: SI:~A @#x~8,'0X does not ~
+disassemble to the shadow-cursor wrapper -- no ~S in: ~A"
+                 name fn want listing))))))))))
+
+(defun check-block-write-cursor-variables (w fresh)
+  "The three *INTERPRETED-BAR-n* value cells must be bound to fixnum 0 --
+the DEFVAR initial values.  They are the whole cursor: an unbound one
+makes the first (%BLOCK-1-WRITE v) of every interpreted constructor
+trap 57 inside the wrapper."
+  (let ((dtp-fixnum (cold-dtp w "FIXNUM")))
+    (loop for n from 1 to 3
+          for name = (format nil "*INTERPRETED-BAR-~D*" n)
+          for sym = (cold-find-symbol-vma w name "SYSTEM-INTERNALS")
+          do (cond
+               ((null sym)
+                (cold-check nil "block write functions: SI:~A is not even ~
+interned -- it is the shadow cursor the compiled block-write wrappers ~
+read and write (QLD attempt 15)" name))
+               (t
+                (multiple-value-bind (tag data)
+                    (world-q fresh (cold-file-follow-cell w fresh (1+ sym)))
+                  (cold-check
+                   (and tag (= (tag-type tag) dtp-fixnum) (= data 0))
+                   "block write functions: SI:~A's value cell is ~
+~2,'0X:~8,'0X, not the fixnum 0 its DEFVAR gives it -- the interpreted ~
+constructors' block-write cursor must be bound before the first ~
+%MAKE-STRUCTURE" name (if tag (tag-type tag) 0) (or data 0))))))))
 
 (defun check-bignum-encoding (w fresh)
   "Post-emit gate (QLD attempt 8, SYS:SYS2;BIGNUM.VBIN): every bignum the
@@ -5216,15 +5298,20 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; COMPILER:*COMPILER* argument, answer instead of trapping
             ;; 57 (QLD attempt 12, SYS:SCHEDULER;LOCKS.VBIN).
             (check-macroexpand-compiler-hooks w fresh)
-            ;; The three SI:%BLOCK-n-WRITE Ivory instructions carry
-            ;; COMPILED definitions: a from-scratch world's flavor
-            ;; constructors fail VALIDATE-CONSTRUCTOR-FUNCTIONS (our
-            ;; instance-variable storage order is not the Symbolics build
-            ;; world's), are correctly regenerated by (MAPC #'EVAL ...),
-            ;; and the digested body calls them (QLD attempt 13, trap 71
-            ;; loading SYS:SCHEDULER;COMETH.VBIN) -- with a DTP-NULL Q for
-            ;; every unbound slot, which only a compiled callee can take
-            ;; (QLD attempt 14, trap 71 in SI:APPLY-LAMBDA's ARGBIND).
+            ;; The shadow-cursor protocol is installed: a from-scratch
+            ;; world's flavor constructors fail
+            ;; VALIDATE-CONSTRUCTOR-FUNCTIONS (our instance-variable
+            ;; storage order is not the Symbolics build world's), are
+            ;; correctly regenerated by (MAPC #'EVAL ...), and the
+            ;; digested body then drives the Ivory BAR protocol
+            ;; interpreted.  SI:%BLOCK-n-WRITE has no definition anywhere
+            ;; (QLD attempt 13, trap 71 loading SYS:SCHEDULER;COMETH.VBIN);
+            ;; it cannot be interpreted, because an unbound slot is a
+            ;; DTP-NULL Q only a compiled callee can take (attempt 14,
+            ;; SI:APPLY-LAMBDA's ARGBIND); and it cannot use the real
+            ;; BAR-1, because the interpreter's own consing re-primes it
+            ;; (attempt 15).  Six compiled wrappers keep the cursor in
+            ;; *INTERPRETED-BAR-n* instead.
             (check-block-write-functions w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))

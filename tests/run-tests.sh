@@ -280,6 +280,16 @@ did not name SI:MACROEXPAND-1-INTERNAL"; fail=1; }
     # (SI:%BLOCK-WRITE 1 (SI:%SET-TAG 'VAR DTP-NULL)), and an interpreted
     # callee's argument-taking reads that DTP-NULL Q through the data-read
     # barrier -- trap 71 again, in SI:APPLY-LAMBDA (QLD attempt 14).
+    # And it cannot write through the REAL BAR-1 either: every Ivory
+    # allocation instruction re-primes BAR-1 and the interpreter conses
+    # between the constructor's write calls, so the slots scattered into
+    # fresh conses and the first instance-variable read trapped 71 (QLD
+    # attempt 15).  The fix is the shadow-cursor protocol -- six compiled
+    # wrappers keeping the cursor in SI:*INTERPRETED-BAR-n*.  Defeated,
+    # nothing points at the wrappers: the three redirected names still
+    # hold their originals, the -PRIMITIVE aliases stay DTP-NULL, and
+    # SI:%BLOCK-1-WRITE is not even interned (the graft is what interns
+    # it) -- 10 gate failures, the first naming %BLOCK-1-WRITE.
     neg="${TMPDIR:-/tmp}/worldtool-negtest-blockwrite.$$"
     if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
             --reference-data "$here/reference-data.lisp" $coldsys \

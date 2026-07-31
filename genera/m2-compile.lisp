@@ -149,7 +149,13 @@ on the host side by subtracting the QLD alists."
     "SYS: EMBEDDING; EMB-BUFFER" "SYS: EMBEDDING; EMB-QUEUE"
     "SYS: EMBEDDING; EMB-MESSAGE-CHANNEL"
     ;; MINI-server track 2026-07-30: the NETI:MINI-* primitives for QLD.
-    "SYS: NETWORK; IVORY-ETHERNET-DRIVER"))
+    "SYS: NETWORK; IVORY-ETHERNET-DRIVER"
+    ;; NOT a Genera file -- ours, dropped into SYS:SYS; beside the Genera
+    ;; sources (worldtool/genera/interpreted-constructor-support.lisp is the
+    ;; master copy).  The shadow-cursor protocol the from-scratch world's
+    ;; INTERPRETED flavor constructors run on; see *cold-load-order*
+    ;; (cold-gen.lisp) and COLD-GRAFT-INTERPRETED-CONSTRUCTOR-SUPPORT.
+    "SYS: SYS; INTERPRETED-CONSTRUCTOR-SUPPORT"))
 
 ;;; :readtable-type modules: SCT compiles these with SI:RTC-FILE, not
 ;;; COMPILE-FILE (sct/module-types.lisp, readtable-compile-driver).

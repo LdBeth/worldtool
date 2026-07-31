@@ -143,6 +143,22 @@
     "SYS: SYS; ALLOCATE-COMMON" "SYS: SYS; ICONS" "SYS: SYS; OBJECTS"
     "SYS: SYS; DESCRIBE" "SYS: SYS; COLD-LOAD-STREAM" "SYS: SYS; IFEPIO"
     "SYS: SYS; IPRIM" "SYS: SYS; ISTACK" "SYS: SYS; LARITH"
+    ;; NOT a Genera file: the shadow-cursor protocol for INTERPRETED flavor
+    ;; constructors, written for this generator and compiled on the OG2 world
+    ;; (source + story: worldtool/genera/interpreted-constructor-support.lisp;
+    ;; the vbin lives beside the Genera sources in SYS:SYS;).  A from-scratch
+    ;; world legitimately fails VALIDATE-CONSTRUCTOR-FUNCTIONS and regenerates
+    ;; its constructors INTERPRETED, and the digested body's BAR-1 cursor
+    ;; discipline cannot survive the interpreter's own consing (every Ivory
+    ;; allocation instruction re-primes BAR-1 -- QLD attempt 15).  This file's
+    ;; six COMPILED functions keep the cursor in special variables;
+    ;; COLD-GRAFT-INTERPRETED-CONSTRUCTOR-SUPPORT (cold-machinery.lisp)
+    ;; repoints the fcells of %MAKE-STRUCTURE, %BLOCK-1/2/3-WRITE and
+    ;; %READ/%WRITE-INTERNAL-REGISTER at them, aliasing the originals under
+    ;; the -PRIMITIVE names this file funcalls.  Order-insensitive (defvars +
+    ;; defuns only, no eager top-level forms); placed after IPRIM/ICONS, the
+    ;; files defining the originals it wraps.
+    "SYS: SYS; INTERPRETED-CONSTRUCTOR-SUPPORT"
     ;; Post-M3h: Ivory software-float support (FP exception handlers,
     ;; soft single/double ops, FLOAT-OPERATING-MODE plumbing).  Band
     ;; roster: every probed defun is 882-cold or F000-wired in the dist

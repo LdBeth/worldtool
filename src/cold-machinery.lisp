@@ -1409,14 +1409,17 @@ architecture instance over this NIL.  Same flag as the graft: see
       (cold-set-symbol-value w (make-vsym "COMPILER" "*COMPILER*")
                              ntag ndata))))
 
-;;; ---------------- Compiled BLOCK-n-WRITE ----------------
+;;; ------------- Interpreted-constructor shadow cursor -------------
 
 (defvar *cold-block-write-functions* t
-  "QLD attempts 13 and 14: a FROM-SCRATCH world runs flavor constructors
-INTERPRETED, and the interpreted constructor body calls
-SI:%BLOCK-n-WRITE -- an Ivory INSTRUCTION that no Genera world has ever
-carried a function definition for.  The cold world must supply one, and
-it must be a COMPILED one.
+  "QLD attempts 13, 14 and 15: a FROM-SCRATCH world runs its flavor
+constructors INTERPRETED, and the interpreted constructor body drives the
+Ivory BLOCK-ADDRESS-REGISTER protocol -- (SI:%BLOCK-1-WRITE value) forms
+consuming the BAR-1 that %MAKE-STRUCTURE left at the first
+instance-variable slot.  Neither the instruction NAMES nor the register
+DISCIPLINE survive interpretation, so the cold world must supply both:
+compiled function definitions, and a cursor the interpreter cannot
+clobber.
 
 Why the constructors are interpreted at all.
 COMPILE-FLAVOR-METHODS-LOAD-TIME's VALIDATE-CONSTRUCTOR-FUNCTIONS
@@ -1462,192 +1465,146 @@ constructor writes UNBOUND instance-variable slots as (SI:%BLOCK-WRITE 1
 \(SI:%SET-TAG 'VAR DTP-NULL)) (make.lisp:836, 850, 858), so the argument
 IS a DTP-NULL Q; the barrier rejects it -- error trap 71 naming a
 control-stack locative (observed live: 0xF6000187).  An interpreted
-callee can never receive a DTP-NULL argument.
+callee can never receive a DTP-NULL argument.  So the definitions must
+be COMPILED: a compiled callee adopts its arguments as frame slots
+without reading them, and %BLOCK-n-WRITE is tag-blind (the emulator's
+DoBlock1Write, linux-vlm stub/ifuncom1.c:3803, is a raw operand fetch, a
+raw tag+data store through BAR-n and a post-increment of BAR-n).
 
-A COMPILED callee has no such barrier.  The interpreter's EVAL pushes the
-evaluated arguments and the compiled callee simply ADOPTS them as its
-frame slots without reading them; the %BLOCK-n-WRITE instruction itself
-is completely tag-blind -- the emulator's DoBlock1Write (linux-vlm
-stub/ifuncom1.c:3803) fetches the FP-mode operand with a raw 64-bit load,
-stores raw tag+data to the BAR-n vma, and POST-INCREMENTS BAR-n itself.
-That is the instruction stock Genera's compiled constructors push
-DTP-NULL through routinely.  So the graft is three hand-built CCAs (see
-COLD-BLOCK-WRITE-CCA), and it is simpler than the interpreted body was:
-because the instruction bumps the BAR, the %P-STORE-CONTENTS /
-%POINTER-PLUS / %WRITE-INTERNAL-REGISTER dance is gone entirely.
+ATTEMPT 15 -- the whole PER-CALL BAR DISCIPLINE is unsound interpreted.
+Attempt 14's fix was three hand-assembled one-instruction wrappers
+writing through the REAL BAR-1.  They executed exactly as assembled and
+the instance still came out empty: every Ivory ALLOCATION instruction
+caches the fresh block address into BAR-1 (DoAllocateListBlock /
+DoAllocateStructureBlock, stub/ifunsubp.c:249,358), and the INTERPRETER
+ITSELF allocates between the constructor's write calls -- macroexpanding
+each (SI:%BLOCK-WRITE 1 v) form conses, for a start.  The slot writes
+scattered into freshly consed cells, the instance tail stayed DTP-NULL,
+and the first method to read an instance variable trapped 71 (observed
+live: PUSH-INSTANCE-VARIABLE 0, the DEBUG-FLAG read at PC 4 of
+\(FLAVOR:METHOD MAKE-INSTANCE PROCESS)).  The digester's .BAR.
+save/restore idiom cannot help: it guards the FORM's clobber, not the
+interpreter's own consing.
 
-Function-call granularity is sound: %MAKE-STRUCTURE's DEFUPRIM function
-version leaves BAR-n as PROCESSOR STATE that survives a function return,
-and the BARs are saved and restored across stack-group switches, so
-nothing between the constructor's %ALLOCATE-STRUCTURE-BLOCK and our
-writes can lose the register.
+THE FIX -- the SHADOW-CURSOR PROTOCOL.  The cursor lives in special
+variables the interpreter's consing cannot touch, and is only ever read
+back into a real BAR inside a COMPILED body, where no allocation can
+intervene.  The six functions are compiled on the OG2 world's own
+compiler from SYS:SYS;INTERPRETED-CONSTRUCTOR-SUPPORT.LISP (master copy:
+worldtool/genera/interpreted-constructor-support.lisp, whose header is
+the full story); the vbin is in the cold set, and this graft only
+repoints function cells:
 
-Setting this flag NIL defeats the graft, for the negative test.")
+  %MAKE-STRUCTURE            -> %INTERPRETED-MAKE-STRUCTURE
+  %BLOCK-1/2/3-WRITE         -> %INTERPRETED-BLOCK-1/2/3-WRITE
+  %READ-INTERNAL-REGISTER    -> %INTERPRETED-READ-INTERNAL-REGISTER
+  %WRITE-INTERNAL-REGISTER   -> %INTERPRETED-WRITE-INTERNAL-REGISTER
+
+with the ORIGINAL definitions aliased under the -PRIMITIVE names the
+wrappers funcall.
+
+Both redirections are semantics-preserving.  Redirecting interpreted BAR
+reads/writes to the shadows loses nothing: an interpreted read of a real
+BAR was already meaningless, because any consing between the write and
+the read invalidates it -- the shadows are the only BAR state an
+interpreted caller can meaningfully own, so the digester's .BAR.
+save/restore now protects the CURSOR (which even makes a nested
+interpreted constructor inside a hard init form compose correctly).  And
+nothing compiled is affected at all: the compiler open-codes all six
+names as instructions, so compiled code never goes through these
+function cells.  The redirect also survives QLD: both defining files of
+the originals (sys;icons for %MAKE-STRUCTURE, sys;iprim for the register
+functions) are cold-only, never QLD-reloaded.
+
+Setting this flag NIL defeats the graft (the vbin still loads and the
+six %INTERPRETED-* functions still exist -- nothing points at them, and
+SI:%BLOCK-n-WRITE stay unbound), for the negative test.")
+
+(defparameter *cold-interpreted-constructor-redirects*
+  '(("%MAKE-STRUCTURE" "%INTERPRETED-MAKE-STRUCTURE"
+     "%MAKE-STRUCTURE-PRIMITIVE")
+    ("%READ-INTERNAL-REGISTER" "%INTERPRETED-READ-INTERNAL-REGISTER"
+     "%READ-INTERNAL-REGISTER-PRIMITIVE")
+    ("%WRITE-INTERNAL-REGISTER" "%INTERPRETED-WRITE-INTERNAL-REGISTER"
+     "%WRITE-INTERNAL-REGISTER-PRIMITIVE"))
+  "(standard-name wrapper-name primitive-alias), all in SYSTEM-INTERNALS.
+Each standard name's existing COMPILED definition is aliased to the
+-PRIMITIVE name (which is what the wrapper funcalls) before the standard
+name is repointed at the wrapper.")
 
 (defun cold-block-write-name (n)
   (format nil "%BLOCK-~D-WRITE" n))
 
-;;; ---- A miniature Ivory assembler, with DISASM.LISP as its oracle ----
-;;;
-;;; Encoding per i-sys/sysdef.lisp DEFSYSBYTEs and i-sys/opdef.lisp
-;;; opcode numbers, the same tables SRC/DISASM.LISP decodes with: a code
-;;; word is a 40-bit Q holding two 18-bit halfword instructions (even =
-;;; data bits 0..17, odd = data bits 18..31 plus the tag type's low 4
-;;; bits), each halfword being opcode (bits 10..17) over a stack-address
-;;; operand (mode bits 8..9, offset bits 0..7).  The tag's cdr field is
-;;; the sequencing code.  Everything here is verified by disassembling
-;;; the emitted world back (CHECK-BLOCK-WRITE-FUNCTIONS).
+(defun cold-si-function-cell (w name)
+  "The (forward-followed) function cell of SI:NAME."
+  (cold-follow-cell
+   w (cold-fdefinition-cell w (make-vsym "SYSTEM-INTERNALS" name))))
 
-(defconstant +cold-seq-next+ 0
-  "Sequencing (cdr) code of a code word whose two halfwords run in order.")
+(defun cold-interpreted-support-fn (w name)
+  "The compiled definition SI:NAME must carry, as (values tag data), for a
+name defined by SYS:SYS;INTERPRETED-CONSTRUCTOR-SUPPORT.VBIN.  Erroring
+here means the vbin fell out of the cold set (or stopped defining NAME):
+the graft has nothing to point at."
+  (multiple-value-bind (tag data) (cw-ref w (cold-si-function-cell w name))
+    (unless (= (tag-type tag) (cold-dtp w "COMPILED-FUNCTION"))
+      (error "SI:~A is ~2,'0X:~8,'0X, not a compiled function -- ~
+\"SYS: SYS; INTERPRETED-CONSTRUCTOR-SUPPORT\" must be in ~
+*COLD-LOAD-ORDER* and must still define it" name (tag-type tag) data))
+    (values tag data)))
 
-(defconstant +cold-seq-full-word+ 3
-  "Sequencing (cdr) code of a whole-word instruction: the even half falls
-through to the next WORD (+2), the odd half skips over it.")
+(defun cold-graft-interpreted-constructor-support (w)
+  "Install the shadow-cursor protocol the regenerated (interpreted) flavor
+constructors of a from-scratch world run on: alias the original
+%MAKE-STRUCTURE / %READ-INTERNAL-REGISTER / %WRITE-INTERNAL-REGISTER
+definitions under the -PRIMITIVE names, repoint those three function
+cells and the three undefined SI:%BLOCK-n-WRITE cells at the compiled
+wrappers SYS:SYS;INTERPRETED-CONSTRUCTOR-SUPPORT.VBIN loaded.  See
+*COLD-BLOCK-WRITE-FUNCTIONS* for the whole three-attempt story.
 
-(defun cold-packed-opcode (name)
-  "The Ivory opcode named NAME, read out of the disassembler's own table
-\(*PACKED-OPS*).  Using the decoder as the encoding oracle keeps the two
-directions from drifting: whatever we emit here, DISASSEMBLE-CFUN prints
-back as NAME."
-  (or (loop for op from 0 below (length *packed-ops*)
-            for spec = (aref *packed-ops* op)
-            when (and spec (string= (first spec) name)) return op)
-      (error "No Ivory opcode named ~A" name)))
-
-(defun cold-halfword (name mode offset)
-  "An 18-bit packed halfword: opcode NAME over a stack-address operand.
-MODE 0 = FP|OFFSET, 1 = LP|OFFSET, 2 = SP, 3 = immediate OFFSET."
-  (logior (ash (cold-packed-opcode name) 10)
-          (ash mode 8)
-          (ldb (byte 8 0) offset)))
-
-(defun cold-code-word (w even odd &optional (seq +cold-seq-next+))
-  "(values tag data) of a code word packing halfwords EVEN and ODD with
-sequencing code SEQ.  The odd halfword's top 4 bits ride in the tag."
-  (values (tag seq (+ (cold-dtp w "PACKED-INSTRUCTION-60")
-                      (ldb (byte 4 14) odd)))
-          (logior (ash (ldb (byte 14 0) odd) 18)
-                  (ldb (byte 18 0) even))))
-
-(defun cold-sysbyte (w name)
-  "The DEFSYSBYTE NAME as a host byte specifier.  The layout export
-carries each as POSITION*64 + SIZE (m3-export-layout dumps the raw
-byte-spec fixnum): %%ENTRY-INSTRUCTION-MAX = 1160 = 18*64 + 8."
-  (let ((v (layout-value (cold-world-layout w) name)))
-    (byte (ldb (byte 6 0) v) (ash v -6))))
-
-(defun cold-entry-word (w required)
-  "(values tag data) of the whole-word ENTRY instruction of a function of
-REQUIRED required arguments, no &OPTIONAL and no &REST.
-
-MIN and MAX count the two frame-header Qs, so REQUIRED+2 is both, and the
-first argument lives at FP|2.  CURRENT-DEFINITION-P is set, as it is on
-every ordinary compiled definition in the world.  LANGUAGE-INDEX (bits
-32..35, i.e. the tag's low 4 bits) stays 0 = Lisp, so the tag type is
-plain DTP-PACKED-INSTRUCTION-60.  Byte-identical to what the 8.5
-compiler emits: a 1-required 0-optional entry word in fresh.ilod reads
-F0:100DFC03, which is exactly what this returns."
-  (let ((min (+ required 2)))
-    (cold-code-word
-     w
-     ;; The rest-not-accepted bit IS the opcode's low bit (#o176 vs #o177).
-     (cold-halfword "ENTRY-REST-NOT-ACCEPTED" 0 min)
-     (ldb (byte 14 18)
-          (dpb min (cold-sysbyte w "SYSTEM:%%ENTRY-INSTRUCTION-MAX")
-               (dpb 1 (cold-sysbyte
-                       w "SYSTEM:%%ENTRY-INSTRUCTION-CURRENT-DEFINITION-P")
-                    0)))
-     +cold-seq-full-word+)))
-
-(defun cold-block-write-cca (w n)
-  "Materialize SI:%BLOCK-N-WRITE as a hand-built compiled function;
-returns the function address (CCA+2).  The whole body is
-
-    ENTRY: 1 REQUIRED, 0 OPTIONAL
-    %BLOCK-n-WRITE FP|2
-    RETURN-MULTIPLE 0
-
--- the canonical one-instruction DEFUPRIM wrapper shape (compare
-SI:%P-STORE-CONTENTS, three code words because its RETURN needs a
-MOVEM SP|0 pad; ours needs none, both halves of the second word being
-real instructions).  The instruction writes the argument Q through BAR-n
-and post-increments BAR-n itself, so there is nothing else to do; its
-value disposition is :TOS-UNCHANGED and every caller discards, so
-returning no values (RETURN-MULTIPLE 0, which the microcode turns into
-NIL for a VALUE-disposition caller) is right.
-
-Block shape and areas follow COLD-FUN, the vbin CCA materializer: the
-DTP-HEADER-I header carrying suffix<<18 | total, the DTP-COMPILED-
-FUNCTION self-pointer at CCA+1, the code words, then a one-Q extra-info
-suffix whose CAR is the function's name -- the Q the census, the
-disassembler and Genera's own debugger read a compiled function's name
-out of.  The CCA goes in COMPILED-FUNCTION-AREA (where every vbin
-function goes) and the name list in PERMANENT-STORAGE-AREA (where
-COLD-REF conses vbin suffix lists)."
-  (let* ((code (list (multiple-value-list (cold-entry-word w 1))
-                     (multiple-value-list
-                      (cold-code-word
-                       w
-                       (cold-halfword (cold-block-write-name n) 0 2)
-                       (cold-halfword "RETURN-MULTIPLE" 3 0)))))
-         (suffix 1)
-         (total (+ 2 (length code) suffix))
-         (cca (cold-alloc w "COMPILED-FUNCTION-AREA" total))
-         (fn (+ cca 2)))
-    (cw-set w cca
-            (tag (layout-value (cold-world-layout w)
-                               "SYSTEM:%HEADER-TYPE-COMPILED-FUNCTION")
-                 (cold-dtp w "HEADER-I"))
-            (dpb suffix (byte +cca-suffix-size-bits+
-                              +cca-suffix-size-position+)
-                 total))
-    (cw-set w (1+ cca) (tag 0 (cold-dtp w "COMPILED-FUNCTION")) fn)
-    (loop for (wtag wdata) in code
-          for i from 0
-          do (cw-set w (+ fn i) wtag wdata))
-    (multiple-value-bind (ntag ndata)
-        (cold-ref w (list (make-vsym "SYSTEM-INTERNALS"
-                                     (cold-block-write-name n))))
-      (cw-set w (+ fn (length code))
-              (tag +cdr-nil+ (tag-type ntag)) ndata))
-    fn))
-
-(defun cold-graft-block-write-functions (w)
-  "FDEFINE SI:%BLOCK-1-WRITE / -2- / -3- to the hand-built COMPILED
-definitions COLD-BLOCK-WRITE-CCA emits, so a regenerated (interpreted)
-flavor constructor can call them with the DTP-NULL Q an unbound
-instance-variable slot needs.  See *COLD-BLOCK-WRITE-FUNCTIONS* for the
-whole two-attempt story -- in short, attempt 13's interpreted graft was
-answerable but unusable: SI:APPLY-LAMBDA reads its arguments through the
-data-read barrier and DTP-NULL never survives that.
-
-The definition Q is the ordinary compiled shape, DTP-COMPILED-FUNCTION
-at CCA+2.  The symbols are interned through the standard cold-intern
-machinery, so the emitted symbol area carries them and
-BUILD-INITIAL-PACKAGES' FIXUP-SYMBOL-PACKAGE registers them in SI (warm
-INTERN then finds these, not fresh twins); COLD-FINALIZE re-stamps the
-region free pointers after us, so the CCAs and their name lists are
-inside the swept frontier.
-
-Errors out if a name has become fbound: a cold file that starts defining
-one means this graft must be dropped (the boot-6 emb-ethernet
-discipline)."
+Every cell is checked before it is written: the three standard names
+must currently hold their ordinary compiled cold definitions (the
+originals we alias), and the three -PRIMITIVE names and the three
+SI:%BLOCK-n-WRITE names must be DTP-NULL (the -PRIMITIVE names exist
+only because this file funcalls them; %BLOCK-n-WRITE has no definition
+in any Genera world).  A name that has acquired a definition means a
+cold file now defines it and this graft must be revisited -- the boot-6
+emb-ethernet discipline."
   (when *cold-block-write-functions*
     (let ((dtp-null (cold-dtp w "NULL")))
-      (loop for n from 1 to 3
-            do (let* ((name (cold-block-write-name n))
-                      (cell (cold-follow-cell
-                             w (cold-fdefinition-cell
-                                w (make-vsym "SYSTEM-INTERNALS" name)))))
+      (flet ((expect-undefined (name what)
+               (let ((cell (cold-si-function-cell w name)))
                  (multiple-value-bind (tag data) (cw-ref w cell)
-                   (declare (ignore data))
                    (unless (= (tag-type tag) dtp-null)
-                     (error "SI:~A is defined now -- drop its compiled ~
-graft" name)))
-                 (cold-store-contents w cell
-                                      (tag 0 (cold-dtp w "COMPILED-FUNCTION"))
-                                      (cold-block-write-cca w n)))))))
+                     (error "SI:~A is defined now (~2,'0X:~8,'0X) -- ~A"
+                            name (tag-type tag) data what))
+                   cell))))
+        ;; The originals first: alias, then redirect.  (Reading the
+        ;; standard cell after the redirect would read the wrapper.)
+        (loop for (standard wrapper primitive)
+                in *cold-interpreted-constructor-redirects*
+              do (let ((cell (cold-si-function-cell w standard))
+                       (pcell (expect-undefined
+                               primitive
+                               "the wrappers funcall it, so this graft owns it")))
+                   (multiple-value-bind (otag odata) (cw-ref w cell)
+                     (unless (= (tag-type otag)
+                                (cold-dtp w "COMPILED-FUNCTION"))
+                       (error "SI:~A is ~2,'0X:~8,'0X, not the compiled ~
+cold definition the -PRIMITIVE alias must capture" standard
+                              (tag-type otag) odata))
+                     (cold-store-contents w pcell otag odata))
+                   (multiple-value-bind (wtag wdata)
+                       (cold-interpreted-support-fn w wrapper)
+                     (cold-store-contents w cell wtag wdata))))
+        ;; The three instruction names, which nothing defines.
+        (loop for n from 1 to 3
+              do (let ((cell (expect-undefined
+                              (cold-block-write-name n)
+                              "it is an Ivory instruction (DEFOPCODE, i-sys/opdef.lisp:287) -- drop its graft")))
+                   (multiple-value-bind (wtag wdata)
+                       (cold-interpreted-support-fn
+                        w (format nil "%INTERPRETED-BLOCK-~D-WRITE" n))
+                     (cold-store-contents w cell wtag wdata))))))))
 
 ;;; ---------------- FEP boot parameters ----------------
 
@@ -1702,13 +1659,12 @@ slots from the reference world."
   ;; Allocates in *FLAVOR-STATIC-AREA* + PROPERTY-LIST-AREA: also before
   ;; the table fill (M3h boot 36).
   (cold-build-make-instance-generic w)
-  ;; Interns three symbols and builds their compiled definitions in
-  ;; SYMBOL-AREA / COMPILED-FUNCTION-AREA / PERMANENT-STORAGE-AREA: the
-  ;; only graft below that ALLOCATES, so it too goes ahead of the table
-  ;; fill (CHECK-MACHINERY-REGION-TABLES verifies the stamped free
-  ;; pointers at the end of this pass, long before COLD-FINALIZE
-  ;; re-stamps them).
-  (cold-graft-block-write-functions w)
+  ;; Repoints function cells only -- but resolving the three -PRIMITIVE
+  ;; alias names can still INTERN in SYMBOL-AREA, so it is the only graft
+  ;; below that ALLOCATES and goes ahead of the table fill
+  ;; (CHECK-MACHINERY-REGION-TABLES verifies the stamped free pointers at
+  ;; the end of this pass, long before COLD-FINALIZE re-stamps them).
+  (cold-graft-interpreted-constructor-support w)
   (cold-fill-storage-tables w :reference reference)
   (cold-stamp-fepcomm-boot-slots w)
   (cold-graft-ignore-stubs w)
