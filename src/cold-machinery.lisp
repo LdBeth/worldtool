@@ -707,6 +707,35 @@ dist 5D:8800807C self-pointer)."
 
 ;;; ---------------- Generator-owned wired values ----------------
 
+(defvar *cold-boundp-protocol-cells* t
+  "QLD attempt 17: cells whose readers guard with VARIABLE-BOUNDP are
+NOT prophylactically stamped NIL, because for them UNBOUNDNESS IS
+PROTOCOL STATE -- \"the object does not exist yet\".
+
+The instance.  COLD-STAMP-STORAGE-VALUES used to stamp SI:GC-PROCESS
+NIL along with the rest of the allocator/GC/process scalars the M3h
+boot-9 C4-operand scan turned up.  But gc.lisp:2128 is
+
+  (DEFUN WAKEUP-GC-PROCESS ()
+    (WHEN (VARIABLE-BOUNDP GC-PROCESS) ... (PROCESS:PROCESS-WAKEUP GC-PROCESS)))
+
+and stock worlds ship the argless (DEFVAR GC-PROCESS) of
+gc-defs.lisp:183 UNBOUND, so every pre-GC-ON wakeup is a no-op (pre-QLD
+callers additionally hit the cold-load IGNORE stub,
+cold-load.lisp:232).  Bound-to-NIL makes the guard read TRUE, the real
+body defined by SYS:GC;GC.VBIN runs, and QLD attempt 17 died there:
+
+  #<UNCLAIMED-MESSAGE> The generic function PROCESS:PROCESS-WAKEUP was
+  applied to the argument NIL.
+
+The same stamp would also have made GC-ON's (UNLESS (VARIABLE-BOUNDP
+GC-PROCESS) ...) creation path (gc.lisp:2446) silently skip creating
+the process at all.
+
+Defeating this flag RESTORES the bad stamp, so
+CHECK-BOUNDP-PROTOCOL-CELLS can be proven to fire; see
+*COLD-BOUNDP-PROTOCOL-CELL-ROSTER* in cold-diff.lisp.")
+
 (defun cold-stamp-storage-values (w)
   "Values only the generator knows.  All writes go through the magic /
 wired-table forwards, so they land in the comm slots or wired cells."
@@ -818,9 +847,35 @@ wired-table forwards, so they land in the comm slots or wired cells."
       (stamp "SYSTEM-INTERNALS" "*FREE-REGION*" fixnum #xFFFF)
       ;; Allocator / GC / process scalars the safeguarded code reads
       ;; before anything sets them (M3h boot-9: C4-operand scan of the
-      ;; F000xxxx code region).  All NIL/0 in the distribution except
-      ;; the migration mode (ECASEd against SI:NORMAL) and the control
-      ;; stack growth factor (single-float 1.3, dist verbatim).
+      ;; F000xxxx code region).  The names stamped below are NIL/0 in
+      ;; the distribution; the two stamped otherwise are the migration
+      ;; mode (ECASEd against SI:NORMAL) and the control stack growth
+      ;; factor (single-float 1.3, dist verbatim).
+      ;;
+      ;; CLASS LAW (QLD attempt 17).  A cell whose readers guard with
+      ;; VARIABLE-BOUNDP uses UNBOUNDNESS AS PROTOCOL STATE -- "the
+      ;; object does not exist yet" -- and prophylactically stamping it
+      ;; NIL is a DEFECT, not a safeguard: the guard starts reading
+      ;; true and every reader is handed the NIL.  Such a cell belongs
+      ;; in *COLD-BOUNDP-PROTOCOL-CELLS* / the gate's roster, not here.
+      ;;
+      ;; Audit of this whole block against the 8.5 sources: of every
+      ;; name stamped in it, SI:GC-PROCESS was the ONLY one with
+      ;; VARIABLE-BOUNDP readers -- six, all in gc.lisp (96, 2129,
+      ;; 2446, 2502, 2886, 4247), all reading unboundness as "the GC
+      ;; process does not exist".  gc.lisp:2129 is WAKEUP-GC-PROCESS's
+      ;; (WHEN (VARIABLE-BOUNDP GC-PROCESS) ... (PROCESS:PROCESS-WAKEUP
+      ;; GC-PROCESS)) -- the guard QLD attempt 17 died on loading
+      ;; SYS:GC;GC.VBIN, PROCESS-WAKEUP applied to NIL -- and
+      ;; gc.lisp:2446's (UNLESS (VARIABLE-BOUNDP GC-PROCESS) ...) is
+      ;; the process CREATION path in GC-ON, which the same stamp would
+      ;; have made silently skip.  Its (DEFVAR GC-PROCESS) is argless
+      ;; (gc-defs.lisp:183) and stock ships it UNBOUND; the
+      ;; distribution's warm value is a live process object, never NIL.
+      ;; So it is no longer stamped.  The names that remain have zero
+      ;; VARIABLE-BOUNDP readers -- *EPHEMERAL-GC-IN-PROGRESS* even has
+      ;; an explicit NIL init (gc-defs.lisp:228) and CURRENT-PROCESS is
+      ;; read with plain NIL tests -- so their stamps stand.
       (multiple-value-bind (ntag ndata) (cold-nil-q w)
         (flet ((stamp-nil (package name)
                  (cold-set-symbol-value w (make-vsym package name)
@@ -829,7 +884,10 @@ wired-table forwards, so they land in the comm slots or wired cells."
           (stamp-nil "SYSTEM" "%LIST-CACHE-REGION")
           (stamp-nil "SYSTEM-INTERNALS" "*EPHEMERAL-GC-IN-PROGRESS*")
           (stamp-nil "SYMBOLICS-COMMON-LISP" "*CURRENT-PROCESS*")
-          (stamp-nil "SYSTEM-INTERNALS" "GC-PROCESS")))
+          ;; Negative-test hook ONLY: reintroduce the attempt-17 defect
+          ;; so CHECK-BOUNDP-PROTOCOL-CELLS can be seen to fire.
+          (unless *cold-boundp-protocol-cells*
+            (stamp-nil "SYSTEM-INTERNALS" "GC-PROCESS"))))
       (stamp "SYSTEM-INTERNALS" "GC-RECLAIM-OLDSPACE-INHIBIT" fixnum 0)
       (multiple-value-bind (st sd)
           (cold-symbol-ref w (make-vsym "SYSTEM-INTERNALS" "NORMAL"))

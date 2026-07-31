@@ -333,6 +333,34 @@ not check-opcode-symbols"; fail=1; }
         || { echo "FAIL: negative test (opcode-symbols): gate did not \
 name CAR-LOCAL"; fail=1; }
     rm -f "$neg"
+
+    # boundp-protocol-cells: SI:GC-PROCESS's readers guard with
+    # VARIABLE-BOUNDP (six sites, all gc.lisp), so its UNBOUNDNESS is
+    # protocol state -- "the GC process does not exist yet".  Stock
+    # worlds ship the argless (DEFVAR GC-PROCESS) of gc-defs.lisp:183
+    # unbound and every pre-GC-ON wakeup is a no-op.  The generator used
+    # to stamp the cell NIL prophylactically; that makes the guard in
+    # WAKEUP-GC-PROCESS (gc.lisp:2129) read true, so once SYS:GC;GC.VBIN
+    # replaces the cold-load IGNORE stub with the real function the body
+    # runs and QLD attempt 17 died with #<UNCLAIMED-MESSAGE> The generic
+    # function PROCESS:PROCESS-WAKEUP was applied to the argument NIL.
+    # (GC-ON's creation path, gc.lisp:2446, would then never have made
+    # the process either.)  Defeated, the bad stamp comes back and the
+    # gate must name SI:GC-PROCESS.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-boundpproto.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat boundp-protocol-cells > "$neg" 2>&1; then
+        echo "FAIL: negative test (boundp-protocol-cells) built GREEN -- \
+check-boundp-protocol-cells does not fire"; fail=1
+    fi
+    grep -q "FAIL boundp protocol" "$neg" \
+        || { echo "FAIL: negative test (boundp-protocol-cells): the \
+failure was not check-boundp-protocol-cells"; fail=1; }
+    grep -q "FAIL boundp protocol.*GC-PROCESS" "$neg" \
+        || { echo "FAIL: negative test (boundp-protocol-cells): gate did \
+not name SI:GC-PROCESS"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

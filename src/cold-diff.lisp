@@ -2703,6 +2703,64 @@ mis-homed in the emitted world (first ~D listed above) -- QLD dies on ~
 the first one loading SYS:I-SYS;OPDEF.VBIN (attempt 16)"
                 broken (length names) reported)))
 
+;;; ---- Cells whose unboundness is protocol (QLD attempt 17) ---------------
+
+(defparameter *cold-boundp-protocol-cell-roster*
+  '(("SYSTEM-INTERNALS" . "GC-PROCESS"))
+  "(HOME-PACKAGE . PNAME) of every value cell whose readers guard with
+VARIABLE-BOUNDP, i.e. whose UNBOUNDNESS the sources use as protocol
+state.  The emitted world must ship each one unbound (or not interned
+at all); CHECK-BOUNDP-PROTOCOL-CELLS enforces that.  New names join
+here -- the roster, not the gate, is what grows.")
+
+(defun check-boundp-protocol-cells (w fresh)
+  "Post-emit gate (QLD attempt 17, SYS:GC;GC.VBIN): no cell in
+*COLD-BOUNDP-PROTOCOL-CELL-ROSTER* may be emitted BOUND.
+
+For these cells the sources read unboundness as \"the object does not
+exist yet\", so a prophylactic NIL stamp does not make the world safer,
+it flips a protocol bit.  SI:GC-PROCESS is the founding member:
+gc.lisp:2128 defines
+
+  (DEFUN WAKEUP-GC-PROCESS ()
+    (WHEN (VARIABLE-BOUNDP GC-PROCESS) ... (PROCESS:PROCESS-WAKEUP GC-PROCESS)))
+
+and gc.lisp:2446's (UNLESS (VARIABLE-BOUNDP GC-PROCESS) ...) is GC-ON's
+process CREATION path; the cell's DEFVAR is argless (gc-defs.lisp:183)
+and stock ships it unbound.  Bound to NIL, the wakeup guard reads true
+the moment gc.vbin replaces the cold-load IGNORE stub
+(cold-load.lisp:232) with the real function, and QLD attempt 17 died
+with
+
+  #<UNCLAIMED-MESSAGE> The generic function PROCESS:PROCESS-WAKEUP was
+  applied to the argument NIL
+
+while loading SYS:GC;GC.VBIN -- with GC-ON silently declining to create
+the process as the sequel.
+
+Read back OUT OF THE EMITTED FILE (forward-followed), and deliberately
+blind to *COLD-BOUNDP-PROTOCOL-CELLS*, so defeating the fix fires the
+gate.  A cell that is not interned at all passes: the requirement is
+\"nothing has given it a value\", which a world that never mentions the
+name satisfies too."
+  (loop with dtp-null = (cold-dtp w "NULL")
+        for (home . pname) in *cold-boundp-protocol-cell-roster*
+        for vma = (cold-find-symbol-vma w pname home)
+        do (when vma
+             (let ((cell (cold-file-follow-cell w fresh (1+ vma))))
+               (multiple-value-bind (tag data) (world-q fresh cell)
+                 (unless (and tag (= (tag-type tag) dtp-null))
+                   (cold-check nil "boundp protocol: ~A:~A @#x~8,'0X is ~
+emitted BOUND (value cell @#x~8,'0X = ~2,'0X:~8,'0X), but its readers ~
+guard with VARIABLE-BOUNDP and take unboundness to mean the object does ~
+not exist yet -- a bound cell defeats the guard, which is how QLD ~
+attempt 17 died loading SYS:GC;GC.VBIN (PROCESS:PROCESS-WAKEUP applied ~
+to NIL, gc.lisp:2129) and how GC-ON (gc.lisp:2446) would skip creating ~
+the process"
+                               home pname vma cell
+                               (tag-type tag) (or data 0)))))))
+  t)
+
 (defun check-bignum-encoding (w fresh)
   "Post-emit gate (QLD attempt 8, SYS:SYS2;BIGNUM.VBIN): every bignum the
 generator emitted must READ BACK, out of the file and under the Ivory
@@ -5397,6 +5455,14 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; vbin read just made -- NAME-CONFLICT-IN-EXPORT on
             ;; #:CAR-LOCAL (QLD attempt 16).
             (check-opcode-symbols w fresh)
+            ;; Cells whose readers guard with VARIABLE-BOUNDP ship
+            ;; UNBOUND: for them unboundness is protocol state ("the
+            ;; object does not exist yet"), so a prophylactic NIL stamp
+            ;; flips a protocol bit.  SI:GC-PROCESS bound to NIL made
+            ;; WAKEUP-GC-PROCESS's guard (gc.lisp:2129) read true and
+            ;; QLD attempt 17 died in SYS:GC;GC.VBIN with
+            ;; PROCESS:PROCESS-WAKEUP applied to NIL.
+            (check-boundp-protocol-cells w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
@@ -5423,7 +5489,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("static-exports" . *cold-static-exports*)
     ("macroexpand-compiler-hooks" . *cold-macroexpand-compiler-hooks*)
     ("block-write-functions" . *cold-block-write-functions*)
-    ("opcode-symbols" . *cold-opcode-symbols*))
+    ("opcode-symbols" . *cold-opcode-symbols*)
+    ("boundp-protocol-cells" . *cold-boundp-protocol-cells*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest
