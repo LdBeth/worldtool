@@ -264,6 +264,32 @@ did not name COMPILER:GET-PHASE-1-HANDLER"; fail=1; }
         || { echo "FAIL: negative test (macroexpand-compiler-hooks): gate \
 did not name SI:MACROEXPAND-1-INTERNAL"; fail=1; }
     rm -f "$neg"
+
+    # block-write-functions: a from-scratch world's flavors get a
+    # different (legitimate) instance-variable storage order than the
+    # Symbolics build world's, so VALIDATE-CONSTRUCTOR-FUNCTIONS
+    # (flavor/make.lisp:953) rejects the vbin's dumped
+    # CONSTRUCTOR-DERIVATION and Genera correctly regenerates the
+    # constructors -- INTERPRETED, since COMPILE-FUNCTION-LIST with no
+    # compiler is (MAPC #'EVAL forms).  The digested body calls
+    # SI:%BLOCK-n-WRITE, an Ivory instruction (DEFOPCODE,
+    # i-sys/opdef.lisp:287) no Genera world defines as a function: Error
+    # trap 71, FSYMEVAL of #'SI:%BLOCK-1-WRITE, QLD attempt 13 loading
+    # SYS:SCHEDULER;COMETH.VBIN (PROCESS-INITIALIZE -> MAKE-PROCESS).
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-blockwrite.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat block-write-functions > "$neg" 2>&1; then
+        echo "FAIL: negative test (block-write-functions) built GREEN -- \
+check-block-write-functions does not fire"; fail=1
+    fi
+    grep -q "FAIL block write functions" "$neg" \
+        || { echo "FAIL: negative test (block-write-functions): the \
+failure was not check-block-write-functions"; fail=1; }
+    grep -q "FAIL block write functions.*%BLOCK-1-WRITE" "$neg" \
+        || { echo "FAIL: negative test (block-write-functions): gate did \
+not name SI:%BLOCK-1-WRITE"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

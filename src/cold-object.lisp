@@ -482,6 +482,18 @@ blocks; uninterned symbols keep identity through the vsym object itself."
         (cold-nil-q w)
         (values (tag 0 (cold-dtp w "SYMBOL")) vma))))
 
+(defun cold-find-symbol-vma (w pname context-package)
+  "Symbol VMA for PNAME under the home the oracle picks from
+CONTEXT-PACKAGE, or NIL when the model never interned it.  Unlike
+COLD-VSYM this NEVER ALLOCATES: the post-emit gates run after
+COLD-FINALIZE re-stamped the region free pointers, so interning from a
+gate would both extend the world under test and leave a symbol past the
+emitted frontier (the boot-47 stale-fp failure).  A gate that must
+answer \"is this symbol there at all?\" -- the defeated-fix case --
+needs exactly this."
+  (gethash (cons pname (cold-resolve-home pname context-package))
+           (cold-world-symbols w)))
+
 ;;; ---------------- Lists ----------------
 
 (defun cold-list (w cell area)

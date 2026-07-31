@@ -2442,6 +2442,120 @@ calls the compiler-protocol hooks pre-warm and traps on the argument ~
 before the hook"
                     cell (if tag (tag-type tag) 0) (or data 0))))))
 
+(defparameter *cold-block-write-callees*
+  '("%READ-INTERNAL-REGISTER" "%WRITE-INTERNAL-REGISTER"
+    "%P-STORE-CONTENTS" "%POINTER-PLUS")
+  "Every function the interpreted SI:%BLOCK-n-WRITE bodies call.  All
+four are cold DEFUPRIM CCAs; if one ever leaves the cold set the
+interpreted constructors die on it exactly the way they died on
+%BLOCK-1-WRITE itself.")
+
+(defparameter *cold-block-write-bar-registers*
+  '((1 . 134) (2 . 262) (3 . 390))
+  "SI:%REGISTER-BAR-1/2/3, the internal-register numbers the interpreted
+%BLOCK-n-WRITE bodies SYMEVAL.  Ground truth read out of the emitted
+world; they are cold DEFCONSTANTs.")
+
+(defun check-block-write-functions (w fresh)
+  "Post-emit gate (QLD attempt 13, SYS:SCHEDULER;COMETH.VBIN): the three
+SI:%BLOCK-n-WRITE Ivory instructions must carry INTERPRETED function
+definitions, because a from-scratch world runs its flavor constructors
+interpreted and Genera's digester emits calls to them.
+
+VALIDATE-CONSTRUCTOR-FUNCTIONS (flavor/make.lisp:953) EQUAL-compares the
+vbin-dumped CONSTRUCTOR-DERIVATION -- which embeds the Symbolics BUILD
+WORLD's historical instance-variable slot order -- against a freshly
+computed FLAVOR-CONSTRUCTOR-DERIVATION.  Our world composes its flavors
+fresh from the 8.5 sources and legitimately gets a different storage
+order for the non-:ORDERED instance variables, so validation fails and
+COMPOSE-CONSTRUCTOR-FUNCTIONS regenerates the constructors; with no
+compiler loaded COMPILE-FUNCTION-LIST is (MAPC #'EVAL forms), so the
+constructors are INTERPRETED.  That is correct and necessary -- the
+vbin's compiled constructor would write slots in the historical order --
+but the digested body evaluates SI:%BLOCK-1-WRITE forms, and that symbol
+has no function definition in ANY Genera world (DEFOPCODE,
+i-sys/opdef.lisp:287; stock never runs a constructor interpreted because
+Symbolics' builds always pass validation).  QLD attempt 13 trapped 71,
+FSYMEVAL of #'SI:%BLOCK-1-WRITE, from the eager (ADD-INITIALIZATION
+\"Process\" '(PROCESS-INITIALIZE) '(:ONCE)) at the end of cometh.vbin ->
+INITIALIZE-SCHEDULER -> MAKE-PROCESS \"Idle Process\" -> the interpreted
+MAKE-PROCESS-INTERNAL.
+
+Checked ON THE FILE, forward-followed, and deliberately blind to
+*COLD-BLOCK-WRITE-FUNCTIONS*: the gate must fire when the fix is
+defeated.  Any interpreted definition satisfies it -- the requirement is
+that the cell answer, that the four callees the body calls are fbound,
+and that the three %REGISTER-BAR-n constants it SYMEVALs hold the
+register numbers."
+  (let ((dtp-list (cold-dtp w "LIST"))
+        (dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
+        (dtp-symbol (cold-dtp w "SYMBOL"))
+        (dtp-fixnum (cold-dtp w "FIXNUM"))
+        (named-lambda (cold-find-symbol-vma w "NAMED-LAMBDA"
+                                            "SYSTEM-INTERNALS")))
+    ;; (a) each %BLOCK-n-WRITE holds an interpreted (NAMED-LAMBDA ...).
+    (loop for n from 1 to 3
+          for name = (format nil "%BLOCK-~D-WRITE" n)
+          for sym = (cold-find-symbol-vma w name "SYSTEM-INTERNALS")
+          do (cond
+               ((null sym)
+                (cold-check nil "block write functions: SI:~A is not even ~
+interned -- the interpreted flavor constructors a from-scratch world ~
+regenerates call it, and FSYMEVAL of #'SI:~:*~A traps 71 (QLD attempt ~
+13, SYS:SCHEDULER;COMETH.VBIN)" name))
+               (t
+                (let ((cell (cold-file-follow-cell w fresh (+ sym 2))))
+                  (multiple-value-bind (tag data) (world-q fresh cell)
+                    (cond
+                      ((not (and tag (= (tag-type tag) dtp-list)))
+                       (cold-check nil "block write functions: SI:~A's ~
+function cell @#x~8,'0X is ~2,'0X:~8,'0X, not a DTP-LIST interpreted ~
+definition -- SI:~4:*~A is an Ivory instruction (DEFOPCODE, ~
+i-sys/opdef.lisp:287) with no definition in any Genera world, and a ~
+regenerated interpreted constructor calls it (QLD attempt 13, trap 71 ~
+in MAKE-PROCESS of the Idle Process)"
+                                   name cell (if tag (tag-type tag) 0)
+                                   (or data 0)))
+                      (t
+                       (multiple-value-bind (ct cd)
+                           (world-q fresh (cold-file-follow-cell w fresh data))
+                         (cold-check
+                          (and ct (= (tag-type ct) dtp-symbol)
+                               named-lambda (eql cd named-lambda))
+                          "block write functions: SI:~A's interpreted ~
+definition @#x~8,'0X starts ~2,'0X:~8,'0X, not the symbol NAMED-LAMBDA ~
+@#x~8,'0X -- SI:EVAL only accepts a NAMED-LAMBDA/LAMBDA-headed list as ~
+an interpreted definition"
+                          name data (if ct (tag-type ct) 0) (or cd 0)
+                          (or named-lambda 0))))))))))
+    ;; (b) every callee of the interpreted bodies is fbound.
+    (dolist (callee *cold-block-write-callees*)
+      (let* ((sym (cold-find-symbol-vma w callee "SYSTEM-INTERNALS"))
+             (cell (and sym (cold-file-follow-cell w fresh (+ sym 2)))))
+        (multiple-value-bind (tag data) (if cell
+                                           (world-q fresh cell)
+                                           (values nil nil))
+          (cold-check (and tag (= (tag-type tag) dtp-cf))
+                      "block write functions: SI:~A's function cell ~
+~@[@#x~8,'0X ~]is ~2,'0X:~8,'0X, not a compiled function -- the ~
+interpreted %BLOCK-1-WRITE body calls it, so it must be a cold DEFUPRIM"
+                      callee cell (if tag (tag-type tag) 0) (or data 0)))))
+    ;; (c) the register-number constants the bodies SYMEVAL.
+    (loop for (n . number) in *cold-block-write-bar-registers*
+          for name = (format nil "%REGISTER-BAR-~D" n)
+          for sym = (cold-find-symbol-vma w name "SYSTEM-INTERNALS")
+          for cell = (and sym (cold-file-follow-cell w fresh (1+ sym)))
+          do (multiple-value-bind (tag data) (if cell
+                                                 (world-q fresh cell)
+                                                 (values nil nil))
+               (cold-check (and tag (= (tag-type tag) dtp-fixnum)
+                                (eql data number))
+                           "block write functions: SI:~A's value cell ~
+~@[@#x~8,'0X ~]is ~2,'0X:~8,'0X, not the fixnum ~D -- the interpreted ~
+%BLOCK-~D-WRITE body SYMEVALs it to name the BAR-~:*~D internal register"
+                           name cell (if tag (tag-type tag) 0) (or data 0)
+                           number n)))))
+
 (defun check-bignum-encoding (w fresh)
   "Post-emit gate (QLD attempt 8, SYS:SYS2;BIGNUM.VBIN): every bignum the
 generator emitted must READ BACK, out of the file and under the Ivory
@@ -5113,6 +5227,14 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; COMPILER:*COMPILER* argument, answer instead of trapping
             ;; 57 (QLD attempt 12, SYS:SCHEDULER;LOCKS.VBIN).
             (check-macroexpand-compiler-hooks w fresh)
+            ;; The three SI:%BLOCK-n-WRITE Ivory instructions carry
+            ;; interpreted definitions: a from-scratch world's flavor
+            ;; constructors fail VALIDATE-CONSTRUCTOR-FUNCTIONS (our
+            ;; instance-variable storage order is not the Symbolics build
+            ;; world's), are correctly regenerated by (MAPC #'EVAL ...),
+            ;; and the digested body calls them (QLD attempt 13, trap 71
+            ;; loading SYS:SCHEDULER;COMETH.VBIN).
+            (check-block-write-functions w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
@@ -5137,7 +5259,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("zl-slash-escape" . *cold-zl-slash-escape*)
     ("uncomposable-cfms" . *cold-withhold-uncomposable-cfms*)
     ("static-exports" . *cold-static-exports*)
-    ("macroexpand-compiler-hooks" . *cold-macroexpand-compiler-hooks*))
+    ("macroexpand-compiler-hooks" . *cold-macroexpand-compiler-hooks*)
+    ("block-write-functions" . *cold-block-write-functions*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

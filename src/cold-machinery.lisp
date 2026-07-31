@@ -1409,6 +1409,129 @@ architecture instance over this NIL.  Same flag as the graft: see
       (cold-set-symbol-value w (make-vsym "COMPILER" "*COMPILER*")
                              ntag ndata))))
 
+;;; ---------------- Interpretable BLOCK-n-WRITE ----------------
+
+(defvar *cold-block-write-functions* t
+  "QLD attempt 13: a FROM-SCRATCH world runs flavor constructors
+INTERPRETED, and the interpreted constructor body calls
+SI:%BLOCK-n-WRITE -- an Ivory INSTRUCTION that no Genera world has ever
+carried a function definition for.  The cold world must supply one.
+
+COMPILE-FLAVOR-METHODS-LOAD-TIME's VALIDATE-CONSTRUCTOR-FUNCTIONS
+\(flavor/make.lisp:953) EQUAL-compares the CONSTRUCTOR-DERIVATION the
+vbin dumped against a freshly computed FLAVOR-CONSTRUCTOR-DERIVATION.
+The dumped one embeds the SYMBOLICS BUILD WORLD's historical
+instance-variable slot order -- slot positions preserved across years of
+flavor redefinitions, SPARE-SLOTs interleaved mid-list.  Our world
+composes every flavor fresh from the 8.5 sources and legitimately gets a
+different storage order for the non-:ORDERED instance variables (the
+:ORDERED 26-slot prefix matches; the 36-slot tail does not).  So
+validation fails and Genera regenerates the constructors --
+COMPOSE-CONSTRUCTOR-FUNCTIONS + COMPILE-FUNCTION-LIST, which with no
+compiler loaded is (MAPC #'EVAL forms).  That regeneration is CORRECT
+AND NECESSARY here: the vbin's compiled constructor would write slots in
+the historical order, inconsistent with our live flavor state.  Stock
+never runs a constructor interpreted only because Symbolics' builds
+always PASS validation -- their cold worlds inherit the historical
+flavor structures.
+
+The regenerated constructor is digested by Genera's own SI:DIGEST, which
+explicitly supports the idiom: it emits function CALLS to
+%READ-INTERNAL-REGISTER / %WRITE-INTERNAL-REGISTER around a body of
+SI:%BLOCK-n-WRITE forms for the BAR-1 save/restore.  But
+SI:%BLOCK-1-WRITE has no function definition in ANY Genera world -- it
+is a DEFOPCODE (i-sys/opdef.lisp:287), an instruction the compiler
+open-codes.  Interpreted, FSYMEVAL of #'SI:%BLOCK-1-WRITE traps 71.
+First call site: the eager (ADD-INITIALIZATION \"Process\"
+'(PROCESS-INITIALIZE) '(:ONCE)) at the end of SYS:SCHEDULER;COMETH.VBIN
+-> INITIALIZE-SCHEDULER -> MAKE-PROCESS \"Idle Process\" -> the
+interpreted MAKE-PROCESS-INTERNAL.
+
+Function-call granularity is sound: %MAKE-STRUCTURE's DEFUPRIM function
+version leaves BAR-n as PROCESSOR STATE that survives a function return,
+and the BARs are saved and restored across stack-group switches, so
+nothing between our reads and writes can lose the register.
+
+Setting this flag NIL defeats the graft, for the negative test.")
+
+(defun cold-block-write-name (n)
+  (format nil "%BLOCK-~D-WRITE" n))
+
+(defun cold-block-write-form (n)
+  "The interpreted source for SI:%BLOCK-N-WRITE:
+
+  (NAMED-LAMBDA %BLOCK-n-WRITE (VALUE)
+    (LET ((BAR (%READ-INTERNAL-REGISTER %REGISTER-BAR-n)))
+      (%P-STORE-CONTENTS BAR VALUE)
+      (%WRITE-INTERNAL-REGISTER (%POINTER-PLUS BAR 1) %REGISTER-BAR-n)
+      VALUE))
+
+-- write VALUE through BAR-n, post-increment BAR-n, return VALUE (the
+instruction is :TOS-UNCHANGED and every caller discards).
+
+Every head resolves through the symbol-home oracle from
+SYSTEM-INTERNALS, the package of i-sys/opdef.lisp and of sys2/macro.lisp
+whose WITH-BLOCK-REGISTERS fixes %WRITE-INTERNAL-REGISTER's (VALUE
+REGISTER) argument order -- the same order Genera's own digester emits.
+All four callees are cold DEFUPRIM CCAs and %REGISTER-BAR-1/2/3 are cold
+DEFCONSTANTs (134/262/390), so the whole body is answerable pre-warm.
+%MAKE-POINTER-OFFSET and %MAKE-POINTER are deliberately NOT used: they
+are DEFSUBSTs QLD loads later, unbound in the cold world.  BAR holds a
+DTP-LOCATIVE, which is exactly what %POINTER-PLUS preserves, and
+%P-STORE-CONTENTS stores VALUE's tag and data through it while
+preserving the target's cdr code."
+  (flet ((si (name) (make-vsym "SYSTEM-INTERNALS" name)))
+    (let ((bar-register (si (format nil "%REGISTER-BAR-~D" n)))
+          (bar (si "BAR"))
+          (value (si "VALUE")))
+      (list (si "NAMED-LAMBDA") (si (cold-block-write-name n))
+            (list value)
+            (list (si "LET")
+                  (list (list bar
+                              (list (si "%READ-INTERNAL-REGISTER")
+                                    bar-register)))
+                  (list (si "%P-STORE-CONTENTS") bar value)
+                  (list (si "%WRITE-INTERNAL-REGISTER")
+                        (list (si "%POINTER-PLUS") bar 1)
+                        bar-register)
+                  value)))))
+
+(defun cold-graft-block-write-functions (w)
+  "FDEFINE SI:%BLOCK-1-WRITE / -2- / -3- to the interpreted definitions
+COLD-BLOCK-WRITE-FORM builds, so a regenerated (interpreted) flavor
+constructor can run.  See *COLD-BLOCK-WRITE-FUNCTIONS* for the whole
+story.
+
+The definition Q is the ordinary interpreted-function shape the
+fdefinition cell of any non-compiled definition holds -- DTP-LIST at the
+\(NAMED-LAMBDA ...) list -- consed in PERMANENT-STORAGE-AREA, the area
+COLD-DO-FDEFINE materializes non-VFUN definitions into.  The symbols are
+interned through the standard cold-intern machinery, so the emitted
+symbol area carries them and BUILD-INITIAL-PACKAGES' FIXUP-SYMBOL-PACKAGE
+registers them in SI (warm INTERN then finds these, not fresh twins);
+COLD-FINALIZE re-stamps the region free pointers after us, so they are
+inside the swept frontier.
+
+Errors out if a name has become fbound: a cold file that starts defining
+one means this graft must be dropped (the boot-6 emb-ethernet
+discipline)."
+  (when *cold-block-write-functions*
+    (let ((dtp-null (cold-dtp w "NULL")))
+      (loop for n from 1 to 3
+            do (let* ((name (cold-block-write-name n))
+                      (cell (cold-follow-cell
+                             w (cold-fdefinition-cell
+                                w (make-vsym "SYSTEM-INTERNALS" name)))))
+                 (multiple-value-bind (tag data) (cw-ref w cell)
+                   (declare (ignore data))
+                   (unless (= (tag-type tag) dtp-null)
+                     (error "SI:~A is defined now -- drop its interpreted ~
+graft" name)))
+                 (multiple-value-bind (dtag ddata)
+                     (cold-ref w (cold-block-write-form n)
+                               :area "PERMANENT-STORAGE-AREA")
+                   (cold-store-contents w cell dtag ddata)))))))
+
 ;;; ---------------- FEP boot parameters ----------------
 
 ;;; FEPComm slots the FEP populates on real hardware before starting
@@ -1462,6 +1585,12 @@ slots from the reference world."
   ;; Allocates in *FLAVOR-STATIC-AREA* + PROPERTY-LIST-AREA: also before
   ;; the table fill (M3h boot 36).
   (cold-build-make-instance-generic w)
+  ;; Interns three symbols and conses their interpreted definitions in
+  ;; SYMBOL-AREA / PERMANENT-STORAGE-AREA: the only graft below that
+  ;; ALLOCATES, so it too goes ahead of the table fill (CHECK-MACHINERY-
+  ;; REGION-TABLES verifies the stamped free pointers at the end of this
+  ;; pass, long before COLD-FINALIZE re-stamps them).
+  (cold-graft-block-write-functions w)
   (cold-fill-storage-tables w :reference reference)
   (cold-stamp-fepcomm-boot-slots w)
   (cold-graft-ignore-stubs w)
