@@ -304,6 +304,35 @@ failure was not check-block-write-functions"; fail=1; }
         || { echo "FAIL: negative test (block-write-functions): gate did \
 not name SI:%BLOCK-1-WRITE"; fail=1; }
     rm -f "$neg"
+
+    # opcode-symbols: SYS:I-SYS;OPDEF.VBIN names every Ivory instruction
+    # and built-in PNAME-ONLY (BIN-OP-SYMBOL, "intern in the file
+    # package"), and in stock Genera every one of them is already a
+    # baked cold symbol -- CAR-LOCAL at 800C2264, home SYSTEM -- that
+    # ILC (:USE COMPILER SYSTEM GLOBAL) inherits.  In a world that lacks
+    # the name the vbin read mints an ILC twin and ADD-OPCODE's fallback
+    # (i-compiler/i-instruction-set.lisp:108-150) INTERNs another into
+    # SYSTEM, which is :EXTERNAL-ONLY (pkgdcl.lisp:4114): the export
+    # fires on the spot and QLD attempt 16 died with
+    # #<NAME-CONFLICT-IN-EXPORT> Exporting #:CAR-LOCAL from package
+    # SYSTEM would cause name conflict in ILC.  CAR-LOCAL is only the
+    # first :FUNCTION name in the file; defeated, 110 of the 239
+    # instruction/built-in names are missing and the gate names
+    # CAR-LOCAL first.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-opcodesyms.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat opcode-symbols > "$neg" 2>&1; then
+        echo "FAIL: negative test (opcode-symbols) built GREEN -- \
+check-opcode-symbols does not fire"; fail=1
+    fi
+    grep -q "FAIL opcode symbols" "$neg" \
+        || { echo "FAIL: negative test (opcode-symbols): the failure was \
+not check-opcode-symbols"; fail=1; }
+    grep -q "FAIL opcode symbols.*CAR-LOCAL" "$neg" \
+        || { echo "FAIL: negative test (opcode-symbols): gate did not \
+name CAR-LOCAL"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

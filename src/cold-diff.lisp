@@ -2627,6 +2627,82 @@ read and write (QLD attempt 15)" name))
 constructors' block-write cursor must be bound before the first ~
 %MAKE-STRUCTURE" name (if tag (tag-type tag) 0) (or data 0))))))))
 
+(defparameter *cold-opcode-symbol-report-limit* 12
+  "How many individual CHECK-OPCODE-SYMBOLS failures to spell out before
+the summary takes over.  Defeating the bake breaks 110 of the 239 names
+at once and the roster is not the diagnosis -- the first few names plus
+the count are.")
+
+(defun check-opcode-symbols (w fresh)
+  "Post-emit gate (QLD attempt 16, SYS:I-SYS;OPDEF.VBIN): every
+instruction and built-in name ADD-OPCODE will look up at QLD time must
+already be interned, at the home the reference world gives it.
+
+opdef.vbin dumps those names PNAME-ONLY, so loading it in a world that
+lacks one mints an ILC twin at read time and ADD-OPCODE's fallback
+\(INTERN name SYSTEM) mints another -- and SYSTEM is :EXTERNAL-ONLY, so
+the export fires immediately and dies with
+
+  #<NAME-CONFLICT-IN-EXPORT> Exporting #:CAR-LOCAL from package SYSTEM
+  would cause name conflict in ILC
+
+CAR-LOCAL is only the first :FUNCTION name in the file; the defect is
+the whole 192-DEFOPCODE roster.  See *COLD-OPCODE-SYMBOLS*.
+
+The name set is RE-DERIVED from the vbin here, not taken from whatever
+the generator happened to bake, and the package cell is read back OUT OF
+THE EMITTED FILE -- the gate is deliberately blind to
+*COLD-OPCODE-SYMBOLS* so it fires when the bake is defeated.  The check
+is \"a symbol with this pname is interned under this home\", which a
+future cold file that starts defining the name satisfies just as well as
+the bake does."
+  (let ((names (cold-opcode-symbol-names))
+        (dtp-string (cold-dtp w "STRING"))
+        (broken 0)
+        (reported 0))
+    (flet ((report (fmt &rest args)
+             (incf broken)
+             (when (< reported *cold-opcode-symbol-report-limit*)
+               (incf reported)
+               (apply #'cold-check nil fmt args))))
+      (dolist (pname names)
+        ;; HOME is the reference world's own answer; the package cell is
+        ;; compared against IT, not against whatever COLD-RESOLVE-HOME
+        ;; made of it, so a resolution that wanders off the oracle is a
+        ;; failure here instead of a tautology.
+        (let* ((home (cold-opcode-symbol-home pname))
+               (vma (cold-find-symbol-vma w pname home)))
+          (cond
+            ((null vma)
+             (report "opcode symbols: ~A is not interned -- ~
+SYS:I-SYS;OPDEF.VBIN names it pname-only, so QLD's ADD-OPCODE would ~
+INTERN it into the :EXTERNAL-ONLY ~A package and the auto-export would ~
+collide with the ILC twin the vbin read just made ~
+\(NAME-CONFLICT-IN-EXPORT, QLD attempt 16)" pname home))
+            (t
+             (multiple-value-bind (ptag pdata) (world-q fresh vma)
+               (let ((got (and ptag (w-string fresh pdata))))
+                 (unless (equal got pname)
+                   (report "opcode symbols: the symbol block for ~A ~
+@#x~8,'0X reads back from the file with pname ~:[none~;~:*~S~]"
+                           pname vma got))))
+             (multiple-value-bind (ptag pdata) (world-q fresh (+ vma 4))
+               (let ((got (and ptag (= (tag-type ptag) dtp-string)
+                               (w-string fresh pdata))))
+                 (unless (equal got home)
+                   (report "opcode symbols: ~A @#x~8,'0X has package ~
+cell ~S, not the name string ~S the reference world's home gives it -- ~
+FIXUP-SYMBOL-PACKAGE registers a baked symbol by that string"
+                           pname vma
+                           (or got (list (if ptag (tag-type ptag) 0)
+                                         (or pdata 0)))
+                           home)))))))))
+    (cold-check (zerop broken)
+                "opcode symbols: ~D of ~D ADD-OPCODE name~:P missing or ~
+mis-homed in the emitted world (first ~D listed above) -- QLD dies on ~
+the first one loading SYS:I-SYS;OPDEF.VBIN (attempt 16)"
+                broken (length names) reported)))
+
 (defun check-bignum-encoding (w fresh)
   "Post-emit gate (QLD attempt 8, SYS:SYS2;BIGNUM.VBIN): every bignum the
 generator emitted must READ BACK, out of the file and under the Ivory
@@ -5313,6 +5389,14 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; (attempt 15).  Six compiled wrappers keep the cursor in
             ;; *INTERPRETED-BAR-n* instead.
             (check-block-write-functions w fresh)
+            ;; Every Ivory instruction / built-in name QLD's
+            ;; SYS:I-SYS;OPDEF.VBIN will ADD-OPCODE is interned at the
+            ;; reference world's home.  The vbin names them pname-only;
+            ;; a missing one is INTERNed into the :EXTERNAL-ONLY SYSTEM
+            ;; package, whose auto-export collides with the ILC twin the
+            ;; vbin read just made -- NAME-CONFLICT-IN-EXPORT on
+            ;; #:CAR-LOCAL (QLD attempt 16).
+            (check-opcode-symbols w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
@@ -5338,7 +5422,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("uncomposable-cfms" . *cold-withhold-uncomposable-cfms*)
     ("static-exports" . *cold-static-exports*)
     ("macroexpand-compiler-hooks" . *cold-macroexpand-compiler-hooks*)
-    ("block-write-functions" . *cold-block-write-functions*))
+    ("block-write-functions" . *cold-block-write-functions*)
+    ("opcode-symbols" . *cold-opcode-symbols*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

@@ -599,6 +599,181 @@ cells for them -- hence the runtime PKG-FIND-PACKAGE lookup.  Returns
                  (list (si-vsym "PROGN") prologue (cdr entry) epilogue))
            t)))))
 
+;;; ---- The ADD-OPCODE name symbols (QLD attempt 16) ------------------------
+
+(defvar *cold-opcode-symbols* t
+  "QLD attempt 16: SYS:I-SYS;OPDEF.VBIN (file package I-LISP-COMPILER,
+\"ILC\") died with
+
+  #<NAME-CONFLICT-IN-EXPORT> Exporting #:CAR-LOCAL from package SYSTEM
+  would cause name conflict in ILC
+
+because a from-scratch world does not carry the Ivory INSTRUCTION NAMES
+as symbols, and the vbin's ADD-OPCODE forms name them PNAME-ONLY.
+
+The mechanism, end to end.  Each (DEFOPCODE name opcode format . attrs)
+expands to (ADD-OPCODE 'name '*name* 'opcode 'format 'attrs), and every
+opcode/:FUNCTION name in it is dumped as a BIN-OP-SYMBOL with no package
+prefix -- \"intern in the file package\", which in a full Genera finds
+the symbol INHERITED from one of ILC's (:USE COMPILER SYSTEM GLOBAL).
+ADD-OPCODE (i-compiler/i-instruction-set.lisp:93-150) then looks the
+same name up again to hang the BUILT-IN property on: for a :FUNCTION
+attribute it probes CLI then COMPILER and otherwise
+\(LETF ((SI:PKG-LOCKED SYSTEM) NIL)) (INTERN name SYSTEM); with no
+:FUNCTION attribute it probes GLOBAL, SCL, COMPILER and falls back to
+the same INTERN.
+
+In stock Genera every one of those names already exists -- CAR-LOCAL sits
+at 800C2264 in the distribution world, home package SYSTEM, inside the
+800C21F1-800C23xx opcode-name cluster -- so both interns FIND it (SYSTEM
+is :EXTERNAL-ONLY, pkgdcl.lisp:4114, so every SYSTEM symbol is external
+and inherited by ILC) and nothing is created.  In a world that lacks the
+name, the vbin read mints a fresh ILC::CAR-LOCAL, ADD-OPCODE's fallback
+mints a distinct SYSTEM::CAR-LOCAL, :EXTERNAL-ONLY exports it on the
+spot, and EXPORT-INTERNAL's used-by loop sees the two -- fatal, and
+fatal for EVERY name in the file, not just the first.
+
+So the generator BAKES them: COLD-BAKE-OPCODE-SYMBOLS interns one
+unbound symbol per opcode/:FUNCTION name at the home the reference world
+gives it, which is exactly the state stock reaches.  Nothing else is
+needed -- pre-boot baked symbols carry their package as a NAME STRING in
+the +4 cell and BUILD-INITIAL-PACKAGES' FIXUP-SYMBOL-PACKAGE registers
+them (and exports the SYSTEM ones, :EXTERNAL-ONLY).
+
+NIL defeats the bake for the gate negative test (CHECK-OPCODE-SYMBOLS;
+`worldtool coldtest ... --defeat opcode-symbols').")
+
+(defparameter *cold-opcode-definition-file* "SYS: I-SYS; OPDEF"
+  "The DEFOPCODE file whose ADD-OPCODE forms name every Ivory
+instruction.  Read for its NAMES only -- it is a compiler file and is
+not, and must not be, in *COLD-LOAD-ORDER*.")
+
+(defparameter *cold-opcode-home-preference*
+  '("GLOBAL" "SYMBOLICS-COMMON-LISP" "COMMON-LISP-INTERNALS" "COMPILER"
+    "SYSTEM" "LISP")
+  "Home packages an ADD-OPCODE name may legitimately live in, in the
+order ADD-OPCODE itself reaches them: the no-:FUNCTION branch probes
+GLOBAL, SCL and COMPILER before interning in SYSTEM, the :FUNCTION
+branch probes CLI and COMPILER before the same fallback, and LISP is
+last because ADD-OPCODE never names it -- a LISP-homed name (LDB, MAX,
+ASH ...) is reached by INHERITANCE, which is also why the reference
+world has no SYSTEM twin of it.  The order only breaks TIES: a handful
+of names (ASSOC, MEMBER, PUSH, LOGAND ...) have both a GLOBAL and a LISP
+home in the reference world, and GLOBAL is the one ADD-OPCODE probes.
+A name the reference world homes in NONE of these is a hard error --
+see COLD-OPCODE-SYMBOL-HOME.")
+
+(defun cold-add-opcode-forms (vbin)
+  "Every (ADD-OPCODE 'name '*name* opcode 'format 'attributes) form
+reachable in VBIN's events, in file order."
+  (let ((forms nil))
+    (labels ((visit (v)
+               (typecase v
+                 (veval (visit (veval-form v)))
+                 (vop (mapc #'visit (vop-args v)))
+                 (varray (when (varray-contents v)
+                           (map nil #'visit (varray-contents v))))
+                 (cons
+                  (when (and (vsym-p (first v))
+                             (string= (vsym-name (first v)) "ADD-OPCODE"))
+                    (push v forms))
+                  (loop for c = v then (cdr c)
+                        while (consp c)
+                        do (visit (car c)))))))
+      (dolist (event (vbin-file-events vbin))
+        (visit (cdr event))))
+    (nreverse forms)))
+
+(defun cold-opcode-unquote (form)
+  "(QUOTE x) -> x; anything else unchanged.  DEFOPCODE quotes every
+argument it passes ADD-OPCODE except the numeric opcode."
+  (if (and (consp form) (vsym-p (first form))
+           (string= (vsym-name (first form)) "QUOTE"))
+      (second form)
+      form))
+
+(defun cold-opcode-keyword-p (v name)
+  (and (vsym-p v)
+       (equal (canonical-package-name (vsym-package v)) "KEYWORD")
+       (string= (vsym-name v) name)))
+
+(defun cold-opcode-function-names (attributes)
+  "The function names in an ADD-OPCODE :FUNCTION attribute value.
+ADD-OPCODE's own ETYPECASE (i-instruction-set.lisp:118-129) takes four
+shapes: a bare symbol, a (FUNCTION . OPERAND) cons, a list of symbols,
+and a list of (FUNCTION . OPERAND) conses.  Only the function names
+matter here; the operands are fixnums and keywords."
+  (let ((tail (and (consp attributes)
+                   (member-if (lambda (v) (cold-opcode-keyword-p v "FUNCTION"))
+                              attributes))))
+    (when tail
+      (let ((value (second tail)))
+        (remove nil
+                (mapcar (lambda (v) (and (vsym-p v) (vsym-name v)))
+                        (cond ((vsym-p value) (list value))
+                              ((not (consp value)) nil)
+                              ;; (FUNCTION . OPERAND): a dotted pair.
+                              ((not (listp (cdr value))) (list (car value)))
+                              ;; list of (FUNCTION . OPERAND) conses.
+                              ((consp (car value)) (mapcar #'car value))
+                              ;; list of function names.
+                              (t value))))))))
+
+(defun cold-opcode-symbol-names (&optional (path (sys-pathname
+                                                  *cold-opcode-definition-file*)))
+  "Every pname ADD-OPCODE interns while PATH loads: the instruction name
+of each DEFOPCODE plus every name in its :FUNCTION attribute, in file
+order, de-duplicated.  A package-qualified name would contribute its
+pname just the same -- the qualified reference and ADD-OPCODE's own
+\(INTERN (STRING name) ...) agree on the pname, which is all the bake
+keys on -- but opdef.vbin has none."
+  (let ((names nil))
+    (dolist (form (cold-add-opcode-forms (read-vbin path)) (nreverse names))
+      (destructuring-bind (head name star opcode format &optional attributes)
+          form
+        (declare (ignore head star opcode format))
+        (let ((instruction (cold-opcode-unquote name)))
+          (unless (vsym-p instruction)
+            (error "ADD-OPCODE with a non-symbol instruction name: ~S"
+                   instruction))
+          (pushnew (vsym-name instruction) names :test #'string=))
+        (dolist (fn (cold-opcode-function-names
+                     (cold-opcode-unquote attributes)))
+          (pushnew fn names :test #'string=))))))
+
+(defun cold-opcode-symbol-home (pname)
+  "The package an ADD-OPCODE name must be interned in, from the
+reference world's symbol-home oracle (*COLD-SYMBOL-HOMES*, the recorded
+WORLD-SYMBOL-HOMES answer -- no new reference query).  Ties break by
+*COLD-OPCODE-HOME-PREFERENCE*; a name the reference world homes nowhere
+ADD-OPCODE can reach is a hard error, because baking it anywhere else
+would be a guess."
+  (let ((homes (and *cold-symbol-homes* (gethash pname *cold-symbol-homes*))))
+    (or (loop for p in *cold-opcode-home-preference*
+              when (member p homes :test #'string=) return p)
+        (error "opcode name ~A: the reference world homes it in ~
+~:[no package at all~;~:*~{~A~^, ~}~], none of ADD-OPCODE's probe-chain ~
+packages (~{~A~^ ~}) -- baking it would be a guess"
+               homes *cold-opcode-home-preference*))))
+
+(defun cold-bake-opcode-symbols (w)
+  "Intern every ADD-OPCODE instruction and :FUNCTION name that the cold
+load has not already interned, at the home the reference world gives it
+\(*COLD-OPCODE-SYMBOLS*).  Plain unbound symbols: ADD-OPCODE only needs
+them to EXIST, so the value and function cells stay DTP-NULL and the
+plist NIL -- what it hangs on them (the BUILT-IN property) it hangs at
+QLD time.  Returns (values baked considered)."
+  (let ((names (and *cold-opcode-symbols* (cold-opcode-symbol-names)))
+        (baked 0))
+    (dolist (pname names)
+      (let ((home (cold-opcode-symbol-home pname)))
+        ;; COLD-FIND-SYMBOL-VMA resolves the home exactly as COLD-SYMBOL
+        ;; would, so "already there" means the same intern key.
+        (unless (cold-find-symbol-vma w pname home)
+          (cold-symbol w pname home)
+          (incf baked))))
+    (values baked (length names))))
+
 (defun cold-finalize (w &key reference)
   "Everything between the last vbin and emit (M3f):
 1. the PKGDCL pass stores SI:BUILD-INITIAL-PACKAGES (cold-pkg.lisp),
@@ -618,6 +793,11 @@ cells for them -- hence the runtime PKG-FIND-PACKAGE lookup.  Returns
 4. SI:*VALUE-CELLS-TO-LOCALIZE-FIRST* / SI:*LINKED-SYMBOL-CELLS* := NIL
    (the boot localize pass reads both, memory-cold.lisp:286-297; ground
    truth has them NIL);
+4b. every Ivory instruction / built-in name SYS:I-SYS;OPDEF.VBIN will
+   ADD-OPCODE at QLD time is interned (cold-bake-opcode-symbols); the
+   names are dumped pname-only and ADD-OPCODE INTERNs the misses into
+   the :EXTERNAL-ONLY SYSTEM package, whose auto-export then conflicts
+   with the twin the vbin read just made in ILC (QLD attempt 16);
 5. every KEYWORD-package symbol is forwarded self-evaluating (cold-eval),
    so BUILD-INITIAL-PACKAGES can EVAL those forms at first boot.  Done
    last: the PKGDCL pass and the deferred-list materialization both
@@ -749,6 +929,20 @@ Returns (values deferred-count patch-count package-count)."
                     :area "WORKING-STORAGE-AREA")
         (cold-set-symbol-value
          w (make-vsym "SYSTEM-INTERNALS" "*LINKED-SYMBOL-CELLS*") lt ld))
+      ;; 4b. The Ivory instruction names.  QLD's SYS:I-SYS;OPDEF.VBIN
+      ;;     names every opcode and built-in PNAME-ONLY, and ADD-OPCODE's
+      ;;     fallback INTERNs the misses into the :EXTERNAL-ONLY SYSTEM
+      ;;     package -- which exports them straight into a
+      ;;     NAME-CONFLICT-IN-EXPORT against the twin the vbin read just
+      ;;     made in ILC (QLD attempt 16).  Baking them reproduces the
+      ;;     stock world's state.  Before the keyword pass so that stays
+      ;;     the last interning step; well before the free-pointer
+      ;;     re-stamp (step 6), which is what puts the new symbols under
+      ;;     FIXUP-SYMBOL-PACKAGE's sweep.
+      (multiple-value-bind (baked considered) (cold-bake-opcode-symbols w)
+        (when (plusp baked)
+          (format t "~&  ~D of ~D ADD-OPCODE instruction/built-in name~:P ~
+baked as symbols (SYS:I-SYS;OPDEF)~%" baked considered)))
       ;; 5. Every keyword must self-evaluate before BUILD-INITIAL-PACKAGES
       ;;    EVALs the DEFPACKAGE-INTERNAL forms the PKGDCL pass stored
       ;;    (package.lisp:2393, well before BOOTSTRAP-FORWARD-SYMBOL-CELLS).
