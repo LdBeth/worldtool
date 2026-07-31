@@ -191,6 +191,30 @@ not check-pkgdcl-escapes"; fail=1; }
         || { echo "FAIL: negative test (zl-slash-escape): gate did not name \
 the QLD victim SYS:SCHEDULER;WAIT-FUNCTIONS.VBIN"; fail=1; }
     rm -f "$neg"
+
+    # uncomposable-cfms: the LANGUAGE-TOOLS files queue COMPILE-FLAVOR-
+    # METHODS-LOAD-TIME forms on CONDITION flavors whose component closure
+    # reaches the QLD-warm ERROR (lambda-list.lisp's six LAMBDA-LIST-*
+    # errors) and NO-ACTION-MIXIN (mapforms.lisp's FORM-NOT-UNDERSTOOD).
+    # Left on the deferred list, COMPOSE-FLAVOR-COMBINATION WARNs "the
+    # components could not be fully determined" pre-banner, and any WARN
+    # before the banner is fatal by design (streams unbound) -- QLD
+    # attempt 10.  A CFM is a pure composition optimization, so the
+    # finalize pass withholds them and the flavors compose warm.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-cfm.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat uncomposable-cfms > "$neg" 2>&1; then
+        echo "FAIL: negative test (uncomposable-cfms) built GREEN -- \
+check-deferred-flavor-composition does not fire"; fail=1
+    fi
+    grep -q "composes undefined component" "$neg" \
+        || { echo "FAIL: negative test (uncomposable-cfms): the failure was \
+not check-deferred-flavor-composition"; fail=1; }
+    grep -q "LAMBDA-LIST-SYNTAX-ERROR" "$neg" \
+        || { echo "FAIL: negative test (uncomposable-cfms): gate did not \
+name LAMBDA-LIST-SYNTAX-ERROR"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

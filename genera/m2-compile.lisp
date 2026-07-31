@@ -171,9 +171,19 @@ on the host side by subtracting the QLD alists."
 ;;; COMPILER:DISASSEMBLE-DECODE-LOCATIVE for every locative it prints,
 ;;; so without it the cold trap handler's "referencing ~S" recursed to
 ;;; a halt on every post-banner error report.
+;;; LANGUAGE-TOOLS cold subsystem (cold-sysdcl.lisp defsubsystem
+;;; language-tools, serial after lisp-database): mapforms annotate subst
+;;; setf setf-install lambda-list.  The whole cluster was missing from
+;;; the manifest-derived set; found QLD attempt 10 -- COMETH's
+;;; COMPILE-FLAVOR-METHODS-LOAD-TIME macroexpands (LOCF ...) with no
+;;; SCL:LOCF macro bound (trap 71 in ZL:FSYMEVAL), and the R1 audit's
+;;; LANGUAGE-TOOLS block (EXPAND-SETF/LOCF, COPYFORMS, ...) is the same
+;;; gap.  LAMBDA-LIST already has a distribution .vbin (QLD alist file).
 (defparameter *cold-set-late-found-files*
   '("SYS: SYS; LISP-DATABASE-COLD" "SYS: DEBUGGER; ITRAP-DISPATCH"
-    "SYS: COMPILER; INNER"))
+    "SYS: COMPILER; INNER"
+    "SYS: CLCP; MAPFORMS" "SYS: CLCP; ANNOTATE" "SYS: CLCP; SUBST"
+    "SYS: CLCP; SETF" "SYS: CLCP; SETF-INSTALL"))
 
 (defun m2-compile-cold-set ()
   "Compile the SI-subsystem cold-load candidates the alist pass missed."

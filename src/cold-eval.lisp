@@ -1087,7 +1087,12 @@ for the deferred forms."
     ;; bignum.lisp:2388 top-level (SETUP-BOOLE-OP-SWAP) fills the
     ;; BOOLE-OP-SWAP art-4b array whose defvar MAKE-ARRAY init is
     ;; itself deferred just before it; owner is cold (post-M3h).
-    "SETUP-BOOLE-OP-SWAP")
+    "SETUP-BOOLE-OP-SWAP"
+    ;; The LANGUAGE-TOOLS cold files (QLD attempt 10) carry in-file
+    ;; (EXPORT '(...)) forms -- their exports are NOT in PKGDCL.  Owner
+    ;; SYS:SYS;PACKAGE is cold, and deferred replay runs after
+    ;; BUILD-INITIAL-PACKAGES, so the package objects exist.
+    "EXPORT")
   "Heads whose owners are cold files or cold-load stubs: safe to evaluate
 verbatim at first boot, before the banner.  PROCLAIM lives in
 SYS:SYS;LISP-DATABASE-COLD -- which the distribution cold load contained

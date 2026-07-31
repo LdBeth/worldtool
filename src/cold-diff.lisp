@@ -3194,15 +3194,23 @@ stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
 stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
                            (vsym-name gname) problem pkg form)))))))))
     ;; Anti-regression against the reverted boot-36 withhold approach:
-    ;; all 8 MAKE-INSTANCE method fdefines must be PRESENT in the deferred
+    ;; all 9 MAKE-INSTANCE method fdefines must be PRESENT in the deferred
     ;; list -- withholding them loses those methods forever (boot-26
     ;; dribbl precedent).  Boot 38: hash's (MAKE-INSTANCE BASIC-HASH-TABLE)
     ;; left with the pruned sys2/hash.lisp (-1); io/stream added two
     ;; (make-instance areg-caching-buffered-{input,output}-stream-mixin
-    ;; :after) (+2).  Contributors: vanilla 1 + useful-streams 5 + stream 2.
-    (cold-check (= make-instance-methods 8)
+    ;; :after) (+2).  QLD attempt 10, the LANGUAGE-TOOLS cold subsystem:
+    ;; clcp/mapforms.lisp:1242 (DEFMETHOD (MAKE-INSTANCE FORM-NOT-
+    ;; UNDERSTOOD) ...) (+1).  Contributors: vanilla 1 + useful-streams 5
+    ;; + stream 2 + mapforms 1.  Note what is NOT withheld here: the
+    ;; finalize pass *COLD-WITHHOLD-UNCOMPOSABLE-CFMS* drops only
+    ;; COMPILE-FLAVOR-METHODS-LOAD-TIME forms (pure composition
+    ;; optimizations, and mapforms' FORM-NOT-UNDERSTOOD CFM is one of
+    ;; them) -- method fdefines stay deferred, always.
+    (cold-check (= make-instance-methods 9)
                 "~D deferred MAKE-INSTANCE method fdefine~:P (expect ~
-8: vanilla 1 + useful-streams 5 + stream 2; withholding loses them)"
+9: vanilla 1 + useful-streams 5 + stream 2 + mapforms 1; withholding ~
+loses them)"
                 make-instance-methods)
     ;; The forged object's 7-Q DEFSTORAGE shape (defgeneric.lisp:75).
     (let ((gf (getf (cold-world-machinery w) :make-instance-generic))
@@ -3305,6 +3313,174 @@ other fspec.  Resolves the flavor symbol under the caller's
     (let ((fl (and (consp (cddr fspec)) (third fspec))))
       (and (vsym-p fl) (cold-vsym w fl)))))
 
+(defun cold-flavor-pname (w vma)
+  "Best-effort human name for a flavor symbol VMA (already interned).
+NIL-safe: cold-check evaluates its message args eagerly even on the
+passing (missing = NIL) path."
+  (cond ((null vma) "none")
+        ((cold-symbol-pname-at w vma))
+        (t (format nil "#x~8,'0X" vma))))
+
+(defun cold-flavor-closure-missing (defined comps)
+  "BFS the transitive component closure of COMPS through DEFINED (a
+flavor-VMA -> component-VMA-list table built by COLD-MAP-DEFERRED-FLAVOR-
+FORMS) and return the first component VMA that has no tracked definition,
+or NIL when the closure is complete.  COMPOSE-FLAVOR-COMBINATION reaches
+exactly this graph, so a non-NIL result is the flavor whose absence makes
+it WARN."
+  (let ((seen (make-hash-table))
+        (work (copy-list comps))
+        (missing nil))
+    (dolist (c comps) (setf (gethash c seen) t))
+    (loop while (and work (null missing))
+          for node = (pop work)
+          do (multiple-value-bind (ncomps ndefp) (gethash node defined)
+               (if (not ndefp)
+                   (setf missing node)
+                   (dolist (c ncomps)
+                     (unless (gethash c seen)
+                       (setf (gethash c seen) t)
+                       (push c work))))))
+    missing))
+
+(defun cold-map-deferred-flavor-forms (w &key method-fdefine auto-mixture
+                                              composed)
+  "Walk (COLD-WORLD-DEFERRED W) in BOOT order (= its reverse -- COLD-DEFER
+pushes, and CFMs land at each file's tail, so a component's DEFFLAVOR-
+INTERNAL must precede the CFM that composes it), maintaining the
+flavor-definition state the boot itself would have at each point: a flavor
+becomes DEFINED when its DEFFLAVOR-INTERNAL form (defflavor.lisp:501) is
+seen -- the one deferred head that materializes an explicit run-time
+flavor object -- and an auto-mixture CFM registers its own variant.  Each
+callback runs with *COLD-DEFAULT-PACKAGE* bound to the form's recorded
+package, mirroring the boot's own read:
+
+  METHOD-FDEFINE  (entry flavor-vma definedp) -- a deferred method-family
+      FDEFINE whose fspec names a flavor (see COLD-METHOD-FSPEC-FLAVOR-VMA).
+  AUTO-MIXTURE    (entry flavor-vma) -- a CFM whose flavor has NO
+      DEFFLAVOR-INTERNAL, i.e. one the boot's mixture machinery
+      auto-composes (compose.lisp:1052 ADDITIONAL-FLAVORS).  Called before
+      the variant is registered defined.
+  COMPOSED        (entry flavor-vma missing) -- a CFM on a real DEFFLAVOR;
+      MISSING is COLD-FLAVOR-CLOSURE-MISSING's verdict (NIL = composable).
+
+ENTRY is the live (package . form) cons from the deferred list, so a
+caller may use it for identity (COLD-WITHHOLD-UNCOMPOSABLE-CFMS removes
+the very conses its COMPOSED callback saw).  Single-sourced because both
+the boot-38 gate (CHECK-DEFERRED-FLAVOR-COMPOSITION) and that withhold
+pass must agree on the walk exactly; they see the same list in the same
+order, so a CFM the pass drops is one the gate would have failed on."
+  (let ((defined (make-hash-table)))       ; flavor-vma -> component-vma list
+    (loop for entry in (reverse (cold-world-deferred w))
+          for form = (cdr entry)
+          when (and (consp form) (vsym-p (first form)))
+            do (let ((*cold-default-package* (car entry))
+                     (head (vsym-name (first form))))
+                 (cond
+                   ((string= head "DEFFLAVOR-INTERNAL")
+                    (multiple-value-bind (name comps)
+                        (cold-defflavor-components w form)
+                      (when name (setf (gethash name defined) comps))))
+                   ((string= head "FDEFINE")
+                    ;; A deferred (FDEFINE '<fspec> '<def> T).  When the
+                    ;; fspec is a method-family type that routes through
+                    ;; METHOD-FUNCTION-SPEC-HANDLER, its FDEFINE arm errors
+                    ;; fatally pre-banner unless the flavor named in the
+                    ;; fspec (THIRD element) is already defined here.
+                    (let ((fl (cold-method-fspec-flavor-vma
+                               w (quoted (second form)))))
+                      (when (and fl method-fdefine)
+                        (funcall method-fdefine entry fl
+                                 (nth-value 1 (gethash fl defined))))))
+                   ((string= head "COMPILE-FLAVOR-METHODS-LOAD-TIME")
+                    (let ((fv (let ((fn (quoted (second form))))
+                                (and (vsym-p fn) (cold-vsym w fn)))))
+                      (when fv
+                        (multiple-value-bind (comps defp) (gethash fv defined)
+                          (cond
+                            ((not defp)
+                             ;; No DEFFLAVOR-INTERNAL for FV: it is a flavor
+                             ;; the boot's mixture machinery auto-composes
+                             ;; (compose.lisp:1052 ADDITIONAL-FLAVORS; e.g.
+                             ;; useful-streams' BUFFERED-*-COROUTINE/PIPE-
+                             ;; STREAM combinations, which appear ONLY in
+                             ;; their own CFM).  Its ingredients cannot be
+                             ;; enumerated from the deferred stream and are
+                             ;; covered by the primary flavor's tracked
+                             ;; DEFFLAVOR.
+                             (when auto-mixture (funcall auto-mixture entry fv))
+                             ;; Register it defined so dependents resolve
+                             ;; and skip the closure check.
+                             (setf (gethash fv defined) nil))
+                            (t
+                             ;; FV is a real DEFFLAVOR: BFS its transitive
+                             ;; component closure.
+                             (when composed
+                               (funcall composed entry fv
+                                        (cold-flavor-closure-missing
+                                         defined comps))))))))))))
+    t))
+
+(defvar *cold-withhold-uncomposable-cfms* t
+  "T: COLD-FINALIZE drops from the deferred list every COMPILE-FLAVOR-
+METHODS-LOAD-TIME form whose flavor's transitive component closure is
+INCOMPLETE at that boot point (COLD-WITHHOLD-UNCOMPOSABLE-CFMS).
+
+Withholding a CFM loses NO definition.  A CFM is purely a composition
+OPTIMIZATION: COMPILE-FLAVOR-METHODS-LOAD-TIME asks COMPOSE-FLAVOR-
+COMBINATION to build the combined-method table AHEAD of first use
+\(compose.lisp:1066); left undone, the very same composition happens
+lazily at the first INSTANTIATE-FLAVOR / SIGNAL of that flavor.  Contrast
+a deferred method FDEFINE, which carries the only copy of a definition
+and must NEVER be withheld -- that was the reverted boot-36 approach, and
+the MAKE-INSTANCE census in CHECK-DEFERRED-METHOD-DEFLECTION guards it.
+
+QLD attempt 10, the LANGUAGE-TOOLS cold subsystem: its files queue CFMs
+on CONDITION flavors -- clcp/mapforms.lisp's FORM-NOT-UNDERSTOOD (whose
+component NO-ACTION-MIXIN is warm) and lambda-list.lisp's six LAMBDA-LIST
+-*-ERROR conditions (component ERROR).  In stock Genera the ERROR-SYSTEM
+subsystem was itself cold, so those closures were complete and the CFMs
+composed at cold load; in this world ERROR / NO-ACTION-MIXIN arrive with
+QLD, so each of those CFMs would WARN \"the flavor is undefined / the
+components could not be fully determined\" pre-banner -- fatal by design
+\(streams unbound until the banner).  The flavors compose warm instead:
+the conditions are first signalled long after the error system loads, and
+lambda-list.lisp is QLD-RELOADED anyway, so its CFMs simply re-run there.
+
+NIL leaves every CFM on the deferred list, for the gate negative test
+\(CHECK-DEFERRED-FLAVOR-COMPOSITION, which never consults this flag and
+so fires on exactly the forms the pass would have withheld; `worldtool
+coldtest ... --defeat uncomposable-cfms').")
+
+(defun cold-withhold-uncomposable-cfms (w)
+  "Remove from (COLD-WORLD-DEFERRED W) every COMPILE-FLAVOR-METHODS-LOAD-
+TIME form whose flavor has a DEFFLAVOR-INTERNAL but whose transitive
+component closure is missing a flavor at that boot point (see
+*COLD-WITHHOLD-UNCOMPOSABLE-CFMS* for why this is safe).  Runs on the
+COMPLETED deferred list, before COLD-FINALIZE materializes it, and walks
+it with the same COLD-MAP-DEFERRED-FLAVOR-FORMS the boot-38 gate uses --
+so what survives is exactly what that gate accepts.  Withholding a CFM
+cannot perturb the walk itself: only the auto-mixture arm registers
+definitions from a CFM, and those are never withheld.  Returns a list of
+\"FLAVOR (missing COMPONENT)\" strings, in boot order, for the census."
+  (when *cold-withhold-uncomposable-cfms*
+    (let ((victims (make-hash-table :test #'eq))
+          (census nil))
+      (cold-map-deferred-flavor-forms
+       w
+       :composed (lambda (entry fv missing)
+                   (when missing
+                     (setf (gethash entry victims) t)
+                     (push (format nil "~A (missing ~A)"
+                                   (cold-flavor-pname w fv)
+                                   (cold-flavor-pname w missing))
+                           census))))
+      (when (plusp (hash-table-count victims))
+        (setf (cold-world-deferred w)
+              (remove-if (lambda (entry) (gethash entry victims))
+                         (cold-world-deferred w))))
+      (nreverse census))))
+
 (defun check-deferred-flavor-composition (w)
   "M3h boot-38 gate: the systematic detector for pre-banner flavor-
 composition WARNs.  COMPILE-FLAVOR-METHODS-LOAD-TIME calls COMPOSE-FLAVOR-
@@ -3363,103 +3539,53 @@ from the modeled replay package: the form's recorded package when
 wrapper guarantees it), SYSTEM-INTERNALS when off.  Using the CFM form's
 own recorded package as the INTERN-side package is exact for every case
 genuine Genera supports: only the parent's COMPILE-FLAVOR-METHODS
-expansion can emit the variant CFM, so both live in the parent's file."
-  (let ((defined (make-hash-table)))       ; flavor-vma -> component-vma list
-    (flet ((flavor-pname (vma)
-             ;; Best-effort human name for a flavor VMA (already interned).
-             ;; NIL-safe: cold-check evaluates its message args eagerly even
-             ;; on the passing (missing = NIL) path.
-             (cond ((null vma) "none")
-                   ((cold-symbol-pname-at w vma))
-                   (t (format nil "#x~8,'0X" vma)))))
-      (loop for (pkg . form) in (reverse (cold-world-deferred w))
-            when (and (consp form) (vsym-p (first form)))
-              do (let ((*cold-default-package* pkg)
-                       (head (vsym-name (first form))))
-                   (cond
-                     ((string= head "DEFFLAVOR-INTERNAL")
-                      (multiple-value-bind (name comps)
-                          (cold-defflavor-components w form)
-                        (when name (setf (gethash name defined) comps))))
-                     ((string= head "FDEFINE")
-                      ;; A deferred (FDEFINE '<fspec> '<def> T).  When the
-                      ;; fspec is a method-family type that routes through
-                      ;; METHOD-FUNCTION-SPEC-HANDLER, its FDEFINE arm errors
-                      ;; fatally pre-banner unless the flavor named in the
-                      ;; fspec (THIRD element) is already defined here.
-                      (let ((fl (cold-method-fspec-flavor-vma
-                                 w (quoted (second form)))))
-                        (when fl
-                          (cold-check
-                           (nth-value 1 (gethash fl defined))
-                           "deferred method-family FDEFINE ~S (~A) targets ~
+expansion can emit the variant CFM, so both live in the parent's file.
+
+QLD attempt 10: the walk itself now lives in COLD-MAP-DEFERRED-FLAVOR-
+FORMS, shared with COLD-WITHHOLD-UNCOMPOSABLE-CFMS -- the finalize pass
+that DROPS the CFMs whose closure has a hole (a CFM is a composition
+optimization; the flavor composes lazily warm).  This gate is unchanged
+by that: it still walks the ACTUAL emitted deferred list and never
+consults *COLD-WITHHOLD-UNCOMPOSABLE-CFMS*, so with the pass on there is
+nothing left to fail on, and with `--defeat uncomposable-cfms' it fires
+on exactly the forms the pass would have withheld."
+  (cold-map-deferred-flavor-forms
+   w
+   :method-fdefine
+   (lambda (entry fl definedp)
+     (cold-check
+      definedp
+      "deferred method-family FDEFINE ~S (~A) targets ~
 flavor ~A, undefined at this boot point -- METHOD-FUNCTION-SPEC-HANDLER's ~
 FDEFINE arm ERRORs \"not the name of a flavor\" fatally pre-banner"
-                           (quoted (second form)) pkg (flavor-pname fl)))))
-                     ((string= head "COMPILE-FLAVOR-METHODS-LOAD-TIME")
-                      (let ((fv (let ((fn (quoted (second form))))
-                                  (and (vsym-p fn) (cold-vsym w fn)))))
-                        (when fv
-                          (multiple-value-bind (comps defp)
-                              (gethash fv defined)
-                            (cond
-                              ((not defp)
-                               ;; No DEFFLAVOR-INTERNAL for FV: it is a flavor
-                               ;; the boot's mixture machinery auto-composes
-                               ;; (compose.lisp:1052 ADDITIONAL-FLAVORS; e.g.
-                               ;; useful-streams' BUFFERED-*-COROUTINE/PIPE-
-                               ;; STREAM combinations, which appear ONLY in
-                               ;; their own CFM).  Its ingredients cannot be
-                               ;; enumerated from the deferred stream and are
-                               ;; covered by the primary flavor's tracked
-                               ;; DEFFLAVOR -- but the variant SYMBOL must be
-                               ;; the one the replay INTERN regenerates, or
-                               ;; the flavor lands on a twin and FIND-FLAVOR
-                               ;; dies (boot 46; see docstring).
-                               (let ((replay-pkg
-                                       (if *cold-package-faithful-replay*
-                                           (canonical-package-name pkg)
-                                           "SYSTEM-INTERNALS"))
-                                     (home (cold-symbol-package-name-at
-                                            w fv)))
-                                 (cold-check
-                                  (or (null home)
-                                      (equal home replay-pkg))
-                                  "deferred COMPILE-FLAVOR-METHODS-LOAD-TIME ~
+      (quoted (second (cdr entry))) (car entry) (cold-flavor-pname w fl)))
+   :auto-mixture
+   (lambda (entry fv)
+     ;; The variant SYMBOL must be the one the replay INTERN regenerates,
+     ;; or the flavor lands on a twin and FIND-FLAVOR dies (boot 46; see
+     ;; docstring).
+     (let ((replay-pkg
+             (if *cold-package-faithful-replay*
+                 (canonical-package-name (car entry))
+                 "SYSTEM-INTERNALS"))
+           (home (cold-symbol-package-name-at w fv)))
+       (cold-check
+        (or (null home) (equal home replay-pkg))
+        "deferred COMPILE-FLAVOR-METHODS-LOAD-TIME ~
 of auto-mixture variant ~A: its symbol's home package ~A differs from the ~
 replay package ~A under which the parent DEFFLAVOR's FLAVOR-MIXTURE-NAME ~
 re-INTERNs the variant name (compose.lisp:1296) -- the flavor would land ~
 on a twin symbol and FIND-FLAVOR errors FLAVOR-NOT-FOUND fatally ~
 pre-banner (M3h boot 46)"
-                                  (flavor-pname fv) home replay-pkg))
-                               ;; Register it defined so dependents resolve
-                               ;; and skip the closure check.
-                               (setf (gethash fv defined) nil))
-                              (t
-                               ;; FV is a real DEFFLAVOR: BFS its transitive
-                               ;; component closure and report the first
-                               ;; component undefined at this boot point.
-                               (let ((seen (make-hash-table))
-                                     (work (copy-list comps))
-                                     (missing nil))
-                                 (dolist (c comps) (setf (gethash c seen) t))
-                                 (loop while (and work (null missing))
-                                       for node = (pop work)
-                                       do (multiple-value-bind (ncomps ndefp)
-                                              (gethash node defined)
-                                            (if (not ndefp)
-                                                (setf missing node)
-                                                (dolist (c ncomps)
-                                                  (unless (gethash c seen)
-                                                    (setf (gethash c seen) t)
-                                                    (push c work))))))
-                                 (cold-check
-                                  (null missing)
-                                  "deferred COMPILE-FLAVOR-METHODS-LOAD-TIME ~
+        (cold-flavor-pname w fv) home replay-pkg)))
+   :composed
+   (lambda (entry fv missing)
+     (cold-check
+      (null missing)
+      "deferred COMPILE-FLAVOR-METHODS-LOAD-TIME ~
 of ~A (~A) composes undefined component ~A -- COMPOSE-FLAVOR-COMBINATION ~
 WARNs fatally pre-banner"
-                                  (flavor-pname fv) pkg
-                                  (flavor-pname missing))))))))))))))
+      (cold-flavor-pname w fv) (car entry) (cold-flavor-pname w missing))))
   t)
 
 (defun check-linked-symbol-cells (w)
@@ -4273,7 +4399,45 @@ set."
     "GLOBAL:PKG-GLOBAL-PACKAGE"
     "GLOBAL:PKG-SYSTEM-PACKAGE"
     "GLOBAL:RETURN-LIST"
-    "LANGUAGE-TOOLS:*SIMPLE-VARIABLES*"
+    ;; LANGUAGE-TOOLS cold subsystem (QLD attempt 10): the mapforms/
+    ;; copyforms/subst walker's dynamic state -- argless DEFVARs
+    ;; (mapforms.lisp:66-101, subst.lisp), LET-bound by MAPFORMS-1 /
+    ;; COPYFORMS-1 / SUBST-EXPAND around every walk before any reader.
+    ;; EXPR is a special LET-bound at mapforms.lisp:1060/1067.
+    ;; COMPILER:{SPECIAL-PKG-LIST,ALL-SPECIAL-SWITCH} (the GLOBAL:
+    ;; ALL-SPECIAL-SWITCH row is the same MacLisp-compat switch) are
+    ;; read only behind VARIABLE-BOUNDP guards
+    ;; (lisp-database.lisp:95-98).  Never read unbound.
+    "COMPILER:SPECIAL-PKG-LIST"
+    "GLOBAL:ALL-SPECIAL-SWITCH"
+    "LANGUAGE-TOOLS:*COPYFORMS-FLAG*"
+    "LANGUAGE-TOOLS:*FREE-BLOCKS*"
+    "LANGUAGE-TOOLS:*FREE-FUNCTIONS*"
+    "LANGUAGE-TOOLS:*FREE-TAGS*"
+    "LANGUAGE-TOOLS:*FREE-VARIABLES*"
+    "LANGUAGE-TOOLS:*IN-LOOP*"
+    "LANGUAGE-TOOLS:*LOOP-JOIN-QUEUE*"
+    "LANGUAGE-TOOLS:*MAPFORMS-APPLY-FUNCTION*"
+    "LANGUAGE-TOOLS:*MAPFORMS-BLOCK-ALIST*"
+    "LANGUAGE-TOOLS:*MAPFORMS-BLOCK-NAMES*"
+    "LANGUAGE-TOOLS:*MAPFORMS-BOUND-VARIABLES*"
+    "LANGUAGE-TOOLS:*MAPFORMS-EXPAND-SUBSTS*"
+    "LANGUAGE-TOOLS:*MAPFORMS-FUNCTION*"
+    "LANGUAGE-TOOLS:*MAPFORMS-GO-TAGS*"
+    "LANGUAGE-TOOLS:*MAPFORMS-ITERATION-HOOK*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LEVEL*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LEXICAL-FUNCTION-ENVIRONMENT*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LOCATOR-END*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LOCATOR-START*"
+    "LANGUAGE-TOOLS:*MAPFORMS-PARALLEL-BINDS*"
+    "LANGUAGE-TOOLS:*MAPFORMS-STATE*"
+    "LANGUAGE-TOOLS:*MAPFORMS-TEMPLATE-FORM*"
+    "LANGUAGE-TOOLS:*MAPFORMS-TEMPLATE-USAGE*"
+    "LANGUAGE-TOOLS:*PARENT-ENVIRONMENT*"
+    "LANGUAGE-TOOLS:*REPLICABILITY*"
+    "LANGUAGE-TOOLS:*SUBST-ALIST*"
+    "LANGUAGE-TOOLS:*SUBST-NOTEPAD*"
+    "LANGUAGE-TOOLS:EXPR"
     "LISP:*DEBUG-IO*"
     "LISP:*ERROR-OUTPUT*"
     "LISP:*QUERY-IO*"
@@ -4720,7 +4884,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("package-faithful-replay" . *cold-package-faithful-replay*)
     ("lambda-macro-cells" . *cold-lambda-macro-cells*)
     ("bignum-encoding" . *cold-bignum-twos-complement*)
-    ("zl-slash-escape" . *cold-zl-slash-escape*))
+    ("zl-slash-escape" . *cold-zl-slash-escape*)
+    ("uncomposable-cfms" . *cold-withhold-uncomposable-cfms*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

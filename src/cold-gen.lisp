@@ -335,7 +335,24 @@
     ;; .vbin ships (QLD's INNER-SYSTEM-FILE-ALIST reloads it warm,
     ;; "Needed by TABLE").  Its ADD-OPTIMIZER registration (:125) is
     ;; already covered by *cold-guarded-heads*' ADD-OPTIMIZER-INTERNAL.
-    "SYS: CLCP; NUMERICS"))
+    "SYS: CLCP; NUMERICS"
+    ;; QLD attempt 10: the LANGUAGE-TOOLS cold subsystem
+    ;; (cold-sysdcl.lisp defsubsystem language-tools, serial
+    ;; lisp-database -> mapforms annotate subst setf setf-install
+    ;; lambda-list) was missing from the manifest-derived set wholesale
+    ;; -- the R1 audit's LANGUAGE-TOOLS block (EXPAND-SETF/LOCF,
+    ;; COPYFORMS, LAMBDA-LIST-ARGUMENTS, FCL:SETF ...) was its
+    ;; signature.  COMETH's COMPILE-FLAVOR-METHODS-LOAD-TIME forms
+    ;; macroexpand (LOCF ...) interpretively, and FSYMEVAL of the
+    ;; never-defined SCL:LOCF macro trapped 71; nothing earlier in the
+    ;; QLD INNER-SYSTEM alist defines it, so it is a cold obligation
+    ;; (setf-install.lisp's own comments reason about running in the
+    ;; cold load).  LISP-DATABASE and LAMBDA-LIST ship distribution
+    ;; .vbins (QLD alist files, reloaded warm like stringfns); the
+    ;; other five were recompiled in the user's Genera 8.5 2026-07-31.
+    "SYS: SYS; LISP-DATABASE"
+    "SYS: CLCP; MAPFORMS" "SYS: CLCP; ANNOTATE" "SYS: CLCP; SUBST"
+    "SYS: CLCP; SETF" "SYS: CLCP; SETF-INSTALL" "SYS: CLCP; LAMBDA-LIST"))
 
 ;;; ---- M3f: finalization and the full pipeline -----------------------------
 
@@ -617,6 +634,12 @@ Returns (values deferred-count patch-count package-count)."
            (revived (cold-retry-deferred-defvars w))
            (reconciled (cold-reconcile-linked-defvars w))
            (hoisted (cold-hoist-deferred-defvars w))
+           ;; LAST edit of the deferred list before it is materialized:
+           ;; drop the CFMs whose flavor closure has a hole (QLD attempt
+           ;; 10; *COLD-WITHHOLD-UNCOMPOSABLE-CFMS*).  After the hoist, so
+           ;; the pass walks the same order CHECK-DEFERRED-FLAVOR-
+           ;; COMPOSITION will see post-finalize.
+           (withheld-cfms (cold-withhold-uncomposable-cfms w))
            (deferred (reverse (cold-world-deferred w)))
            (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
            (loc-tag (tag 0 (cold-dtp w "LOCATIVE")))
@@ -728,6 +751,10 @@ Returns (values deferred-count patch-count package-count)."
       (when (plusp wrapped)
         (format t "~&  ~D deferred form~:P wrapped for package-faithful ~
 replay~%" wrapped))
+      (when withheld-cfms
+        (format t "~&  ~D uncomposable COMPILE-FLAVOR-METHODS-LOAD-TIME ~
+form~:P withheld (compose lazily, warm): ~{~A~^, ~}~%"
+                (length withheld-cfms) withheld-cfms))
       ;; 6a. Re-snap the compiled-code cell-reference constants now that
       ;;     every vbin has been loaded and every DEFWIREDVAR forward is
       ;;     planted (docstring point 6a).  Rewrites data words only --
