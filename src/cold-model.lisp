@@ -120,7 +120,13 @@
   ;; COLD-FINALIZE prints it, so the next handler-based family surfaces as
   ;; a build line instead of hiding until QLD dies (the :LAMBDA-MACRO
   ;; lesson).
-  (fspec-fallthrough (make-hash-table :test #'equal)))
+  (fspec-fallthrough (make-hash-table :test #'equal))
+  ;; (vma . host-integer) for every bignum COLD-BIGNUM emitted.
+  ;; CHECK-BIGNUM-ENCODING re-decodes each one from the emitted FILE
+  ;; under the Ivory sign-word convention -- header bit 27 is an implied
+  ;; -2^(32*len) term, not a magnitude sign -- and requires the value the
+  ;; generator meant back.  See *COLD-BIGNUM-TWOS-COMPLEMENT*.
+  (bignums nil))
 
 ;;; Layout shorthands
 

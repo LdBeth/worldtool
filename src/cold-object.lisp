@@ -526,9 +526,43 @@ tails -- terminate the run with a cdr-normal link."
 
 ;;; ---------------- Numbers ----------------
 
+(defvar *cold-bignum-twos-complement* t
+  "T: a bignum's digits are the low 32*LEN bits of N's TWO'S COMPLEMENT,
+LSW first, with the header's bit 27 acting as an implied sign WORD --
+the Ivory convention:
+
+    value = sign*2^(32*len) + SUM digit_i * 2^(32*i),  sign = -1 if bit 27
+
+Positive bignums read the same under sign-magnitude, which is why the old
+encoding survived: every NEGATIVE one was wrong by 2^(32*len) - 2*|n|.
+
+Dist ground truth (Genera-8-5.vlod).  SI:*BIGNUM-2SETZ* -- source
+\(%MAKE-BIGNUM-FROM-FIXNUM-COMPONENTS -1 1 0), \"a very wierd bignum\",
+sys2/bignum.lisp:474 -- is -2^32 and is stored as header 83:08000001
+\(sign set, LEN 1) with the single digit 08:00000000, i.e. -1*2^32 + 0.
+Sign-magnitude would need two digits [0, 1].  Its neighbour
+SI:*BIGNUM-SETZ^2* = 2^62 is header 83:00000002, digits [#x00000000,
+#x40000000] -- the positive case both conventions agree on.
+
+The loader enforces this: VERIFY-OPEN-CODED-CONSTANTS
+\(l-bin/load.lisp:1099) EQL-compares the world's *BIGNUM-2SETZ* against
+the value recorded in the vbin and signals INLINE-CONSTANT-VALUE-CHANGED
+otherwise, which is how QLD attempt 8 died loading SYS:SYS2;BIGNUM.VBIN.
+
+LEN is (MAX 1 (CEILING (INTEGER-LENGTH N) 32)) in both signs: CL's
+INTEGER-LENGTH is exactly Ivory's TRIM-BIGNUM rule (drop the top words
+that merely repeat the sign-extension word).
+
+NIL restores the old SIGN-MAGNITUDE encoding (digits of (ABS N)) for the
+gate negative test (CHECK-BIGNUM-ENCODING; `worldtool coldtest ...
+--defeat bignum-encoding').")
+
 (defun cold-bignum (w n area)
-  (let* ((mag (abs n))
-         (len (ceiling (integer-length mag) 32))
+  (let* ((twosp *cold-bignum-twos-complement*)
+         (mag (if twosp n (abs n)))
+         (len (if twosp
+                  (max 1 (ceiling (integer-length n) 32))
+                  (ceiling (integer-length (abs n)) 32)))
          (vma (cold-alloc w area (1+ len))))
     (cw-set w vma (tag (layout-value (cold-world-layout w)
                                      "SYSTEM:%HEADER-TYPE-NUMBER")
@@ -538,9 +572,13 @@ tails -- terminate the run with a cdr-normal link."
                          28)
                     (if (minusp n) (ash 1 27) 0)
                     len))
+    ;; LDB of a negative host integer already yields its two's-complement
+    ;; low words, so one expression serves both modes; MAG is the raw N
+    ;; when the flag is on, (ABS N) when it is defeated.
     (dotimes (i len)
       (cw-set w (+ vma 1 i) (tag 0 (cold-dtp w "FIXNUM"))
               (ldb (byte 32 (* 32 i)) mag)))
+    (push (cons vma n) (cold-world-bignums w))
     vma))
 
 (defun cold-double (w bits area)

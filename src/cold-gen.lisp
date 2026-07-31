@@ -749,6 +749,15 @@ plist cells: ~{~A~^ ~}~%"
                 (length (cold-world-lambda-macro-cells w))
                 (sort (mapcar #'first (cold-world-lambda-macro-cells w))
                       #'string<)))
+      ;; 6c. Bignum census.  Negative bignums are the ones the Ivory
+      ;;     implied-sign-word encoding gets right and sign-magnitude got
+      ;;     wrong (*COLD-BIGNUM-TWOS-COMPLEMENT*), so their count is the
+      ;;     interesting half.
+      (let ((bignums (cold-world-bignums w)))
+        (when bignums
+          (format t "~&  ~D bignum~:P emitted (~D negative)~%"
+                  (length bignums)
+                  (count-if #'minusp bignums :key #'cdr))))
       (let ((census (sort (loop for head being the hash-keys
                                   of (cold-world-fspec-fallthrough w)
                                   using (hash-value n)

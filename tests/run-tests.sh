@@ -149,6 +149,27 @@ was not check-lambda-macro-cells"; fail=1; }
         || { echo "FAIL: negative test (lambda-macro-cells): gate did not \
 name NAMED-LAMBDA"; fail=1; }
     rm -f "$neg"
+
+    # bignum-encoding: an Ivory bignum is two's complement with an implied
+    # SIGN WORD (header bit 27 = a leading -2^(32*len) term), not
+    # sign-magnitude.  Encoded sign-magnitude, SI:*BIGNUM-2SETZ* comes out
+    # -(2^64 - 2^32) instead of -2^32 and VERIFY-OPEN-CODED-CONSTANTS
+    # signals INLINE-CONSTANT-VALUE-CHANGED -- QLD attempt 8, loading
+    # SYS:SYS2;BIGNUM.VBIN.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-bn.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat bignum-encoding > "$neg" 2>&1; then
+        echo "FAIL: negative test (bignum-encoding) built GREEN -- \
+check-bignum-encoding does not fire"; fail=1
+    fi
+    grep -q "FAIL bignum @" "$neg" \
+        || { echo "FAIL: negative test (bignum-encoding): the failure was \
+not check-bignum-encoding"; fail=1; }
+    grep -q "4294967296" "$neg" \
+        || { echo "FAIL: negative test (bignum-encoding): gate did not name \
+the intended value -4294967296 (*BIGNUM-2SETZ*)"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

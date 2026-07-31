@@ -128,6 +128,32 @@ self-pointer)."
                         "bignum header ~2,'0X:~8,'0X" htag hdata))
           (expect-q w (+ data 1) (tag 0 fixnum) #x3456789A "bignum low")
           (expect-q w (+ data 2) (tag 0 fixnum) #x12 "bignum high"))
+        ;; Negative bignums are TWO'S COMPLEMENT with an implied sign word:
+        ;; header bit 27 contributes -2^(32*len), the digits are the low
+        ;; 32*len bits.  -2^32 is SI:*BIGNUM-2SETZ* (dist: 83:08000001 with
+        ;; the single digit 0) -- sign-magnitude would need [0, 1] and two
+        ;; words.  See *COLD-BIGNUM-TWOS-COMPLEMENT*.
+        (multiple-value-bind (tag data) (cold-ref w (- (expt 2 32)))
+          (cold-check (= (tag-type tag) (cold-dtp w "BIGNUM")) "bignum -2^32 tag")
+          (multiple-value-bind (htag hdata) (cw-ref w data)
+            (cold-check (and (= (tag-type htag) (cold-dtp w "HEADER-I"))
+                             (= (ash htag -6) 2)   ; header-type number
+                             (= hdata #x08000001)) ; subtype 0, sign, len 1
+                        "bignum -2^32 header: expected 08000001 got ~2,'0X:~8,'0X"
+                        htag hdata))
+          (expect-q w (+ data 1) (tag 0 fixnum) #x00000000 "bignum -2^32 digit"))
+        ;; -#x123456789A: the same two words as the positive case, negated
+        ;; as one 64-bit two's-complement quantity.
+        (multiple-value-bind (tag data) (cold-ref w (- #x123456789A))
+          (cold-check (= (tag-type tag) (cold-dtp w "BIGNUM")) "bignum neg tag")
+          (multiple-value-bind (htag hdata) (cw-ref w data)
+            (cold-check (and (= (tag-type htag) (cold-dtp w "HEADER-I"))
+                             (= (ash htag -6) 2)
+                             (= hdata #x08000002)) ; subtype 0, sign, len 2
+                        "bignum neg header: expected 08000002 got ~2,'0X:~8,'0X"
+                        htag hdata))
+          (expect-q w (+ data 1) (tag 0 fixnum) #xCBA98766 "bignum neg low")
+          (expect-q w (+ data 2) (tag 0 fixnum) #xFFFFFFED "bignum neg high"))
         ;; String
         (multiple-value-bind (tag data) (cold-ref w "Benson")
           (cold-check (= (tag-type tag) (cold-dtp w "STRING")) "string tag")
@@ -2143,6 +2169,74 @@ cell is @~8,'0X in the file, but the fdefinition cell is @~8,'0X"
                          "lambda-macro cells: ~A's LAMBDA-MACRO property ~
 is ~2,'0X:~8,'0X, not a compiled function (dist: 1C:...)"
                          name (if vt (tag-type vt) 0) (or vd 0)))))))))
+
+(defun check-bignum-encoding (w fresh)
+  "Post-emit gate (QLD attempt 8, SYS:SYS2;BIGNUM.VBIN): every bignum the
+generator emitted must READ BACK, out of the file and under the Ivory
+sign-word convention, as the host integer the generator meant.
+
+An Ivory bignum is two's complement with an IMPLIED SIGN WORD: header bit
+27 set contributes a leading -2^(32*LEN) term and the LEN digit Qs are
+the low 32*LEN bits, LSW first.  The old encoder wrote SIGN-MAGNITUDE --
+the digits of (ABS N) -- which agrees for positive bignums and is wrong
+by 2^(32*len) - 2*|n| for every negative one.
+
+SI:*BIGNUM-2SETZ* (-2^32, \"a very wierd bignum\", sys2/bignum.lisp:474)
+is the one the loader checks: VERIFY-OPEN-CODED-CONSTANTS
+\(l-bin/load.lisp:1099) EQL-compares the world's value against the one
+recorded in the vbin and signals INLINE-CONSTANT-VALUE-CHANGED
+otherwise, which is how QLD attempt 8 died.  Dist ground truth: header
+83:08000001 with the single digit 08:00000000; sign-magnitude emitted
+83:08000002 [0, 1], i.e. -(2^64 - 2^32).
+
+Also enforces the canonical length, Ivory's TRIM-BIGNUM rule: LEN =
+(MAX 1 (CEILING (INTEGER-LENGTH N) 32)) in both signs.  Reads FRESH and
+the model only -- never the reference world.  See
+*COLD-BIGNUM-TWOS-COMPLEMENT*."
+  (let ((rows (reverse (cold-world-bignums w)))
+        (dtp-header-i (cold-dtp w "HEADER-I"))
+        (dtp-fixnum (cold-dtp w "FIXNUM"))
+        (subtype (layout-value (cold-world-layout w)
+                               "SYSTEM:%HEADER-SUBTYPE-BIGNUM")))
+    (dolist (row rows)
+      (destructuring-bind (vma . value) row
+        (multiple-value-bind (htag hdata) (world-q fresh vma)
+          (cond
+            ((not (and htag (= (tag-type htag) dtp-header-i)
+                       (= (ldb (byte 2 6) htag) 2)))
+             (cold-check nil "bignum @#x~8,'0X: header is ~2,'0X:~8,'0X, ~
+not a HEADER-I of header-type 2 (generator meant ~D)"
+                         vma (or htag 0) (or hdata 0) value))
+            (t
+             (let ((len (ldb (byte 27 0) hdata))
+                   (signp (logbitp 27 hdata))
+                   (digits nil))
+               (cold-check (= (ash hdata -28) subtype)
+                           "bignum @#x~8,'0X: header subtype ~D, not ~
+%HEADER-SUBTYPE-BIGNUM (~D)" vma (ash hdata -28) subtype)
+               (cold-check (plusp len)
+                           "bignum @#x~8,'0X: header length 0" vma)
+               (setf digits
+                     (loop for i from 0 below len
+                           collect
+                           (multiple-value-bind (dt dd)
+                               (world-q fresh (+ vma 1 i))
+                             (cold-check (and dt (= (tag-type dt) dtp-fixnum))
+                                         "bignum @#x~8,'0X: digit ~D is ~
+~2,'0X:~8,'0X, not a fixnum-tagged Q" vma i (or dt 0) (or dd 0))
+                             (or dd 0))))
+               (let ((decoded (+ (loop for d in digits
+                                       for i from 0
+                                       sum (ash d (* 32 i)))
+                                 (if signp (- (ash 1 (* 32 len))) 0))))
+                 (cold-check (= decoded value)
+                             "bignum @#x~8,'0X: file decodes ~D, generator ~
+meant ~D (Ivory sign-word two's complement)" vma decoded value))
+               (let ((canonical (max 1 (ceiling (integer-length value) 32))))
+                 (cold-check (= len canonical)
+                             "bignum @#x~8,'0X (~D): header length ~D, ~
+canonical length ~D (TRIM-BIGNUM drops words that only repeat the sign)"
+                             vma value len canonical))))))))))
 
 (defun check-readtable-leaders (w reference)
   "M3h boot-40 gate: the named-structure readtable arrays must carry a
@@ -4522,6 +4616,12 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; where the handler puts it and GETDECL reads it -- not in a
             ;; detached fdef block (QLD attempt 7, TABLES.VBIN).
             (check-lambda-macro-cells w fresh)
+            ;; Every emitted bignum decodes back to the integer the
+            ;; generator meant under the Ivory implied-sign-word rule --
+            ;; sign-magnitude digits made *BIGNUM-2SETZ* -(2^64 - 2^32)
+            ;; instead of -2^32, and VERIFY-OPEN-CODED-CONSTANTS signalled
+            ;; INLINE-CONSTANT-VALUE-CHANGED (QLD attempt 8, BIGNUM.VBIN).
+            (check-bignum-encoding w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
@@ -4541,7 +4641,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
 (defparameter *cold-defeatable-fixes*
   '(("snap-cell-refs" . *cold-snap-cell-refs*)
     ("package-faithful-replay" . *cold-package-faithful-replay*)
-    ("lambda-macro-cells" . *cold-lambda-macro-cells*))
+    ("lambda-macro-cells" . *cold-lambda-macro-cells*)
+    ("bignum-encoding" . *cold-bignum-twos-complement*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest
