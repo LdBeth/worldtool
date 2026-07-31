@@ -103,6 +103,37 @@ self-pointer)."
 ;;; (cold-read-string lives in cold-object.lisp with the other cold
 ;;; memory readers.)
 
+(defun check-gsrc-reader ()
+  "M3f unit gate: the PKGDCL reader's Zetalisp escape model, driven on
+literal token/string text -- / escapes the next character, \\ is an
+ordinary constituent, |...| still preserves case.  See
+*COLD-ZL-SLASH-ESCAPE*; the pkgdcl-wide consequences are
+CHECK-PKGDCL-ESCAPES."
+  (with-cold-checks ("cold pkgdcl reader")
+    (flet ((token-name (text)
+             (let ((form (gsrc-read-form (make-gsrc text))))
+               (and (vsym-p form) (vsym-name form)))))
+      (loop for (text expect)
+              in '(("//" "/")
+                   ("////" "//")
+                   ("//////" "///")
+                   ("//=" "/=")
+                   ("STRING//=" "STRING/=")
+                   ("SET-SYNTAX-/#-MACRO-CHAR" "SET-SYNTAX-#-MACRO-CHAR")
+                   ;; \\ is two constituents, not one escaped character
+                   ;; (lispfn.lisp:1563 GCD, pkgdcl.lisp:6169/4658).
+                   ("\\\\" "\\\\")
+                   ("\\\\-INTERNAL" "\\\\-INTERNAL")
+                   ("|MixedCase|" "MixedCase"))
+            do (let ((got (token-name text)))
+                 (cold-check (equal got expect)
+                             "token ~A reads as ~S (~D char~:P), expected ~
+~S (~D)" text got (length got) expect (length expect))))
+      (let ((got (gsrc-read-form (make-gsrc "\"STRING//=\""))))
+        (cold-check (equal got "STRING/=")
+                    "string \"STRING//=\" reads as ~S, expected ~S"
+                    got "STRING/=")))))
+
 (defun check-materializers (w)
   "M3b gate: each object kind materializes and reads back."
   (with-cold-checks ("cold materializers")
@@ -3699,6 +3730,52 @@ CLASS-OF belongs to FUTURE-COMMON-LISP (pkgdcl.lisp:1849), never CLOS
                              (cold-world-symbols w)))
               "no cold symbol SCL:*PRINT-READABLY*"))
 
+(defun check-pkgdcl-escapes ()
+  "QLD-attempt-9 gate: the pnames PKGDCL's Zetalisp escapes decode to, in
+the package graph the whole cold load interns through.  Language facts
+against the parsed clause set only -- no reference world, and the flag
+that produced them is deliberately not consulted.  The / family
+\(pkgdcl.lisp:137-140/261/763 in LISP, :6166-6167/6218/7048 in GLOBAL)
+must arrive halved, the \\ family (:6169 GLOBAL, :4658 SYSTEM) doubled,
+and no export may carry a Newline -- the reader swallows one into the
+pname of GLOBAL's one-character \\ (:6168) as soon as \\ escapes.
+Undecoded, LISP has no \"/\" to find: the QLD-time (INTERN \"/\" PROCESS)
+loading SYS:SCHEDULER;WAIT-FUNCTIONS.VBIN interns a fresh symbol and its
+unbound function cell traps 71 at PC 6 in ZL:FSYMEVAL."
+  (with-cold-checks ("cold pkgdcl escapes")
+    (flet ((exports-p (pkg pname)
+             (member pkg (gethash pname *cold-package-exports*)
+                     :test #'string=)))
+      (cold-check (exports-p "LISP" "/")
+                  "pkgdcl escape: LISP does not export \"/\" -- the source ~
+token // is the pname \"/\"; QLD interning \"/\" while loading ~
+SYS:SCHEDULER;WAIT-FUNCTIONS.VBIN then misses LISP:/ and traps 71 in ~
+ZL:FSYMEVAL")
+      (dolist (n '("//" "///" "/=" "CHAR/=" "STRING/="))
+        (cold-check (exports-p "LISP" n)
+                    "pkgdcl escape: LISP does not export ~S" n))
+      (dolist (n '("////" "//////" "//=" "CHAR//=" "STRING//="))
+        (cold-check (not (exports-p "LISP" n))
+                    "pkgdcl escape: LISP exports the undecoded ~S" n))
+      (dolist (n '("/" "/$" "SET-SYNTAX-#-MACRO-CHAR" "ARRAY-#-DIMS"))
+        (cold-check (exports-p "GLOBAL" n)
+                    "pkgdcl escape: GLOBAL does not export ~S" n))
+      (cold-check (exports-p "GLOBAL" "\\\\")
+                  "pkgdcl escape: GLOBAL does not export the ~
+two-character ~A (GCD's synonym, lispfn.lisp:1563)" "\\\\")
+      (cold-check (exports-p "SYSTEM" "\\\\-INTERNAL")
+                  "pkgdcl escape: SYSTEM does not export ~A" "\\\\-INTERNAL")
+      (cold-check (not (exports-p "SYSTEM" "\\-INTERNAL"))
+                  "pkgdcl escape: SYSTEM exports the undecoded ~A"
+                  "\\-INTERNAL")
+      (let ((swallowed (loop for pname being the hash-keys
+                               of *cold-package-exports*
+                             when (find #\Newline pname)
+                               collect pname)))
+        (cold-check (null swallowed)
+                    "pkgdcl escape: ~D exported pname~:P holding a Newline ~
+-- \\ read as an escape ate a line break" (length swallowed))))))
+
 (defun check-package-boot-simulation (w)
   "M3h boot-20 gate: symbolically run BUILD-INITIAL-PACKAGES
 \(package.lisp:2358) over the emitted symbol table and the PKGDCL clause
@@ -4642,7 +4719,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
   '(("snap-cell-refs" . *cold-snap-cell-refs*)
     ("package-faithful-replay" . *cold-package-faithful-replay*)
     ("lambda-macro-cells" . *cold-lambda-macro-cells*)
-    ("bignum-encoding" . *cold-bignum-twos-complement*))
+    ("bignum-encoding" . *cold-bignum-twos-complement*)
+    ("zl-slash-escape" . *cold-zl-slash-escape*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest
@@ -4694,6 +4772,8 @@ generated reference-data file) or REFERENCE (the distribution world)."
     ;; M3b: materializers work against a fresh skeleton + heap regions.
     (let ((w2 (make-skeleton-world layout)))
       (cold-add-heap-regions w2)
+      (unless (check-gsrc-reader)
+        (incf failures))
       (unless (check-materializers w2)
         (incf failures))
       (when sysdir
@@ -4701,6 +4781,10 @@ generated reference-data file) or REFERENCE (the distribution world)."
         (format t "~&package graph: ~D pkgdcl packages~%"
                 (cold-build-package-graph
                  (sys-pathname "SYS: SYS; PKGDCL" "lisp")))
+        ;; The escaped pnames the whole load interns through, before any
+        ;; of it does (QLD attempt 9, SYS:SCHEDULER;WAIT-FUNCTIONS.VBIN).
+        (unless (check-pkgdcl-escapes)
+          (incf failures))
         (let ((w3 (make-skeleton-world layout)))
           (cold-add-heap-regions w3)
           (unless (check-vbin-census w3 (sys-pathname "SYS: IO; RDDEFS"))

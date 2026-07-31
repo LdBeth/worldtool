@@ -170,6 +170,27 @@ not check-bignum-encoding"; fail=1; }
         || { echo "FAIL: negative test (bignum-encoding): gate did not name \
 the intended value -4294967296 (*BIGNUM-2SETZ*)"; fail=1; }
     rm -f "$neg"
+
+    # zl-slash-escape: PKGDCL is Zetalisp syntax, where / is the
+    # single-character escape and \ an ordinary constituent.  Read with the
+    # Common Lisp model, LISP exports "//" instead of "/", so the QLD-time
+    # (INTERN "/" PROCESS) loading SYS:SCHEDULER;WAIT-FUNCTIONS.VBIN interns
+    # a fresh symbol with an unbound function cell -- Error trap 71 at PC 6
+    # in ZL:FSYMEVAL, QLD attempt 9.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-slash.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat zl-slash-escape > "$neg" 2>&1; then
+        echo "FAIL: negative test (zl-slash-escape) built GREEN -- \
+check-pkgdcl-escapes does not fire"; fail=1
+    fi
+    grep -q "FAIL pkgdcl escape" "$neg" \
+        || { echo "FAIL: negative test (zl-slash-escape): the failure was \
+not check-pkgdcl-escapes"; fail=1; }
+    grep -q "WAIT-FUNCTIONS" "$neg" \
+        || { echo "FAIL: negative test (zl-slash-escape): gate did not name \
+the QLD victim SYS:SCHEDULER;WAIT-FUNCTIONS.VBIN"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

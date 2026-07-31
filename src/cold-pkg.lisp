@@ -21,12 +21,44 @@
 ;;; Coverage = what PKGDCL actually uses: lists, strings, |escaped| tokens,
 ;;; ; and #||...||# comments, #+/#- feature conditionals, base-8 integers
 ;;; with trailing-dot decimals (and the Zetalisp rule that a digit 8 or 9
-;;; forces decimal), and # as a mid-token constituent
-;;; (SET-SYNTAX-#-MACRO-CHAR is one symbol).
+;;; forces decimal), the Zetalisp escape model -- / is THE single-character
+;;; escape both in tokens and inside "...", \ is an ordinary constituent
+;;; (lispfn.lisp:1563 GCD's synonym is \\, :1591 REMAINDER's is \), see
+;;; *COLD-ZL-SLASH-ESCAPE* -- and # as a mid-token constituent (the source
+;;; token is SET-SYNTAX-/#-MACRO-CHAR, so # arrives escaped, but an
+;;; unescaped one mid-token must not split the symbol either).
 
 (defparameter *cold-source-features* '("IMACH" "VLM" "GENERA")
   "Feature set for #+/#- in cold source: the VLM is an IMach running
 Genera.  3600 is deliberately absent.")
+
+(defvar *cold-zl-slash-escape* t
+  "T: PKGDCL (:LISP-READ-ONLY, so Zetalisp syntax) is read with the
+Zetalisp escape model -- / is THE single-character escape, in tokens and
+inside \"...\" alike, and \\ is an ordinary constituent.  The source
+token // is therefore the pname \"/\", //// is \"//\", ////// is \"///\",
+//= is \"/=\", CHAR//= is \"CHAR/=\", //$ is \"/$\", and
+SET-SYNTAX-/#-MACRO-CHAR is SET-SYNTAX-#-MACRO-CHAR.
+
+The sources witness the constituent \\ themselves: lispfn.lisp:1563
+\(COMPILER:DEFINE-SYNONYM-FUNCTION GCD \\\\) and :1591 (... REMAINDER \\)
+-- GCD's synonym is the two-character pname, REMAINDER's the
+one-character one, which parses as two distinct symbols only if \\ is a
+constituent.  PKGDCL exports both from GLOBAL on consecutive lines
+\(pkgdcl.lisp:6168-6169) and SYSTEM exports \\\\-INTERNAL
+\(pkgdcl.lisp:4658).
+
+Under the Common Lisp model every one of those pnames is wrong.  LISP
+then never exports \"/\", and the QLD-time (INTERN \"/\" PROCESS) while
+loading SYS:SCHEDULER;WAIT-FUNCTIONS.VBIN -- the interpreted DEFVAR init
+\(CEILING (/ *CACHED-WAIT-INTERVAL* 1//1000000)) -- misses LISP:/ and
+interns a fresh symbol whose function cell is unbound: Error trap 71 at
+PC 6 in ZL:FSYMEVAL (QLD attempt 9).  /=, ///, /$, STRING/=, CHAR/= and
+\\\\ are the same trap latent.
+
+NIL restores the Common Lisp model (/ constituent, \\ the escape in both
+tokens and strings) for the gate negative test (CHECK-PKGDCL-ESCAPES;
+`worldtool coldtest ... --defeat zl-slash-escape').")
 
 (defstruct (gsrc (:constructor make-gsrc (text)))
   text (pos 0))
@@ -72,22 +104,30 @@ Genera.  3600 is deliberately absent.")
                                (gsrc-next s) (decf depth))))))
             (t (return))))))
 
+(defun gsrc-escape-char ()
+  "The single-character escape in force; see *COLD-ZL-SLASH-ESCAPE*."
+  (if *cold-zl-slash-escape* #\/ #\\))
+
 (defun gsrc-read-string (s)
-  (with-output-to-string (out)
-    (loop for c = (gsrc-next s)
-          do (cond ((null c) (error "EOF in string"))
-                   ((char= c #\") (return))
-                   ((char= c #\\) (write-char (or (gsrc-next s)
-                                                  (error "EOF in string"))
-                                              out))
-                   (t (write-char c out))))))
+  (let ((escape (gsrc-escape-char)))
+    (with-output-to-string (out)
+      (loop for c = (gsrc-next s)
+            do (cond ((null c) (error "EOF in string"))
+                     ((char= c #\") (return))
+                     ((char= c escape) (write-char (or (gsrc-next s)
+                                                       (error "EOF in string"))
+                                                   out))
+                     (t (write-char c out)))))))
 
 (defun gsrc-read-token (s)
   "Accumulate one token; returns (values text escaped-p).  Unescaped
-characters upcase; |...| segments preserve case.  # is a constituent
-mid-token."
+characters upcase; |...| segments and the character after the
+single-character escape (/ under *COLD-ZL-SLASH-ESCAPE*, \\ without it)
+preserve case, and an escaped character never terminates the token.  #
+is a constituent mid-token."
   (let ((out (make-array 0 :element-type 'character
                            :adjustable t :fill-pointer 0))
+        (escape (gsrc-escape-char))
         (escaped nil))
     (loop
       (let ((ch (gsrc-peek s)))
@@ -99,10 +139,11 @@ mid-token."
                      do (cond ((null c) (error "EOF in |...|"))
                               ((char= c #\|) (return))
                               (t (vector-push-extend c out)))))
-              ((char= ch #\\)
+              ((char= ch escape)
                (setf escaped t)
                (gsrc-next s)
-               (vector-push-extend (or (gsrc-next s) (error "EOF after \\"))
+               (vector-push-extend (or (gsrc-next s)
+                                       (error "EOF after ~C" escape))
                                    out))
               (t (vector-push-extend (char-upcase (gsrc-next s)) out)))))
     (values (coerce out 'string) escaped)))
