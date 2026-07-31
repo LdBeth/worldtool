@@ -1409,14 +1409,16 @@ architecture instance over this NIL.  Same flag as the graft: see
       (cold-set-symbol-value w (make-vsym "COMPILER" "*COMPILER*")
                              ntag ndata))))
 
-;;; ---------------- Interpretable BLOCK-n-WRITE ----------------
+;;; ---------------- Compiled BLOCK-n-WRITE ----------------
 
 (defvar *cold-block-write-functions* t
-  "QLD attempt 13: a FROM-SCRATCH world runs flavor constructors
+  "QLD attempts 13 and 14: a FROM-SCRATCH world runs flavor constructors
 INTERPRETED, and the interpreted constructor body calls
 SI:%BLOCK-n-WRITE -- an Ivory INSTRUCTION that no Genera world has ever
-carried a function definition for.  The cold world must supply one.
+carried a function definition for.  The cold world must supply one, and
+it must be a COMPILED one.
 
+Why the constructors are interpreted at all.
 COMPILE-FLAVOR-METHODS-LOAD-TIME's VALIDATE-CONSTRUCTOR-FUNCTIONS
 \(flavor/make.lisp:953) EQUAL-compares the CONSTRUCTOR-DERIVATION the
 vbin dumped against a freshly computed FLAVOR-CONSTRUCTOR-DERIVATION.
@@ -1435,81 +1437,197 @@ never runs a constructor interpreted only because Symbolics' builds
 always PASS validation -- their cold worlds inherit the historical
 flavor structures.
 
-The regenerated constructor is digested by Genera's own SI:DIGEST, which
-explicitly supports the idiom: it emits function CALLS to
-%READ-INTERNAL-REGISTER / %WRITE-INTERNAL-REGISTER around a body of
-SI:%BLOCK-n-WRITE forms for the BAR-1 save/restore.  But
-SI:%BLOCK-1-WRITE has no function definition in ANY Genera world -- it
-is a DEFOPCODE (i-sys/opdef.lisp:287), an instruction the compiler
+ATTEMPT 13 -- unbound fcell.  The regenerated constructor is digested by
+Genera's own SI:DIGEST, which explicitly supports the idiom: it emits
+function CALLS to %READ-INTERNAL-REGISTER / %WRITE-INTERNAL-REGISTER
+around a body of SI:%BLOCK-n-WRITE forms for the BAR-1 save/restore.
+But SI:%BLOCK-1-WRITE has no function definition in ANY Genera world --
+it is a DEFOPCODE (i-sys/opdef.lisp:287), an instruction the compiler
 open-codes.  Interpreted, FSYMEVAL of #'SI:%BLOCK-1-WRITE traps 71.
 First call site: the eager (ADD-INITIALIZATION \"Process\"
 '(PROCESS-INITIALIZE) '(:ONCE)) at the end of SYS:SCHEDULER;COMETH.VBIN
 -> INITIALIZE-SCHEDULER -> MAKE-PROCESS \"Idle Process\" -> the
 interpreted MAKE-PROCESS-INTERNAL.
 
+ATTEMPT 14 -- an INTERPRETED graft cannot work, ever.  Attempt 13's fix
+grafted a plain DTP-LIST (NAMED-LAMBDA %BLOCK-n-WRITE (VALUE) ...) into
+the fcell.  Every step of the funny-function path succeeded: iprim.lisp's
+DEF-INTERPRETER-FUNCTION for DTP-LIST lambda-macro-expands the
+NAMED-LAMBDA (fspec.lisp:1797 DEFLAMBDA-MACRO) and DIGEST-LAMBDA digests
+it at run time.  It died one step later, in SI:APPLY-LAMBDA's
+ARGUMENT-TAKING: the ARGBIND fast loop (instruction 334 of the fresh
+world's APPLY-LAMBDA at #x8100E150, `CAR FP|4', FP|4 = ARGUMENTS, a stack
+list) reads each argument Q through the DATA-READ barrier.  A flavor
+constructor writes UNBOUND instance-variable slots as (SI:%BLOCK-WRITE 1
+\(SI:%SET-TAG 'VAR DTP-NULL)) (make.lisp:836, 850, 858), so the argument
+IS a DTP-NULL Q; the barrier rejects it -- error trap 71 naming a
+control-stack locative (observed live: 0xF6000187).  An interpreted
+callee can never receive a DTP-NULL argument.
+
+A COMPILED callee has no such barrier.  The interpreter's EVAL pushes the
+evaluated arguments and the compiled callee simply ADOPTS them as its
+frame slots without reading them; the %BLOCK-n-WRITE instruction itself
+is completely tag-blind -- the emulator's DoBlock1Write (linux-vlm
+stub/ifuncom1.c:3803) fetches the FP-mode operand with a raw 64-bit load,
+stores raw tag+data to the BAR-n vma, and POST-INCREMENTS BAR-n itself.
+That is the instruction stock Genera's compiled constructors push
+DTP-NULL through routinely.  So the graft is three hand-built CCAs (see
+COLD-BLOCK-WRITE-CCA), and it is simpler than the interpreted body was:
+because the instruction bumps the BAR, the %P-STORE-CONTENTS /
+%POINTER-PLUS / %WRITE-INTERNAL-REGISTER dance is gone entirely.
+
 Function-call granularity is sound: %MAKE-STRUCTURE's DEFUPRIM function
 version leaves BAR-n as PROCESSOR STATE that survives a function return,
 and the BARs are saved and restored across stack-group switches, so
-nothing between our reads and writes can lose the register.
+nothing between the constructor's %ALLOCATE-STRUCTURE-BLOCK and our
+writes can lose the register.
 
 Setting this flag NIL defeats the graft, for the negative test.")
 
 (defun cold-block-write-name (n)
   (format nil "%BLOCK-~D-WRITE" n))
 
-(defun cold-block-write-form (n)
-  "The interpreted source for SI:%BLOCK-N-WRITE:
+;;; ---- A miniature Ivory assembler, with DISASM.LISP as its oracle ----
+;;;
+;;; Encoding per i-sys/sysdef.lisp DEFSYSBYTEs and i-sys/opdef.lisp
+;;; opcode numbers, the same tables SRC/DISASM.LISP decodes with: a code
+;;; word is a 40-bit Q holding two 18-bit halfword instructions (even =
+;;; data bits 0..17, odd = data bits 18..31 plus the tag type's low 4
+;;; bits), each halfword being opcode (bits 10..17) over a stack-address
+;;; operand (mode bits 8..9, offset bits 0..7).  The tag's cdr field is
+;;; the sequencing code.  Everything here is verified by disassembling
+;;; the emitted world back (CHECK-BLOCK-WRITE-FUNCTIONS).
 
-  (NAMED-LAMBDA %BLOCK-n-WRITE (VALUE)
-    (LET ((BAR (%READ-INTERNAL-REGISTER %REGISTER-BAR-n)))
-      (%P-STORE-CONTENTS BAR VALUE)
-      (%WRITE-INTERNAL-REGISTER (%POINTER-PLUS BAR 1) %REGISTER-BAR-n)
-      VALUE))
+(defconstant +cold-seq-next+ 0
+  "Sequencing (cdr) code of a code word whose two halfwords run in order.")
 
--- write VALUE through BAR-n, post-increment BAR-n, return VALUE (the
-instruction is :TOS-UNCHANGED and every caller discards).
+(defconstant +cold-seq-full-word+ 3
+  "Sequencing (cdr) code of a whole-word instruction: the even half falls
+through to the next WORD (+2), the odd half skips over it.")
 
-Every head resolves through the symbol-home oracle from
-SYSTEM-INTERNALS, the package of i-sys/opdef.lisp and of sys2/macro.lisp
-whose WITH-BLOCK-REGISTERS fixes %WRITE-INTERNAL-REGISTER's (VALUE
-REGISTER) argument order -- the same order Genera's own digester emits.
-All four callees are cold DEFUPRIM CCAs and %REGISTER-BAR-1/2/3 are cold
-DEFCONSTANTs (134/262/390), so the whole body is answerable pre-warm.
-%MAKE-POINTER-OFFSET and %MAKE-POINTER are deliberately NOT used: they
-are DEFSUBSTs QLD loads later, unbound in the cold world.  BAR holds a
-DTP-LOCATIVE, which is exactly what %POINTER-PLUS preserves, and
-%P-STORE-CONTENTS stores VALUE's tag and data through it while
-preserving the target's cdr code."
-  (flet ((si (name) (make-vsym "SYSTEM-INTERNALS" name)))
-    (let ((bar-register (si (format nil "%REGISTER-BAR-~D" n)))
-          (bar (si "BAR"))
-          (value (si "VALUE")))
-      (list (si "NAMED-LAMBDA") (si (cold-block-write-name n))
-            (list value)
-            (list (si "LET")
-                  (list (list bar
-                              (list (si "%READ-INTERNAL-REGISTER")
-                                    bar-register)))
-                  (list (si "%P-STORE-CONTENTS") bar value)
-                  (list (si "%WRITE-INTERNAL-REGISTER")
-                        (list (si "%POINTER-PLUS") bar 1)
-                        bar-register)
-                  value)))))
+(defun cold-packed-opcode (name)
+  "The Ivory opcode named NAME, read out of the disassembler's own table
+\(*PACKED-OPS*).  Using the decoder as the encoding oracle keeps the two
+directions from drifting: whatever we emit here, DISASSEMBLE-CFUN prints
+back as NAME."
+  (or (loop for op from 0 below (length *packed-ops*)
+            for spec = (aref *packed-ops* op)
+            when (and spec (string= (first spec) name)) return op)
+      (error "No Ivory opcode named ~A" name)))
+
+(defun cold-halfword (name mode offset)
+  "An 18-bit packed halfword: opcode NAME over a stack-address operand.
+MODE 0 = FP|OFFSET, 1 = LP|OFFSET, 2 = SP, 3 = immediate OFFSET."
+  (logior (ash (cold-packed-opcode name) 10)
+          (ash mode 8)
+          (ldb (byte 8 0) offset)))
+
+(defun cold-code-word (w even odd &optional (seq +cold-seq-next+))
+  "(values tag data) of a code word packing halfwords EVEN and ODD with
+sequencing code SEQ.  The odd halfword's top 4 bits ride in the tag."
+  (values (tag seq (+ (cold-dtp w "PACKED-INSTRUCTION-60")
+                      (ldb (byte 4 14) odd)))
+          (logior (ash (ldb (byte 14 0) odd) 18)
+                  (ldb (byte 18 0) even))))
+
+(defun cold-sysbyte (w name)
+  "The DEFSYSBYTE NAME as a host byte specifier.  The layout export
+carries each as POSITION*64 + SIZE (m3-export-layout dumps the raw
+byte-spec fixnum): %%ENTRY-INSTRUCTION-MAX = 1160 = 18*64 + 8."
+  (let ((v (layout-value (cold-world-layout w) name)))
+    (byte (ldb (byte 6 0) v) (ash v -6))))
+
+(defun cold-entry-word (w required)
+  "(values tag data) of the whole-word ENTRY instruction of a function of
+REQUIRED required arguments, no &OPTIONAL and no &REST.
+
+MIN and MAX count the two frame-header Qs, so REQUIRED+2 is both, and the
+first argument lives at FP|2.  CURRENT-DEFINITION-P is set, as it is on
+every ordinary compiled definition in the world.  LANGUAGE-INDEX (bits
+32..35, i.e. the tag's low 4 bits) stays 0 = Lisp, so the tag type is
+plain DTP-PACKED-INSTRUCTION-60.  Byte-identical to what the 8.5
+compiler emits: a 1-required 0-optional entry word in fresh.ilod reads
+F0:100DFC03, which is exactly what this returns."
+  (let ((min (+ required 2)))
+    (cold-code-word
+     w
+     ;; The rest-not-accepted bit IS the opcode's low bit (#o176 vs #o177).
+     (cold-halfword "ENTRY-REST-NOT-ACCEPTED" 0 min)
+     (ldb (byte 14 18)
+          (dpb min (cold-sysbyte w "SYSTEM:%%ENTRY-INSTRUCTION-MAX")
+               (dpb 1 (cold-sysbyte
+                       w "SYSTEM:%%ENTRY-INSTRUCTION-CURRENT-DEFINITION-P")
+                    0)))
+     +cold-seq-full-word+)))
+
+(defun cold-block-write-cca (w n)
+  "Materialize SI:%BLOCK-N-WRITE as a hand-built compiled function;
+returns the function address (CCA+2).  The whole body is
+
+    ENTRY: 1 REQUIRED, 0 OPTIONAL
+    %BLOCK-n-WRITE FP|2
+    RETURN-MULTIPLE 0
+
+-- the canonical one-instruction DEFUPRIM wrapper shape (compare
+SI:%P-STORE-CONTENTS, three code words because its RETURN needs a
+MOVEM SP|0 pad; ours needs none, both halves of the second word being
+real instructions).  The instruction writes the argument Q through BAR-n
+and post-increments BAR-n itself, so there is nothing else to do; its
+value disposition is :TOS-UNCHANGED and every caller discards, so
+returning no values (RETURN-MULTIPLE 0, which the microcode turns into
+NIL for a VALUE-disposition caller) is right.
+
+Block shape and areas follow COLD-FUN, the vbin CCA materializer: the
+DTP-HEADER-I header carrying suffix<<18 | total, the DTP-COMPILED-
+FUNCTION self-pointer at CCA+1, the code words, then a one-Q extra-info
+suffix whose CAR is the function's name -- the Q the census, the
+disassembler and Genera's own debugger read a compiled function's name
+out of.  The CCA goes in COMPILED-FUNCTION-AREA (where every vbin
+function goes) and the name list in PERMANENT-STORAGE-AREA (where
+COLD-REF conses vbin suffix lists)."
+  (let* ((code (list (multiple-value-list (cold-entry-word w 1))
+                     (multiple-value-list
+                      (cold-code-word
+                       w
+                       (cold-halfword (cold-block-write-name n) 0 2)
+                       (cold-halfword "RETURN-MULTIPLE" 3 0)))))
+         (suffix 1)
+         (total (+ 2 (length code) suffix))
+         (cca (cold-alloc w "COMPILED-FUNCTION-AREA" total))
+         (fn (+ cca 2)))
+    (cw-set w cca
+            (tag (layout-value (cold-world-layout w)
+                               "SYSTEM:%HEADER-TYPE-COMPILED-FUNCTION")
+                 (cold-dtp w "HEADER-I"))
+            (dpb suffix (byte +cca-suffix-size-bits+
+                              +cca-suffix-size-position+)
+                 total))
+    (cw-set w (1+ cca) (tag 0 (cold-dtp w "COMPILED-FUNCTION")) fn)
+    (loop for (wtag wdata) in code
+          for i from 0
+          do (cw-set w (+ fn i) wtag wdata))
+    (multiple-value-bind (ntag ndata)
+        (cold-ref w (list (make-vsym "SYSTEM-INTERNALS"
+                                     (cold-block-write-name n))))
+      (cw-set w (+ fn (length code))
+              (tag +cdr-nil+ (tag-type ntag)) ndata))
+    fn))
 
 (defun cold-graft-block-write-functions (w)
-  "FDEFINE SI:%BLOCK-1-WRITE / -2- / -3- to the interpreted definitions
-COLD-BLOCK-WRITE-FORM builds, so a regenerated (interpreted) flavor
-constructor can run.  See *COLD-BLOCK-WRITE-FUNCTIONS* for the whole
-story.
+  "FDEFINE SI:%BLOCK-1-WRITE / -2- / -3- to the hand-built COMPILED
+definitions COLD-BLOCK-WRITE-CCA emits, so a regenerated (interpreted)
+flavor constructor can call them with the DTP-NULL Q an unbound
+instance-variable slot needs.  See *COLD-BLOCK-WRITE-FUNCTIONS* for the
+whole two-attempt story -- in short, attempt 13's interpreted graft was
+answerable but unusable: SI:APPLY-LAMBDA reads its arguments through the
+data-read barrier and DTP-NULL never survives that.
 
-The definition Q is the ordinary interpreted-function shape the
-fdefinition cell of any non-compiled definition holds -- DTP-LIST at the
-\(NAMED-LAMBDA ...) list -- consed in PERMANENT-STORAGE-AREA, the area
-COLD-DO-FDEFINE materializes non-VFUN definitions into.  The symbols are
-interned through the standard cold-intern machinery, so the emitted
-symbol area carries them and BUILD-INITIAL-PACKAGES' FIXUP-SYMBOL-PACKAGE
-registers them in SI (warm INTERN then finds these, not fresh twins);
-COLD-FINALIZE re-stamps the region free pointers after us, so they are
+The definition Q is the ordinary compiled shape, DTP-COMPILED-FUNCTION
+at CCA+2.  The symbols are interned through the standard cold-intern
+machinery, so the emitted symbol area carries them and
+BUILD-INITIAL-PACKAGES' FIXUP-SYMBOL-PACKAGE registers them in SI (warm
+INTERN then finds these, not fresh twins); COLD-FINALIZE re-stamps the
+region free pointers after us, so the CCAs and their name lists are
 inside the swept frontier.
 
 Errors out if a name has become fbound: a cold file that starts defining
@@ -1525,12 +1643,11 @@ discipline)."
                  (multiple-value-bind (tag data) (cw-ref w cell)
                    (declare (ignore data))
                    (unless (= (tag-type tag) dtp-null)
-                     (error "SI:~A is defined now -- drop its interpreted ~
+                     (error "SI:~A is defined now -- drop its compiled ~
 graft" name)))
-                 (multiple-value-bind (dtag ddata)
-                     (cold-ref w (cold-block-write-form n)
-                               :area "PERMANENT-STORAGE-AREA")
-                   (cold-store-contents w cell dtag ddata)))))))
+                 (cold-store-contents w cell
+                                      (tag 0 (cold-dtp w "COMPILED-FUNCTION"))
+                                      (cold-block-write-cca w n)))))))
 
 ;;; ---------------- FEP boot parameters ----------------
 
@@ -1585,11 +1702,12 @@ slots from the reference world."
   ;; Allocates in *FLAVOR-STATIC-AREA* + PROPERTY-LIST-AREA: also before
   ;; the table fill (M3h boot 36).
   (cold-build-make-instance-generic w)
-  ;; Interns three symbols and conses their interpreted definitions in
-  ;; SYMBOL-AREA / PERMANENT-STORAGE-AREA: the only graft below that
-  ;; ALLOCATES, so it too goes ahead of the table fill (CHECK-MACHINERY-
-  ;; REGION-TABLES verifies the stamped free pointers at the end of this
-  ;; pass, long before COLD-FINALIZE re-stamps them).
+  ;; Interns three symbols and builds their compiled definitions in
+  ;; SYMBOL-AREA / COMPILED-FUNCTION-AREA / PERMANENT-STORAGE-AREA: the
+  ;; only graft below that ALLOCATES, so it too goes ahead of the table
+  ;; fill (CHECK-MACHINERY-REGION-TABLES verifies the stamped free
+  ;; pointers at the end of this pass, long before COLD-FINALIZE
+  ;; re-stamps them).
   (cold-graft-block-write-functions w)
   (cold-fill-storage-tables w :reference reference)
   (cold-stamp-fepcomm-boot-slots w)

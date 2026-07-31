@@ -276,6 +276,10 @@ did not name SI:MACROEXPAND-1-INTERNAL"; fail=1; }
     # i-sys/opdef.lisp:287) no Genera world defines as a function: Error
     # trap 71, FSYMEVAL of #'SI:%BLOCK-1-WRITE, QLD attempt 13 loading
     # SYS:SCHEDULER;COMETH.VBIN (PROCESS-INITIALIZE -> MAKE-PROCESS).
+    # The graft has to be COMPILED: an unbound slot is written as
+    # (SI:%BLOCK-WRITE 1 (SI:%SET-TAG 'VAR DTP-NULL)), and an interpreted
+    # callee's argument-taking reads that DTP-NULL Q through the data-read
+    # barrier -- trap 71 again, in SI:APPLY-LAMBDA (QLD attempt 14).
     neg="${TMPDIR:-/tmp}/worldtool-negtest-blockwrite.$$"
     if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
             --reference-data "$here/reference-data.lisp" $coldsys \
