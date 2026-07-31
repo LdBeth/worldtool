@@ -1044,6 +1044,100 @@ for the deferred forms."
         (cold-set-symbol-value w (si-vsym "*POINTER-TYPE-P*")
                                (tag 0 (tag-type qt)) qd)))))
 
+;;; ---------------- EXPORT ----------------
+
+(defvar *cold-static-exports* t
+  "Discharge top-level EXPORT forms against PKGDCL at BUILD time instead
+of deferring them.  The Genera compiler rewrites every source
+\(EXPORT '(...)) at dump time (IMPORT-EXPORT-COMPILER-TOP-LEVEL-FORM,
+clcp/more-functions.lisp:509) into
+
+  (EXPORT (SI:%LIST-N n (INTERN \"NAME\"
+                          (FIND-PACKAGE-FOR-SYNTAX \"PKG\" :COMMON-LISP))
+                        ...))
+
+and SI:FIND-PACKAGE-FOR-SYNTAX lives in SYS:SYS;LISP-SYNTAX -- a WARM
+file.  So the whole CLASS of compiler-dumped EXPORT forms is
+un-deferrable: replaying one pre-banner FSYMEVALs an unbound function
+cell, trap 71 (QLD attempt 11, the LANGUAGE-TOOLS cold files
+clcp/mapforms + clcp/annotate + clcp/setf, five forms / 69 names).
+
+The cold load does not need them: the package baking already makes a
+pname external in a package when PKGDCL's DEFPACKAGE says so
+\(*COLD-PACKAGE-EXPORTS*, cold-pkg.lisp), and EXPORT with no second
+argument exports from the ambient (= the vbin's) package.  The right
+fate is therefore to VERIFY every name against PKGDCL and drop the form
+-- and to hard-error on any name PKGDCL does not cover, since silently
+dropping one would leave a symbol internal that the source says is
+external.
+
+NIL restores the old behavior (defer the form verbatim): the negative
+test, which the check-deferred-callee-boundness gate must catch.")
+
+(defun cold-export-item-name (item)
+  "The pname one element of an EXPORT name list contributes.  The
+compiler emits (INTERN \"NAME\" (FIND-PACKAGE-FOR-SYNTAX \"HOME\" syntax));
+the home package only selects WHICH existing symbol INTERN finds, never
+where the export lands, so it is dropped here -- the coverage check
+below is on the export TARGET package."
+  (cond ((stringp item) item)
+        ((vsym-p item) (vsym-name item))
+        ((and (consp item) (vsym-p (first item)))
+         (let ((head (vsym-name (first item))))
+           (cond ((string= head "INTERN")
+                  (let ((n (second item)))
+                    (unless (stringp n)
+                      (error "EXPORT: non-literal INTERN name ~S" item))
+                    n))
+                 ((string= head "QUOTE") (cold-export-item-name (second item)))
+                 (t (error "Unsupported EXPORT name element ~S" item)))))
+        (t (error "Unsupported EXPORT name element ~S" item))))
+
+(defun cold-export-names (arg)
+  "The pnames the single argument of a top-level EXPORT names.  Accepts
+the compiler's list-building idioms -- (SI:%LIST-N count item...),
+(SI:%LIST-2/3/4 item...), (LIST item...) -- plus (QUOTE (sym...)),
+(QUOTE sym) and a bare single item."
+  (flet ((count-check (head n items)
+           (unless (eql n (length items))
+             (error "EXPORT: ~A says ~S elements, got ~D" head n
+                    (length items)))
+           (mapcar #'cold-export-item-name items)))
+    (if (and (consp arg) (vsym-p (first arg)))
+        (let ((head (vsym-name (first arg))))
+          (cond
+            ((string= head "QUOTE")
+             (let ((q (second arg)))
+               (cond ((or (null q) (vsym-named-p q "NIL")) nil)
+                     ((consp q) (mapcar #'cold-export-item-name q))
+                     (t (list (cold-export-item-name q))))))
+            ((string= head "LIST") (mapcar #'cold-export-item-name (rest arg)))
+            ((string= head "%LIST-N")
+             (count-check head (second arg) (cddr arg)))
+            ((and (> (length head) 6) (string= "%LIST-" head :end2 6))
+             (count-check head (parse-integer head :start 6 :junk-allowed t)
+                          (rest arg)))
+            (t (list (cold-export-item-name arg)))))
+        (list (cold-export-item-name arg)))))
+
+(defun cold-do-export (form args)
+  "Verify a compiler-dumped top-level EXPORT against PKGDCL and drop it.
+See *COLD-STATIC-EXPORTS*."
+  (when (rest args)
+    (error "EXPORT with an explicit package argument is unhandled: ~S" form))
+  (let* ((pkg (cold-package-primary
+               (canonical-package-string *cold-default-package*)))
+         (names (cold-export-names (first args))))
+    (dolist (n names)
+      (unless (member pkg (gethash n *cold-package-exports*) :test #'string=)
+        (error "EXPORT ~S from ~A is not covered by PKGDCL: the form cannot ~
+be evaluated at boot (the compiler rewrote it into warm-only ~
+SI:FIND-PACKAGE-FOR-SYNTAX calls), so the export must come from ~
+SYS:SYS;PKGDCL's (DEFPACKAGE ~A ... (:EXPORT ...)) -- add ~S there"
+               n pkg pkg n)))
+    (cold-note "export (static, pkgdcl-covered)")
+    (length names)))
+
 ;;; ---------------- The routing table ----------------
 
 (defparameter *cold-defer-heads*
@@ -1087,12 +1181,7 @@ for the deferred forms."
     ;; bignum.lisp:2388 top-level (SETUP-BOOLE-OP-SWAP) fills the
     ;; BOOLE-OP-SWAP art-4b array whose defvar MAKE-ARRAY init is
     ;; itself deferred just before it; owner is cold (post-M3h).
-    "SETUP-BOOLE-OP-SWAP"
-    ;; The LANGUAGE-TOOLS cold files (QLD attempt 10) carry in-file
-    ;; (EXPORT '(...)) forms -- their exports are NOT in PKGDCL.  Owner
-    ;; SYS:SYS;PACKAGE is cold, and deferred replay runs after
-    ;; BUILD-INITIAL-PACKAGES, so the package objects exist.
-    "EXPORT")
+    "SETUP-BOOLE-OP-SWAP")
   "Heads whose owners are cold files or cold-load stubs: safe to evaluate
 verbatim at first boot, before the banner.  PROCLAIM lives in
 SYS:SYS;LISP-DATABASE-COLD -- which the distribution cold load contained
@@ -1267,6 +1356,14 @@ when their owner compiler/inner.lisp joined the cold set.")
                            (make-vsym "KEYWORD" "VARIABLE")
                            (make-vsym "KEYWORD" "FUNCTION")))
                  (cold-world-linked-cells w)))))
+      ((string= head "EXPORT")
+       ;; Compiler-dumped EXPORT: discharge it against PKGDCL now.  It
+       ;; CANNOT be deferred -- the dumped form calls warm-only
+       ;; SI:FIND-PACKAGE-FOR-SYNTAX (QLD attempt 11).  Deferring is what
+       ;; the negative test (--defeat static-exports) reinstates.
+       (if *cold-static-exports*
+           (cold-do-export form args)
+           (cold-defer w form "defer EXPORT")))
       ((member head *cold-noop-heads* :test #'string=)
        (cold-note (format nil "noop ~A" head)))
       ((member head *cold-defer-heads* :test #'string=)

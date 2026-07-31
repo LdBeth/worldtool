@@ -557,7 +557,78 @@ points to (1C:F8046C44 in genera-8-5-wired.txt)."
     ;; (flavor/bootstrap.lisp:75); the marker symbol is a generator
     ;; stamp (M3h boot 28).
     "FIND-GENERIC-FUNCTION-AS-CONSTANT")
-  "Stubbed by *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131).")
+  "Stubbed by *COLD-LOAD-FUNCTION-INITIALIZATIONS* (cold-load.lisp:131).
+The hand-curated subset the R1 audit filters with -- see
+*COLD-BOOT-FSET-STUBS* for the whole alist.")
+
+(defparameter *cold-boot-fset-stubs*
+  '(;; The COMPLETE *COLD-LOAD-FUNCTION-INITIALIZATIONS* alist
+    ;; (cold-load.lisp:132-258 of the 8.5 sources), car names in source
+    ;; order, #+3600 dropped and #+IMACH kept.  LISP-INITIALIZE-FIRST-TIME
+    ;; FSETs every one of these BEFORE the deferred MAPC (cold-load.lisp:
+    ;; 547), so a deferred form may call any of them however dtp-null its
+    ;; cell is in the world file -- which is why the callee-boundness gate
+    ;; needs the full alist and not the R1 subset above.  Matched by NAME,
+    ;; package-insensitively, like every other name test in this file; the
+    ;; qualified originals are in the source.  (Widening the R1 audit's
+    ;; filter to this list is a SEPARATE decision -- it would drop ~59
+    ;; review rows from fresh.ilod.unbound-fcells.txt -- and is
+    ;; deliberately not taken here.)
+    "FERROR" "ERROR" "FSIGNAL" "SIGNAL" "WARN" "CERROR"
+    "ERROR-TRAP-HANDLER-1" "ENTER-DEBUGGER"
+    "FRAME-OUT-TO-INTERESTING-ACTIVE-FRAME" "MAKE-INSTANCE"
+    "REMOVE-ARGUMENTS-FROM-LAMBDA-LIST" "FUNCTION-INLINE-FORM-METHOD"
+    "PROCESS-WAIT" "UNENCAPSULATE-FUNCTION-SPEC"
+    "MAKE-FASLOAD-PATHNAME" "FILE-ATTRIBUTE-BINDINGS"
+    "READ-ATTRIBUTE-LIST" "AUTO-ADD-FEP-HOST"
+    "GET-INTERACTIVE-BINDINGS" "PRINT-ANY-BINDING-WARNINGS" "BEEP"
+    "LISP-TOP-LEVEL1" "BREAK-INTERNAL" "FORMAT"
+    "REDEFINE-FORMAT-DIRECTIVE" "RESET-WARM-BOOT-BINDINGS"
+    "ADD-TIMER" "DELETE-TIMER" "WHO-LINE-UPDATE"
+    "WHO-LINE-PROCESS-CHANGE" "WHO-LINE-RUN-STATE-UPDATE"
+    "FILE-DECLARATION" "FUNCTION-DEFINED-P" "FUNCTION-DEFINED"
+    "NOTE-MACROEXPANSION" "DISABLE-SERVICES"
+    "INITIALIZE-NAMESPACES-AND-NETWORK" "KBD-INTERCEPT-CHARACTER"
+    "DEBUGGER-HANDLER" "GET-FILE-WARNINGS" "PROCESS-DELAYED-WARNINGS"
+    "NOTE-PRESENTATION-INPUT-CONTEXT-CHANGE"
+    "INHERIT-PRESENTATION-CONTEXT" "MOUSE-MOTION-PENDING"
+    "NEW-PRESENTATION-INPUT-CONTEXT"
+    "CLEAR-PRESENTATION-INPUT-CONTEXT"
+    "PRESENTATION-INPUT-BLIP-HANDLER"
+    "UPDATE-HIGHLIGHTED-PRESENTATION" "DESCRIBE-PRESENTATION-TYPE"
+    "MAYBE-CHECK-TYPE-REDEFINITION" "PREPARE-FOR-TYPE-CHANGE"
+    "INVALIDATE-TYPE-HANDLER-TABLES" "FINISH-TYPE-REDEFINITION"
+    "PRESENT" "PRINT-OBJECT" "ADD-PROGRESS-NOTE"
+    "REMOVE-PROGRESS-NOTE" "NOTE-PROGRESS" "ALTER-PROGRESS-NOTE-TEXT"
+    "WITH-NOTIFICATION-MODE-INTERNAL" "MOUSE-WAKEUP" "NOTIFY"
+    "NOTE-KEYBOARD-CHARACTER" "STREAMP" "PURGE-FILE-DECLARATIONS"
+    "VECTORP" "BIT-VECTOR-P" "FIXNUMP" "DEFGENERIC-INTERNAL"
+    "VARIABLE-VALUE" "Y-OR-N-P" "YES-OR-NO-P" "INITIALIZE-CONSOLE"
+    "SUBTYPEP" "SPECIAL-LOAD" "DEFCONSTANT-LOAD-2"
+    "MAKE-VARIABLE-OBSOLETE" "GLOBAL-SPECIAL-VARIABLE-P"
+    "SYMBOL-MACRO-P" "NAMED-CONSTANT-P"
+    "FORM-REFERENCES-ENVIRONMENT-P" "TYPE-OF" "TYPE-NAME-P"
+    "FUNCTION-ENCAPSULATED-P" "COMPILER-BIND-CONTEXT-INTERNAL"
+    "MAP-KEY-TO-SOFTWARE-CHAR" "LISP-SYNTAX-FROM-KEYWORD"
+    "SHOW-PROGRESS-NOTE" "EXPAND-GENERIC-FUNCTION-DEBUGGING-INFO"
+    "WAKEUP-GC-PROCESS" "BACKGROUND-STREAM" "PROCESS-PRIORITY-LESSP"
+    "DISPLAY-PROMPT-OPTION" "KBD-HARDWARE-CHAR-AVAILABLE"
+    "KBD-GET-HARDWARE-CHAR" "KBD-CONVERT-TO-SOFTWARE-CHAR"
+    "MAKE-LOCK" "LOCK-INTERNAL" "UNLOCK-INTERNAL" "ABORT-LOCK"
+    "WAIT-FOR-DISK-DONE" "PROCESS-FLUSH-BACKGROUND-STREAM"
+    "MACHINE-MODEL" "BIND-INTERACTIVE-VALUE-INTERNAL"
+    "OPCODE-FOR-INSTRUCTION" "FIND-CLASS" "FIND-PACKAGE"
+    "CURRENT-LISP-SYNTAX" "SYSTEM-VERSION-INFO"
+    "HARDWARE-RESOURCES-STRING" "INITIALIZE-TIMEBASE"
+    "DESCRIBE-OBJECT" "FIND-GENERIC-FUNCTION-AS-CONSTANT"
+    "WITH-PROCESS-INTERACTIVE-PRIORITY-INTERNAL"
+    "COMPILED-FUNCTION-INTERNAL-FUNCTION-OFFSETS")
+  "Every function name FSET at first boot, from the full cold-load.lisp
+alist.  A deferred form calling one of these is safe even though the
+world file ships the cell unbound (SI:*DERIVED-FUNCTION-CELL-LOCK*'s
+deferred DEFVAR init calls PROCESS:MAKE-LOCK -> MAKE-LOCK-COLD,
+cold-load.lisp:239 -- the first finding of CHECK-DEFERRED-CALLEE-
+BOUNDNESS, and a stub, not a landmine).")
 
 (defparameter *cold-known-pending-functions*
   '()
@@ -572,6 +643,18 @@ load order.")
     "MULTIPLE-VALUE-BIND" "LAMBDA" "DECLARE")
   "Digested natively by the cold interpreter (sys/eval.lisp); no function
 cell needed.")
+
+(defun cold-fcell-bound-p (w v)
+  "T when vsym V's (forward-followed) function cell holds a real
+definition in the built world -- the emit-time FBOUNDP the R1 audit
+\(COLD-UNBOUND-FUNCTION-CELLS) reads.  A fspec REFERENCED by the cold
+load has a *COLD-WORLD-FDEFS* entry whether or not anything ever defined
+it, so presence in that table proves nothing: the cell must be non-NULL."
+  (let ((cell (gethash (fspec-key v) (cold-world-fdefs w))))
+    (and cell
+         (multiple-value-bind (tag data) (cw-ref w (cold-follow-cell w cell))
+           (declare (ignore data))
+           (/= (tag-type tag) (cold-dtp w "NULL"))))))
 
 (defun check-deferred-boot-safety (w)
   "Walk every deferred form AND every first-boot patch value form; flag
@@ -640,6 +723,116 @@ cold set."
                        #'string<)))
       (cold-check (null names)
                   "deferred forms call undefined-at-boot: ~{~A~^ ~}" names))))
+
+(defparameter *cold-deferred-special-operator-heads*
+  (append *cold-interpreter-special-forms*
+          '("LET" "LET*" "FLET" "LABELS" "MACROLET" "SYMBOL-MACROLET"
+            "MULTIPLE-VALUE-BIND" "MULTIPLE-VALUE-PROG1" "MULTIPLE-VALUE-SETQ"
+            "UNWIND-PROTECT" "CATCH" "THROW" "EVAL-WHEN" "LOCALLY"
+            "COND" "PROGN" "GO"))
+  "Heads the first-boot interpreter digests itself (sys/eval.lisp): they
+are not calls, so they never need a function cell.  Superset of
+*COLD-INTERPRETER-SPECIAL-FORMS*, kept separate so widening it for the
+callee-boundness walk cannot quietly widen the older head-only audits.")
+
+(defun cold-deferred-form-callees (form)
+  "Every vsym in a call (car) position of the deferred FORM, in order.
+Deferred forms are POST-macroexpansion compiler dumps, so car positions
+really are calls.  QUOTE subtrees are data and pruned entirely -- that
+prune, not conservatism elsewhere, is what keeps the walk free of false
+positives; the binder forms (LET/FLET/LAMBDA/MULTIPLE-VALUE-BIND/COND)
+are stepped explicitly so a bound variable or a clause test never reads
+as an operator.  (FUNCTION x) contributes X: #'FOO's cell is read the
+moment the form runs."
+  (let ((out nil))
+    (labels ((walk-list (l)
+               (loop for sub = l then (cdr sub)
+                     while (consp sub)
+                     do (walk (car sub))))
+             (walk-args (f) (walk-list (rest f)))
+             (walk (f)
+               (when (consp f)
+                 (let ((head (first f)))
+                   (cond
+                     ;; ((LAMBDA ...) args): all code, nothing named.
+                     ((not (vsym-p head)) (walk-list f))
+                     ((vsym-named-p head "QUOTE"))
+                     ((vsym-named-p head "FUNCTION")
+                      (let ((x (second f)))
+                        (when (vsym-p x) (push x out))))
+                     ((vsym-named-p head "DECLARE"))
+                     ((vsym-named-p head "GO"))
+                     ((or (vsym-named-p head "LET") (vsym-named-p head "LET*"))
+                      (dolist (b (second f))
+                        (when (consp b) (walk (second b))))
+                      (walk-list (cddr f)))
+                     ((or (vsym-named-p head "FLET")
+                          (vsym-named-p head "LABELS")
+                          (vsym-named-p head "MACROLET"))
+                      (dolist (d (second f))
+                        (when (consp d) (walk-list (cddr d))))
+                      (walk-list (cddr f)))
+                     ((vsym-named-p head "LAMBDA") (walk-list (cddr f)))
+                     ((vsym-named-p head "COND")
+                      (dolist (clause (rest f))
+                        (when (consp clause) (walk-list clause))))
+                     ((or (vsym-named-p head "MULTIPLE-VALUE-BIND")
+                          (vsym-named-p head "MULTIPLE-VALUE-SETQ")
+                          (vsym-named-p head "BLOCK")
+                          (vsym-named-p head "RETURN-FROM")
+                          (vsym-named-p head "THE")
+                          (vsym-named-p head "EVAL-WHEN"))
+                      ;; second position is a name / var list / type /
+                      ;; situation list -- never evaluated.
+                      (walk-list (cddr f)))
+                     ((member (vsym-name head)
+                              *cold-deferred-special-operator-heads*
+                              :test #'string=)
+                      (walk-args f))
+                     (t (push head out) (walk-args f)))))))
+      (walk form))
+    (nreverse out)))
+
+(defun check-deferred-callee-boundness (w)
+  "QLD-attempt-11 gate: EVERY function a deferred form calls must be
+callable pre-banner.  The deferred list is replayed by MAPC #'EVAL
+before the banner (cold-load.lisp:547) with nothing but the cold
+fdefinitions and the FSET stubs installed, so this is a zero-tolerance
+audit with no baseline file: one warm-only callee anywhere in the tree
+is trap 71 in ZL:FSYMEVAL.
+
+Strictly stronger than CHECK-DEFERRED-BOOT-SAFETY, which asks only
+whether a callee has a *COLD-WORLD-FDEFS* entry -- and a REFERENCED but
+never-defined fspec has one (it is exactly an R1 row).  Attempt 11: the
+LANGUAGE-TOOLS files' compiler-dumped (EXPORT (SI:%LIST-N n (INTERN
+\"NAME\" (FIND-PACKAGE-FOR-SYNTAX ...)) ...)) forms were deferred, and
+SI:FIND-PACKAGE-FOR-SYNTAX (sys/lisp-syntax.lisp) is warm-only -- its
+R1-listed empty cell sailed past the older gate.  Cold-eval now
+discharges those EXPORTs statically against PKGDCL
+\(*COLD-STATIC-EXPORTS*); --defeat static-exports re-defers them and this
+gate must name FIND-PACKAGE-FOR-SYNTAX."
+  (let ((seen (make-hash-table :test #'equal))
+        (findings 0))
+    (loop for (pkg . form) in (cold-world-deferred w)
+          do (let ((*cold-default-package* pkg))
+               (dolist (callee (cold-deferred-form-callees form))
+                 (unless (or (member (vsym-name callee)
+                                     *cold-boot-fset-stubs* :test #'string=)
+                             (member (vsym-name callee)
+                                     *cold-known-pending-functions*
+                                     :test #'string=)
+                             (cold-fcell-bound-p w callee))
+                   (let ((key (list (fspec-key callee) (form-head-name form))))
+                     (unless (gethash key seen)
+                       (setf (gethash key seen) t)
+                       (incf findings)
+                       (cold-check
+                        nil "deferred form calls unbound ~A: (~A ...) in ~A ~
+-- ~A" (fspec-key callee) (or (form-head-name form) "?") pkg
+                        (let ((*print-level* 4) (*print-length* 5)
+                              (*print-pretty* nil))
+                          (format nil "~S" form)))))))))
+    (zerop findings)))
 
 (defun check-mouse-char-cache (w)
   "M3h boot-29 gate: *MOUSE-CHAR-CACHE* is built at world-build time and
@@ -1011,7 +1204,6 @@ INITIALIZE-USER-DISK calls QLD-warm PROCESS:RESET-LOCK/MAKE-LOCK -> trap 71.
 add-initialization-eager-p now models PARSE-INITIALIZATION-ARGS faithfully
 (explicit-override vs list-keyword DEFAULT-WHEN); the file is pruned."
   (let ((vmap (cold-build-fspec-vfun-map))
-        (dtp-null (cold-dtp w "NULL"))
         (bad (make-hash-table :test #'equal)))
     (labels
         ((special-p (v)
@@ -1022,13 +1214,7 @@ add-initialization-eager-p now models PARSE-INITIALIZATION-ARGS faithfully
                        :test #'string=)
                (member (vsym-name v) *cold-known-pending-functions*
                        :test #'string=)))
-         (fbound-p (v)
-           (let ((cell (gethash (fspec-key v) (cold-world-fdefs w))))
-             (and cell
-                  (multiple-value-bind (tag data)
-                      (cw-ref w (cold-follow-cell w cell))
-                    (declare (ignore data))
-                    (/= (tag-type tag) dtp-null)))))
+         (fbound-p (v) (cold-fcell-bound-p w v))
          (bound-callable-p (v)
            (or (special-p v) (stub-p v) (fbound-p v)))
          (flag (name pkg callee via)
@@ -4725,6 +4911,10 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
         ;; point in the boot order -- COMPOSE-FLAVOR-COMBINATION would WARN,
         ;; fatal pre-banner (M3h boot 38, the systematic detector).
         (check-deferred-flavor-composition w)
+        ;; Zero-tolerance: every function ANY deferred form calls, at any
+        ;; depth, is bound in the image or FSET-stubbed (QLD attempt 11,
+        ;; the compiler-dumped EXPORTs' warm-only FIND-PACKAGE-FOR-SYNTAX).
+        (check-deferred-callee-boundness w)
         (check-pass1-fspec-handlers w)
         ;; The flavor completion-table inits hoisted ahead of the first
         ;; deferred DEFFLAVOR-INTERNAL (M3h boot 33).
@@ -4885,7 +5075,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("lambda-macro-cells" . *cold-lambda-macro-cells*)
     ("bignum-encoding" . *cold-bignum-twos-complement*)
     ("zl-slash-escape" . *cold-zl-slash-escape*)
-    ("uncomposable-cfms" . *cold-withhold-uncomposable-cfms*))
+    ("uncomposable-cfms" . *cold-withhold-uncomposable-cfms*)
+    ("static-exports" . *cold-static-exports*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

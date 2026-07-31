@@ -215,6 +215,29 @@ not check-deferred-flavor-composition"; fail=1; }
         || { echo "FAIL: negative test (uncomposable-cfms): gate did not \
 name LAMBDA-LIST-SYNTAX-ERROR"; fail=1; }
     rm -f "$neg"
+
+    # static-exports: the Genera compiler rewrites every top-level
+    # (EXPORT '(...)) at dump time into (EXPORT (SI:%LIST-N n (INTERN
+    # "NAME" (FIND-PACKAGE-FOR-SYNTAX "PKG" :COMMON-LISP)) ...)), and
+    # SI:FIND-PACKAGE-FOR-SYNTAX lives in the WARM SYS:SYS;LISP-SYNTAX.
+    # Deferred rather than discharged against PKGDCL, the five
+    # LANGUAGE-TOOLS forms (clcp/mapforms, clcp/annotate, clcp/setf)
+    # replay pre-banner and FSYMEVAL an unbound function cell -- Error
+    # trap 71, QLD attempt 11.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-export.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat static-exports > "$neg" 2>&1; then
+        echo "FAIL: negative test (static-exports) built GREEN -- \
+check-deferred-callee-boundness does not fire"; fail=1
+    fi
+    grep -q "deferred form calls unbound" "$neg" \
+        || { echo "FAIL: negative test (static-exports): the failure was \
+not check-deferred-callee-boundness"; fail=1; }
+    grep -q "deferred form calls unbound.*FIND-PACKAGE-FOR-SYNTAX" "$neg" \
+        || { echo "FAIL: negative test (static-exports): gate did not name \
+FIND-PACKAGE-FOR-SYNTAX"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi
