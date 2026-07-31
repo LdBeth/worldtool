@@ -2387,6 +2387,61 @@ cell is @~8,'0X in the file, but the fdefinition cell is @~8,'0X"
 is ~2,'0X:~8,'0X, not a compiled function (dist: 1C:...)"
                          name (if vt (tag-type vt) 0) (or vd 0)))))))))
 
+(defun cold-file-follow-cell (w fresh vma)
+  "Follow one-q-forward chains from VMA IN THE EMITTED FILE; returns the
+final cell vma.  W supplies the DTP codes only."
+  (let ((fwd (cold-dtp w "ONE-Q-FORWARD")))
+    (loop for hops from 0 below 16
+          do (multiple-value-bind (tag data) (world-q fresh vma)
+               (if (and tag (= (tag-type tag) fwd))
+                   (setf vma data)
+                   (return vma)))
+          finally (return vma))))
+
+(defun check-macroexpand-compiler-hooks (w fresh)
+  "Post-emit gate (QLD attempt 12, SYS:SCHEDULER;LOCKS.VBIN): the cold
+interpreter consults the compiler protocol on EVERY interpreted macro
+expansion, so both hooks and their argument must be answerable pre-warm.
+
+SI:MACROEXPAND-1-INTERNAL (sys/macroexpand.lisp:130-137) expands an
+ordinary (SPECIAL fn) macro, under DONT-EXPAND-SPECIAL-FORMS, only after
+\(NULL (COMPILER:GET-PHASE-1-HANDLER COMPILER:*COMPILER* FN)) and (NULL
+\(COMPILER:GET-TRANSFORMERS COMPILER:*COMPILER* FN)) -- and the
+interpreter always passes that flag true (SI:FIND-BODY-DECLARATIONS and
+STYLE-CHECK-DEFINITION-FORM, sys/eval.lisp).  Both generics live in the
+warm compiler/compiler-protocol.lisp and *COMPILER* is its argless
+DEFVAR (:379), so a cold world that ships them unbound traps 57 (nullfw)
+at PC 224 in MACROEXPAND-1-INTERNAL the first time QLD interprets a
+macro call -- which is what killed QLD attempt 12.
+
+Checked ON THE FILE, forward-followed, and deliberately blind to
+*COLD-MACROEXPAND-COMPILER-HOOKS*: the gate must fire when the fix is
+defeated.  A real QLD-warm definition satisfies it as well as the
+LISP:IGNORE stub -- the requirement is only that the cell answer."
+  (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
+        (dtp-null (cold-dtp w "NULL")))
+    (dolist (name '("GET-PHASE-1-HANDLER" "GET-TRANSFORMERS"))
+      (let ((cell (cold-file-follow-cell
+                   w fresh (+ (cold-vsym w (make-vsym "COMPILER" name)) 2))))
+        (multiple-value-bind (tag data) (world-q fresh cell)
+          (cold-check (and tag (= (tag-type tag) dtp-cf))
+                      "macroexpand compiler hooks: COMPILER:~A's function ~
+cell @#x~8,'0X is ~2,'0X:~8,'0X, not a compiled function -- any ~
+interpreted macro expansion calls the compiler-protocol hooks pre-warm ~
+\(SI:MACROEXPAND-1-INTERNAL, trap 57 nullfw at PC 224)"
+                      name cell (if tag (tag-type tag) 0) (or data 0)))))
+    (let ((cell (cold-file-follow-cell
+                 w fresh (1+ (cold-vsym w (make-vsym "COMPILER" "*COMPILER*"))))))
+      (multiple-value-bind (tag data) (world-q fresh cell)
+        (cold-check (and tag (/= (tag-type tag) dtp-null))
+                    "macroexpand compiler hooks: COMPILER:*COMPILER*'s ~
+value cell @#x~8,'0X is ~2,'0X:~8,'0X (DTP-NULL = unbound) -- ~
+SI:MACROEXPAND-1-INTERNAL reads it to build the ~
+COMPILER:GET-PHASE-1-HANDLER call, so any interpreted macro expansion ~
+calls the compiler-protocol hooks pre-warm and traps on the argument ~
+before the hook"
+                    cell (if tag (tag-type tag) 0) (or data 0))))))
+
 (defun check-bignum-encoding (w fresh)
   "Post-emit gate (QLD attempt 8, SYS:SYS2;BIGNUM.VBIN): every bignum the
 generator emitted must READ BACK, out of the file and under the Ivory
@@ -5053,6 +5108,11 @@ for the mini streams (got ~:[unbound~;~2,'0X:~8,'0X~])" boundp tag data))
             ;; instead of -2^32, and VERIFY-OPEN-CODED-CONSTANTS signalled
             ;; INLINE-CONSTANT-VALUE-CHANGED (QLD attempt 8, BIGNUM.VBIN).
             (check-bignum-encoding w fresh)
+            ;; Both compiler-protocol hooks SI:MACROEXPAND-1-INTERNAL
+            ;; consults on EVERY interpreted macro expansion, and their
+            ;; COMPILER:*COMPILER* argument, answer instead of trapping
+            ;; 57 (QLD attempt 12, SYS:SCHEDULER;LOCKS.VBIN).
+            (check-macroexpand-compiler-hooks w fresh)
             ;; Byte-stable emit.
             (cold-check (equalp (write-world model) (write-world fresh))
                         "re-emit of the re-read world is byte-identical")))
@@ -5076,7 +5136,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("bignum-encoding" . *cold-bignum-twos-complement*)
     ("zl-slash-escape" . *cold-zl-slash-escape*)
     ("uncomposable-cfms" . *cold-withhold-uncomposable-cfms*)
-    ("static-exports" . *cold-static-exports*))
+    ("static-exports" . *cold-static-exports*)
+    ("macroexpand-compiler-hooks" . *cold-macroexpand-compiler-hooks*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

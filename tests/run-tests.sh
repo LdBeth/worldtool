@@ -238,6 +238,32 @@ not check-deferred-callee-boundness"; fail=1; }
         || { echo "FAIL: negative test (static-exports): gate did not name \
 FIND-PACKAGE-FOR-SYNTAX"; fail=1; }
     rm -f "$neg"
+
+    # macroexpand-compiler-hooks: SI:MACROEXPAND-1-INTERNAL consults the
+    # WARM compiler protocol on every interpreted macro expansion --
+    # (NULL (COMPILER:GET-PHASE-1-HANDLER COMPILER:*COMPILER* FN)) and the
+    # matching GET-TRANSFORMERS (macroexpand.lisp:130-137), reached because
+    # the interpreter always passes DONT-EXPAND-SPECIAL-FORMS true.  Left
+    # unbound, the first interpreted macro call reads a DTP-NULL cell:
+    # Error trap 57 (nullfw) at PC 224 in MACROEXPAND-1-INTERNAL, QLD
+    # attempt 12 loading SYS:SCHEDULER;LOCKS.VBIN.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-mxhooks.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat macroexpand-compiler-hooks > "$neg" 2>&1; then
+        echo "FAIL: negative test (macroexpand-compiler-hooks) built GREEN \
+-- check-macroexpand-compiler-hooks does not fire"; fail=1
+    fi
+    grep -q "FAIL macroexpand compiler hooks" "$neg" \
+        || { echo "FAIL: negative test (macroexpand-compiler-hooks): the \
+failure was not check-macroexpand-compiler-hooks"; fail=1; }
+    grep -q "GET-PHASE-1-HANDLER" "$neg" \
+        || { echo "FAIL: negative test (macroexpand-compiler-hooks): gate \
+did not name COMPILER:GET-PHASE-1-HANDLER"; fail=1; }
+    grep -q "MACROEXPAND-1-INTERNAL" "$neg" \
+        || { echo "FAIL: negative test (macroexpand-compiler-hooks): gate \
+did not name SI:MACROEXPAND-1-INTERNAL"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi

@@ -1325,6 +1325,55 @@ WARNINGS fcell forwards into the QLD band, 05:82201B63).  The graft
 errors out if a name becomes fbound: an entry must be dropped when its
 file joins the cold set (the boot-6 emb-ethernet discipline).")
 
+(defvar *cold-macroexpand-compiler-hooks* t
+  "QLD attempt 12: the COLD interpreter consults the warm compiler
+protocol on ANY interpreted macro expansion, so both hooks must answer
+NIL pre-warm rather than trap.
+
+SI:MACROEXPAND-1-INTERNAL (sys/macroexpand.lisp:130-137) expands a macro
+whose fdefinition is the ordinary (SPECIAL fn) shape, under
+DONT-EXPAND-SPECIAL-FORMS, only when both
+  (NULL (COMPILER:GET-PHASE-1-HANDLER COMPILER:*COMPILER* FN))
+  (NULL (COMPILER:GET-TRANSFORMERS COMPILER:*COMPILER* FN))
+hold -- and the interpreter always passes DONT-EXPAND-SPECIAL-FORMS
+true: SI:FIND-BODY-DECLARATIONS (sys/eval.lisp:~1508) calls
+\(MACROEXPAND FORM ENV T), as does STYLE-CHECK-DEFINITION-FORM
+\(sys/eval.lisp:~2134).  Both hooks are DEFGENERICs of the warm
+compiler/compiler-protocol.lisp, which has no cold vbin, and
+COMPILER:*COMPILER* is its argless (DEFVAR *COMPILER*)
+\(compiler-protocol.lisp:379).  (si:qld) trapped 57 (nullfw) at PC 224
+in MACROEXPAND-1-INTERNAL loading SYS:SCHEDULER;LOCKS.VBIN, reading
+GET-PHASE-1-HANDLER's unbound function cell.
+
+MACROEXPAND-1-INTERNAL is cold-band (0x882) in the distribution, so the
+stock cold world ran this same code: the correct cold answer for both
+calls is NIL.  The i-architecture method (i-compiler/i-compiler-
+flavors.lisp:61) is just (OR (GET SYM 'PHASE-1-HANDLER) (GET SYM
+'COMPILER:PHASE-1-HANDLER)) and no cold symbol carries either property,
+so LISP:IGNORE -- any args, returns NIL -- IS the cold semantics, not an
+approximation.  QLD's later compiler load FDEFINEs the real defgenerics
+over the stubs and i-compiler/i-compilers.lisp:176's (:ONCE)
+initialization SETQs *COMPILER* to the real architecture instance, the
+same shadowing story as the flavor trio above.
+
+The two rows were R1 audit rows 89/90 (fresh-world-unbound-fcells.txt),
+accepted as lazily-reached -- the review error: EVERY interpreted macro
+call reaches them.  Setting this flag NIL defeats both the graft and the
+*COMPILER* stamp, for the negative test.")
+
+(defparameter *cold-macroexpand-hook-stubs*
+  '(("COMPILER" . "GET-PHASE-1-HANDLER")
+    ("COMPILER" . "GET-TRANSFORMERS"))
+  "IGNORE-stub rows grafted only when *COLD-MACROEXPAND-COMPILER-HOOKS*
+is true; see that variable for the whole story.")
+
+(defun cold-ignore-stub-rows ()
+  "The (package . name) rows COLD-GRAFT-IGNORE-STUBS aliases to
+LISP:IGNORE this build."
+  (append *cold-ignore-stub-functions*
+          (when *cold-macroexpand-compiler-hooks*
+            *cold-macroexpand-hook-stubs*)))
+
 (defun cold-graft-ignore-stubs (w)
   (let ((dtp-cf (cold-dtp w "COMPILED-FUNCTION"))
         (dtp-null (cold-dtp w "NULL"))
@@ -1333,7 +1382,7 @@ file joins the cold set (the boot-6 emb-ethernet discipline).")
     (multiple-value-bind (itag idata) (cw-ref w ignore-cell)
       (unless (= (tag-type itag) dtp-cf)
         (error "LISP:IGNORE is not fbound (~2,'0X:~8,'0X)" itag idata))
-      (loop for (pkg . name) in *cold-ignore-stub-functions*
+      (loop for (pkg . name) in (cold-ignore-stub-rows)
             do (let ((cell (cold-follow-cell
                             w (cold-fdefinition-cell
                                w (make-vsym pkg name)))))
@@ -1344,6 +1393,21 @@ file joins the cold set (the boot-6 emb-ethernet discipline).")
                             pkg name))
                    (cw-set w cell (logior (logand tag #xC0) dtp-cf)
                            idata)))))))
+
+(defun cold-stamp-macroexpand-compiler-hooks (w)
+  "Stamp COMPILER:*COMPILER* NIL -- the ARGUMENT of the two stubbed
+compiler-protocol hooks.  SI:MACROEXPAND-1-INTERNAL
+\(macroexpand.lisp:130-137) reads it as a special variable to build the
+call, and that read happens BEFORE the (now stubbed) call, so an unbound
+cell still traps 57 with both function cells grafted.  Argless (DEFVAR
+*COMPILER*) of the warm compiler-protocol.lisp:379; QLD's
+i-compiler/i-compilers.lisp:176 (:ONCE) initialization SETQs the real
+architecture instance over this NIL.  Same flag as the graft: see
+*COLD-MACROEXPAND-COMPILER-HOOKS*."
+  (when *cold-macroexpand-compiler-hooks*
+    (multiple-value-bind (ntag ndata) (cold-nil-q w)
+      (cold-set-symbol-value w (make-vsym "COMPILER" "*COMPILER*")
+                             ntag ndata))))
 
 ;;; ---------------- FEP boot parameters ----------------
 
@@ -1401,6 +1465,7 @@ slots from the reference world."
   (cold-fill-storage-tables w :reference reference)
   (cold-stamp-fepcomm-boot-slots w)
   (cold-graft-ignore-stubs w)
+  (cold-stamp-macroexpand-compiler-hooks w)
   (when reference
     (cold-graft-ifep-vectors w reference)
     (cold-graft-fepcomm-functions w reference))
