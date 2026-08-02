@@ -394,7 +394,7 @@ failure was not check-code-operand-patch-tags"; fail=1; }
 not name an untagged DTP-CALL-GENERIC-PREFETCH slot"; fail=1; }
     rm -f "$neg"
 
-    # prune-mapforms: DIGEST-FORM (sys/eval.lisp:863-887) is written
+    # disarm-era-probes: DIGEST-FORM (sys/eval.lisp:863-887) is written
     # (IF (VARIABLE-BOUNDP #'LT:COPYFORMS) (LT:COPYFORMS ... :EXPAND-ALL-
     # MACROS T) FORM) -- an ERA PROBE.  With COPYFORMS (clcp/mapforms.lisp:
     # 391) unbound the interpreter does not eagerly macroexpand, which is
@@ -410,24 +410,34 @@ not name an untagged DTP-CALL-GENERIC-PREFETCH slot"; fail=1; }
     # first act is (CLI::CONSTANT-FOLD-FORM DATUM ENV) (sys2/defmac.lisp:88)
     # -> COMPILER:OPTIMIZE-FORM, which only loads with the SYSTEM
     # defsystem's MACROS module group: trap 71 at #<PC 24 in
-    # SCL:DESTRUCTURING-BIND> referencing #'CLI::CONSTANT-FOLD-FORM.  The
-    # fix prunes SYS:CLCP;MAPFORMS; defeated, the file goes back in and
-    # check-cold-era-probe-functions must name LT:COPYFORMS.  (The
-    # MAKE-INSTANCE census and the R2 review list go red with it -- both
-    # count mapforms' own contributions; that is expected here.)
-    neg="${TMPDIR:-/tmp}/worldtool-negtest-mapforms.$$"
+    # SCL:DESTRUCTURING-BIND> referencing #'CLI::CONSTANT-FOLD-FORM.
+    # Attempt 22 pruned the file and attempt 23 died EARLIER, on
+    # SYS:SCHEDULER;COMETH.VBIN, trap 71 at #<PC 4 in LT::EXPAND-LOCF>
+    # referencing #'LT:VARIABLEP (clcp/setf.lisp:733 -> mapforms.lisp:492),
+    # a LAZY EVAL-time expansion -- so mapforms IS cold and the fix is now
+    # cold-disarm-era-probes stamping the one function cell back to
+    # DTP-NULL at finalize.  Defeated, mapforms' own FDEFINE stands and
+    # check-cold-era-probe-functions must name LT:COPYFORMS.  The file is
+    # loaded either way, so this is the ONLY gate that may fire.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-eraprobes.$$"
     if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
             --reference-data "$here/reference-data.lisp" $coldsys \
-            --defeat prune-mapforms > "$neg" 2>&1; then
-        echo "FAIL: negative test (prune-mapforms) built GREEN -- \
+            --defeat disarm-era-probes > "$neg" 2>&1; then
+        echo "FAIL: negative test (disarm-era-probes) built GREEN -- \
 check-cold-era-probe-functions does not fire"; fail=1
     fi
     grep -q "FAIL era probe" "$neg" \
-        || { echo "FAIL: negative test (prune-mapforms): the failure was \
+        || { echo "FAIL: negative test (disarm-era-probes): the failure was \
 not check-cold-era-probe-functions"; fail=1; }
     grep -q "era probe (VARIABLE-BOUNDP #'LT:COPYFORMS).*ARMED" "$neg" \
-        || { echo "FAIL: negative test (prune-mapforms): gate did not name \
+        || { echo "FAIL: negative test (disarm-era-probes): gate did not name \
 the armed LT:COPYFORMS probe"; fail=1; }
+    # Nothing else may go red: mapforms is in the cold set in both builds,
+    # so the MAKE-INSTANCE census and the R2 review list are unchanged.
+    if [ "$(grep -c '^ *FAIL ' "$neg")" != "1" ]; then
+        echo "FAIL: negative test (disarm-era-probes): expected exactly one \
+FAIL line (the era probe), got:"; grep '^ *FAIL ' "$neg"; fail=1
+    fi
     rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"

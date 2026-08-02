@@ -185,13 +185,6 @@ on the host side by subtracting the QLD alists."
 ;;; SCL:LOCF macro bound (trap 71 in ZL:FSYMEVAL), and the R1 audit's
 ;;; LANGUAGE-TOOLS block (EXPAND-SETF/LOCF, COPYFORMS, ...) is the same
 ;;; gap.  LAMBDA-LIST already has a distribution .vbin (QLD alist file).
-;;; QLD attempt 22: MAPFORMS is COMPILED HERE BUT NO LONGER LOADED --
-;;; *COLD-LOAD-ORDER* prunes it (see *COLD-PRUNE-MAPFORMS*, cold-gen.lisp:
-;;; defining LT:COPYFORMS arms DIGEST-FORM's era probe, eval.lisp:864).
-;;; Its .vbin must keep existing all the same: the `coldtest --defeat
-;;; prune-mapforms' negative test loads it to prove
-;;; CHECK-COLD-ERA-PROBE-FUNCTIONS fires.  This is the one sanctioned
-;;; divergence between this list and *COLD-LOAD-ORDER*.
 (defparameter *cold-set-late-found-files*
   '("SYS: SYS; LISP-DATABASE-COLD" "SYS: DEBUGGER; ITRAP-DISPATCH"
     "SYS: COMPILER; INNER"

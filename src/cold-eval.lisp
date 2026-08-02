@@ -1455,7 +1455,7 @@ collected into *COLD-EVAL-STATS* under \"fixup failures\")."
     (cold-intern-safeguarded-symbols w))
   (with-cold-materializer (w)
     (let ((*cold-load-time-eval* #'cold-operand-eval))
-      (dolist (spec (cold-load-order))
+      (dolist (spec *cold-load-order*)
         (let ((*cold-eval-file* spec))
           (cold-load-vbin w (sys-pathname spec))))
       ;; DEFINE-FLAVOR-FUNCTION-SPEC-HANDLERS (defmethod.lisp:848)

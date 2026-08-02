@@ -428,7 +428,7 @@ arrays, nested vword operands)."
                   (declare (ignore form))
                   (incf evals)
                   (cold-nil-q w))))
-          (dolist (spec (cold-load-order))
+          (dolist (spec *cold-load-order*)
             (let ((vbin (read-vbin (sys-pathname spec))))
               (incf files)
               (dolist (event (vbin-file-events vbin))
@@ -1114,7 +1114,7 @@ fspecs are skipped (we only name symbols)."
   "fspec-key -> vfun over the whole cold set (first definition wins), so a
 deferred call head can be resolved to the compiled body it names."
   (let ((map (make-hash-table :test #'equal)))
-    (dolist (spec (cold-load-order))
+    (dolist (spec *cold-load-order*)
       (let ((vbin (read-vbin (sys-pathname spec))))
         (dolist (event (vbin-file-events vbin))
           (walk-vfuns (cdr event)
@@ -3799,17 +3799,16 @@ stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
     ;; (make-instance areg-caching-buffered-{input,output}-stream-mixin
     ;; :after) (+2).  QLD attempt 10, the LANGUAGE-TOOLS cold subsystem:
     ;; clcp/mapforms.lisp:1242 (DEFMETHOD (MAKE-INSTANCE FORM-NOT-
-    ;; UNDERSTOOD) ...) (+1) -- and QLD attempt 22 took that one back out
-    ;; again with the SYS:CLCP;MAPFORMS prune (*COLD-PRUNE-MAPFORMS*,
-    ;; cold-gen.lisp), so defeating prune-mapforms trips this count too.
-    ;; Contributors now: vanilla 1 + useful-streams 5 + stream 2.  Note
-    ;; what is NOT withheld here: the finalize pass
-    ;; *COLD-WITHHOLD-UNCOMPOSABLE-CFMS* drops only
+    ;; UNDERSTOOD) ...) (+1).  Contributors: vanilla 1 + useful-streams 5
+    ;; + stream 2 + mapforms 1.  Note what is NOT withheld here: the
+    ;; finalize pass *COLD-WITHHOLD-UNCOMPOSABLE-CFMS* drops only
     ;; COMPILE-FLAVOR-METHODS-LOAD-TIME forms (pure composition
-    ;; optimizations) -- method fdefines stay deferred, always.
-    (cold-check (= make-instance-methods 8)
+    ;; optimizations, and mapforms' FORM-NOT-UNDERSTOOD CFM is one of
+    ;; them) -- method fdefines stay deferred, always.
+    (cold-check (= make-instance-methods 9)
                 "~D deferred MAKE-INSTANCE method fdefine~:P (expect ~
-8: vanilla 1 + useful-streams 5 + stream 2; withholding loses them)"
+9: vanilla 1 + useful-streams 5 + stream 2 + mapforms 1; withholding ~
+loses them)"
                 make-instance-methods)
     ;; The forged object's 7-Q DEFSTORAGE shape (defgeneric.lisp:75).
     (let ((gf (getf (cold-world-machinery w) :make-instance-generic))
@@ -4895,7 +4894,9 @@ set."
 interpreted form, so SCL:DESTRUCTURING-BIND's expander (sys2/defmac.lisp:88) ~
 opens with (CLI::CONSTANT-FOLD-FORM DATUM ENV) -> COMPILER:OPTIMIZE-FORM ~
 (clcp/macros.lisp:115, compiler/optimize.lisp:97), which no pre-compiler era ~
-has -- QLD attempt 22")
+has -- QLD attempt 22.  SYS:CLCP;MAPFORMS defines it and STAYS in the cold ~
+set (attempt 23); the fix is COLD-DISARM-ERA-PROBES stamping this one ~
+function cell back to DTP-NULL at finalize")
     ("COMPILE" "COMPILE" "flavor/compose.lisp:576, flavor/combine.lisp:922"
      "COMPILE-FUNCTION-LIST hands the combined-method DEFUNs to ~
 COMPILER:COMPILE-FORMS instead of limping along with (MAPC #'EVAL FORMS), and ~
@@ -4952,8 +4953,9 @@ storage/stack-wiring and storage/user-storage), keeping the hits whose
 file is in *COLD-LOAD-ORDER*.  The sweep's other ~55 hits are all in warm
 files -- among them debugger/debugger-support.lisp:447's (WHEN
 \(VARIABLE-BOUNDP #'LT:MAPFORMS) ...), the debugger asking whether
-LANGUAGE-TOOLS is loaded yet, which is the same question DIGEST-FORM asks
-and more evidence that mapforms is a warm subsystem.  sys2/lmmac.lisp:1941
+LANGUAGE-TOOLS is loaded yet: the same question DIGEST-FORM asks, and the
+reason a world that carries mapforms cold must still answer it NO (see
+*COLD-DISARMED-ERA-PROBES*, cold-gen.lisp).  sys2/lmmac.lisp:1941
 is the probe in macro form, (DEFMACRO FUNCTION-DEFINED-P (FSPEC)
 `(VARIABLE-BOUNDP #',FSPEC)); its one caller is warm
 (gc/reorder-memory.lisp:1265).  PNAME is what the gate looks up: matched
@@ -5090,10 +5092,38 @@ LT:FUNCTION-INLINE-FORM-METHOD -> IGNORE, LT:NAMED-CONSTANT-P,
 LT:SYMBOL-MACRO-P, LT:GLOBAL-SPECIAL-VARIABLE-P,
 LT:FORM-REFERENCES-ENVIRONMENT-P, LT::DEFCONSTANT-LOAD-2,
 LT::MAKE-VARIABLE-OBSOLETE) -- you do not stub what the cold load
-defines.  The fix is the SYS:CLCP;MAPFORMS prune (*COLD-PRUNE-MAPFORMS*,
-cold-gen.lisp); defeated, this gate fires on COPYFORMS.
+defines.
 
-Deliberately blind to *COLD-PRUNE-MAPFORMS*: it reads the built world."
+ATTEMPT 22'S FIX WAS THE WRONG ONE.  Pruning SYS:CLCP;MAPFORMS out of the
+cold set answered the probe NO but took the rest of the file with it, and
+attempt 23 died EARLIER -- in the INNER-SYSTEM load, on
+SYS:SCHEDULER;COMETH.VBIN:
+
+  #<ZL:FERROR 404005231> Error trap 71 at #<PC 4 in LT::EXPAND-LOCF
+  20100577337> referencing #<LOCATIVE to #'LT:VARIABLEP 20004061345>
+
+The halt dump's control stack (og2vlm-qld/fresh-qld.pmd, oldest first) is
+QLD -> MINI-LOAD-FILE-ALIST -> MINI-LOAD-FILE (cometh.vbin) ->
+BIN-LOAD-FILE-INTERNAL -> LOAD-BIN-OP-FORM -> EVAL -> ADD-INITIALIZATION
+-> EVAL -> PROCESS-INITIALIZE -> INITIALIZE-SCHEDULER -> MAKE-PROCESS ->
+INTERPRETER-TRAMPOLINE -> APPLY-LAMBDA -> APPLY-LAMBDA-INTERNAL -> EVAL
+-> BLOCK -> EVAL -> SETQ -> EVAL -> %INTERPRETED-MAKE-STRUCTURE -> *EVAL
+-> EVAL-MACRO -> MACROEXPAND-HOOK -> LOCF -> EXPAND-LOCF -> (unbound)
+LT:VARIABLEP.  That is LAZY macroexpansion at EVAL time -- nothing to do
+with DIGEST-FORM's eager path -- so LT:VARIABLEP (clcp/mapforms.lisp:492,
+called from EXPAND-LOCF at clcp/setf.lisp:733) is a genuine cold
+obligation of OUR world, exactly like attempt 10's SCL:LOCF finding.
+
+So the file is back in *COLD-LOAD-ORDER* and the fix is now surgical:
+COLD-DISARM-ERA-PROBES (cold-gen.lisp) stamps LT:COPYFORMS' function cell
+back to DTP-NULL at finalize, so the probe still answers NO while
+VARIABLEP and the rest of mapforms stay available.  See
+*COLD-DISARMED-ERA-PROBES* for the divergence rationale and the call-site
+safety evidence.  Defeated (--defeat disarm-era-probes), this gate fires
+on COPYFORMS.
+
+Deliberately blind to *COLD-DISARM-ERA-PROBES*: it reads the built
+world's cells, not the generator's intent."
   (let ((armed 0))
     (dolist (probe *cold-era-probe-functions*)
       (destructuring-bind (pname token site consequence) probe
@@ -5239,32 +5269,44 @@ cold world -- it is ARMED (~A), so the warm-only branch runs: ~A"
     ;; copyforms/subst walker's dynamic state -- argless DEFVARs
     ;; (mapforms.lisp:66-101, subst.lisp), LET-bound by MAPFORMS-1 /
     ;; COPYFORMS-1 / SUBST-EXPAND around every walk before any reader.
+    ;; EXPR is a special LET-bound at mapforms.lisp:1060/1067.
     ;; COMPILER:{SPECIAL-PKG-LIST,ALL-SPECIAL-SWITCH} (the GLOBAL:
     ;; ALL-SPECIAL-SWITCH row is the same MacLisp-compat switch) are
     ;; read only behind VARIABLE-BOUNDP guards
     ;; (lisp-database.lisp:95-98).  Never read unbound.
     ;;
-    ;; QLD attempt 22 pruned SYS:CLCP;MAPFORMS from the cold set (see
-    ;; *COLD-PRUNE-MAPFORMS*), which removed 17 rows that only that file
-    ;; referenced: *COPYFORMS-FLAG*, the 15 remaining *MAPFORMS-...*
-    ;; specials, and EXPR (a special LET-bound at mapforms.lisp:
-    ;; 1060/1067).  What is left is annotate/subst's own state --
-    ;; *MAPFORMS-STATE* survives because annotate.lisp reads it too.
-    ;; Defeating prune-mapforms puts the 17 back as UNREVIEWED rows, so
-    ;; the negative test sees this gate fail alongside the era-probe gate.
+    ;; Unaffected by COLD-DISARM-ERA-PROBES: that stamps LT:COPYFORMS'
+    ;; FUNCTION cell, not any of these VALUE cells.
     "COMPILER:SPECIAL-PKG-LIST"
     "GLOBAL:ALL-SPECIAL-SWITCH"
+    "LANGUAGE-TOOLS:*COPYFORMS-FLAG*"
     "LANGUAGE-TOOLS:*FREE-BLOCKS*"
     "LANGUAGE-TOOLS:*FREE-FUNCTIONS*"
     "LANGUAGE-TOOLS:*FREE-TAGS*"
     "LANGUAGE-TOOLS:*FREE-VARIABLES*"
     "LANGUAGE-TOOLS:*IN-LOOP*"
     "LANGUAGE-TOOLS:*LOOP-JOIN-QUEUE*"
+    "LANGUAGE-TOOLS:*MAPFORMS-APPLY-FUNCTION*"
+    "LANGUAGE-TOOLS:*MAPFORMS-BLOCK-ALIST*"
+    "LANGUAGE-TOOLS:*MAPFORMS-BLOCK-NAMES*"
+    "LANGUAGE-TOOLS:*MAPFORMS-BOUND-VARIABLES*"
+    "LANGUAGE-TOOLS:*MAPFORMS-EXPAND-SUBSTS*"
+    "LANGUAGE-TOOLS:*MAPFORMS-FUNCTION*"
+    "LANGUAGE-TOOLS:*MAPFORMS-GO-TAGS*"
+    "LANGUAGE-TOOLS:*MAPFORMS-ITERATION-HOOK*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LEVEL*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LEXICAL-FUNCTION-ENVIRONMENT*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LOCATOR-END*"
+    "LANGUAGE-TOOLS:*MAPFORMS-LOCATOR-START*"
+    "LANGUAGE-TOOLS:*MAPFORMS-PARALLEL-BINDS*"
     "LANGUAGE-TOOLS:*MAPFORMS-STATE*"
+    "LANGUAGE-TOOLS:*MAPFORMS-TEMPLATE-FORM*"
+    "LANGUAGE-TOOLS:*MAPFORMS-TEMPLATE-USAGE*"
     "LANGUAGE-TOOLS:*PARENT-ENVIRONMENT*"
     "LANGUAGE-TOOLS:*REPLICABILITY*"
     "LANGUAGE-TOOLS:*SUBST-ALIST*"
     "LANGUAGE-TOOLS:*SUBST-NOTEPAD*"
+    "LANGUAGE-TOOLS:EXPR"
     "LISP:*DEBUG-IO*"
     "LISP:*ERROR-OUTPUT*"
     "LISP:*QUERY-IO*"
@@ -5528,11 +5570,13 @@ prints the R1 unbound-function-cell audit."
         ;; attempt 21, trap 46 in FUNCTION-SPEC-DEFAULT-HANDLER).
         (check-code-operand-patch-tags w)
         ;; No cold-set addition ARMS a warm-only branch through a
-        ;; (VARIABLE-BOUNDP #'F) era probe: SYS:CLCP;MAPFORMS defined
+        ;; (VARIABLE-BOUNDP #'F) era probe: SYS:CLCP;MAPFORMS defines
         ;; LT:COPYFORMS, so DIGEST-FORM (eval.lisp:864) started
         ;; macroexpanding eagerly and SCL:DESTRUCTURING-BIND's expander
         ;; reached the compiler-only CLI::CONSTANT-FOLD-FORM -- QLD
-        ;; attempt 22, trap 71 in SYS:SCT;MAKE-PLAN.VBIN.
+        ;; attempt 22, trap 71 in SYS:SCT;MAKE-PLAN.VBIN.  The file stays
+        ;; (attempt 23 needs LT:VARIABLEP); COLD-DISARM-ERA-PROBES stamps
+        ;; the one function cell back to DTP-NULL at finalize.
         (check-cold-era-probe-functions w)
         ;; HALT's unguarded CLI:*CONSOLES* read (post-M3h issue 6):
         ;; stamped NIL by cold-stamp-storage-values in lieu of the QLD
@@ -5771,7 +5815,7 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("opcode-symbols" . *cold-opcode-symbols*)
     ("boundp-protocol-cells" . *cold-boundp-protocol-cells*)
     ("code-operand-patch-tags" . *cold-code-operand-patch-tags*)
-    ("prune-mapforms" . *cold-prune-mapforms*))
+    ("disarm-era-probes" . *cold-disarm-era-probes*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest
