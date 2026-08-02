@@ -394,49 +394,50 @@ failure was not check-code-operand-patch-tags"; fail=1; }
 not name an untagged DTP-CALL-GENERIC-PREFETCH slot"; fail=1; }
     rm -f "$neg"
 
-    # disarm-era-probes: DIGEST-FORM (sys/eval.lisp:863-887) is written
+    # constant-fold-stub: DIGEST-FORM (sys/eval.lisp:863-887) is written
     # (IF (VARIABLE-BOUNDP #'LT:COPYFORMS) (LT:COPYFORMS ... :EXPAND-ALL-
-    # MACROS T) FORM) -- an ERA PROBE.  With COPYFORMS (clcp/mapforms.lisp:
-    # 391) unbound the interpreter does not eagerly macroexpand, which is
-    # how stock Genera survives the cold + inner-system + system-system
-    # era.  QLD attempt 10 put the whole LANGUAGE-TOOLS block in the cold
-    # set for its SCL:LOCF obligation, mapforms with it, arming the probe;
-    # QLD attempt 22 then died loading SYS:SCT;MAKE-PLAN.VBIN -- its
-    # top-level (DEFCONST *KLUDGE-FOR-NULL-MODULE* (MAKE-INSTANCE 'LISP-
-    # MODULE ...)) (make-plan.lisp:292) composes a method combination at
-    # load time, with no compiler the combined method stays INTERPRETED
-    # (flavor/compose.lisp:576), its :PASS-ON body is headed by
-    # (DESTRUCTURING-BIND ...) (flavor/ctypes.lisp:294), and the expander's
-    # first act is (CLI::CONSTANT-FOLD-FORM DATUM ENV) (sys2/defmac.lisp:88)
-    # -> COMPILER:OPTIMIZE-FORM, which only loads with the SYSTEM
-    # defsystem's MACROS module group: trap 71 at #<PC 24 in
-    # SCL:DESTRUCTURING-BIND> referencing #'CLI::CONSTANT-FOLD-FORM.
-    # Attempt 22 pruned the file and attempt 23 died EARLIER, on
-    # SYS:SCHEDULER;COMETH.VBIN, trap 71 at #<PC 4 in LT::EXPAND-LOCF>
-    # referencing #'LT:VARIABLEP (clcp/setf.lisp:733 -> mapforms.lisp:492),
-    # a LAZY EVAL-time expansion -- so mapforms IS cold and the fix is now
-    # cold-disarm-era-probes stamping the one function cell back to
-    # DTP-NULL at finalize.  Defeated, mapforms' own FDEFINE stands and
-    # check-cold-era-probe-functions must name LT:COPYFORMS.  The file is
-    # loaded either way, so this is the ONLY gate that may fire.
-    neg="${TMPDIR:-/tmp}/worldtool-negtest-eraprobes.$$"
+    # MACROS T) FORM) -- an ERA PROBE.  Stock Genera has no LANGUAGE-TOOLS
+    # cold, so it reads NO and the interpreter never eagerly macroexpands.
+    # OUR world must carry mapforms: attempt 10's SCL:LOCF obligation
+    # reaches LT:VARIABLEP (clcp/setf.lisp:733 -> mapforms.lisp:492) and
+    # LT:COPYFORMS itself (EXPAND-LOCF -> LET-SUBST, setf.lisp:123/201/216
+    # -> LET-SUBST-COPYFORMS, subst.lisp:191 -> COPYFORMS :198).  Attempt
+    # 22 pruned the file and died on SYS:SCHEDULER;COMETH.VBIN at
+    # #<PC 4 in LT::EXPAND-LOCF> ref #'LT:VARIABLEP; attempt 23 kept the
+    # file and stamped COPYFORMS' cell to DTP-NULL and died on the same
+    # file at #<PC 50 in LT::LET-SUBST-COPYFORMS> ref #'LT:COPYFORMS.  So
+    # the probe is ARMED on purpose, and the price is the one function
+    # eager expansion then needs: SCL:DESTRUCTURING-BIND's expander opens
+    # (SETQ DATUM (CLI::CONSTANT-FOLD-FORM DATUM ENV)) (sys2/defmac.lisp:
+    # 88) and DESTRUCTURING-BIND heads every interpreted combined method
+    # (flavor/ctypes.lisp:294) -- QLD attempt 22 trapped 71 there loading
+    # SYS:SCT;MAKE-PLAN.VBIN.  CONSTANT-FOLD-FORM is in SYS:CLCP;MACROS,
+    # warm, so the generator FSETs it to PROG1 at finalize (the same
+    # device as cold-load.lisp:146's (UNENCAPSULATE-FUNCTION-SPEC .
+    # PROG1)).  Defeated, the cell ships unbound with COPYFORMS bound and
+    # check-eager-macroexpansion-closure must name CONSTANT-FOLD-FORM.
+    # The cold set is identical in both builds, so this is the ONLY gate
+    # that may fire -- in particular check-cold-era-probe-functions stays
+    # green, COPYFORMS being a reviewed *cold-armed-era-probes* entry.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-cfstub.$$"
     if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
             --reference-data "$here/reference-data.lisp" $coldsys \
-            --defeat disarm-era-probes > "$neg" 2>&1; then
-        echo "FAIL: negative test (disarm-era-probes) built GREEN -- \
-check-cold-era-probe-functions does not fire"; fail=1
+            --defeat constant-fold-stub > "$neg" 2>&1; then
+        echo "FAIL: negative test (constant-fold-stub) built GREEN -- \
+check-eager-macroexpansion-closure does not fire"; fail=1
     fi
-    grep -q "FAIL era probe" "$neg" \
-        || { echo "FAIL: negative test (disarm-era-probes): the failure was \
-not check-cold-era-probe-functions"; fail=1; }
-    grep -q "era probe (VARIABLE-BOUNDP #'LT:COPYFORMS).*ARMED" "$neg" \
-        || { echo "FAIL: negative test (disarm-era-probes): gate did not name \
-the armed LT:COPYFORMS probe"; fail=1; }
+    grep -q "FAIL LT:COPYFORMS is BOUND" "$neg" \
+        || { echo "FAIL: negative test (constant-fold-stub): the failure was \
+not check-eager-macroexpansion-closure"; fail=1; }
+    grep -q "CLI::CONSTANT-FOLD-FORM is UNBOUND" "$neg" \
+        || { echo "FAIL: negative test (constant-fold-stub): gate did not name \
+CONSTANT-FOLD-FORM"; fail=1; }
     # Nothing else may go red: mapforms is in the cold set in both builds,
     # so the MAKE-INSTANCE census and the R2 review list are unchanged.
     if [ "$(grep -c '^ *FAIL ' "$neg")" != "1" ]; then
-        echo "FAIL: negative test (disarm-era-probes): expected exactly one \
-FAIL line (the era probe), got:"; grep '^ *FAIL ' "$neg"; fail=1
+        echo "FAIL: negative test (constant-fold-stub): expected exactly one \
+FAIL line (the eager-macroexpansion closure), got:"; grep '^ *FAIL ' "$neg"
+        fail=1
     fi
     rm -f "$neg"
 else

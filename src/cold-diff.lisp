@@ -4894,9 +4894,10 @@ set."
 interpreted form, so SCL:DESTRUCTURING-BIND's expander (sys2/defmac.lisp:88) ~
 opens with (CLI::CONSTANT-FOLD-FORM DATUM ENV) -> COMPILER:OPTIMIZE-FORM ~
 (clcp/macros.lisp:115, compiler/optimize.lisp:97), which no pre-compiler era ~
-has -- QLD attempt 22.  SYS:CLCP;MAPFORMS defines it and STAYS in the cold ~
-set (attempt 23); the fix is COLD-DISARM-ERA-PROBES stamping this one ~
-function cell back to DTP-NULL at finalize")
+has -- QLD attempt 22.  REVIEWED-ARMED: attempts 22 and 23 each tried to ~
+answer this probe NO and each regressed on the LOCF path, so COPYFORMS is ~
+cold on purpose and CLI::CONSTANT-FOLD-FORM ships FSET to PROG1 instead ~
+(*COLD-EXTRA-FSET-STUBS*, gated by CHECK-EAGER-MACROEXPANSION-CLOSURE)")
     ("COMPILE" "COMPILE" "flavor/compose.lisp:576, flavor/combine.lisp:922"
      "COMPILE-FUNCTION-LIST hands the combined-method DEFUNs to ~
 COMPILER:COMPILE-FORMS instead of limping along with (MAPC #'EVAL FORMS), and ~
@@ -4954,8 +4955,9 @@ file is in *COLD-LOAD-ORDER*.  The sweep's other ~55 hits are all in warm
 files -- among them debugger/debugger-support.lisp:447's (WHEN
 \(VARIABLE-BOUNDP #'LT:MAPFORMS) ...), the debugger asking whether
 LANGUAGE-TOOLS is loaded yet: the same question DIGEST-FORM asks, and the
-reason a world that carries mapforms cold must still answer it NO (see
-*COLD-DISARMED-ERA-PROBES*, cold-gen.lisp).  sys2/lmmac.lisp:1941
+reason a world that carries mapforms cold answers it YES everywhere and
+must then supply what the YES branches call (see *COLD-EXTRA-FSET-STUBS*,
+cold-gen.lisp).  sys2/lmmac.lisp:1941
 is the probe in macro form, (DEFMACRO FUNCTION-DEFINED-P (FSPEC)
 `(VARIABLE-BOUNDP #',FSPEC)); its one caller is warm
 (gc/reorder-memory.lisp:1265).  PNAME is what the gate looks up: matched
@@ -4964,7 +4966,40 @@ because a probe's symbol is whatever package its own file compiled it in.
 SOURCE-TOKEN is how the source writes it.")
 
 (defparameter *cold-armed-era-probes*
-  '(;; RECORD-SOURCE-FILE-NAME's (NOT (VARIABLE-BOUNDP #'FORMAT))
+  '(;; LT:COPYFORMS is ARMED ON PURPOSE, and it is the only entry here
+    ;; that diverges from stock Genera.  Two attempts to disarm it both
+    ;; regressed on the guest, one boot each, on the same file:
+    ;;
+    ;;   attempt 22 PRUNED SYS:CLCP;MAPFORMS from *COLD-LOAD-ORDER*.  The
+    ;;     world died EARLIER than before, in the INNER-SYSTEM load of
+    ;;     SYS:SCHEDULER;COMETH.VBIN: trap 71 at #<PC 4 in
+    ;;     LT::EXPAND-LOCF> referencing #'LT:VARIABLEP.  VARIABLEP is
+    ;;     clcp/mapforms.lisp:492 and EXPAND-LOCF calls it at
+    ;;     clcp/setf.lisp:733 -- LAZY expansion at EVAL time, nothing to
+    ;;     do with DIGEST-FORM's eager path, so mapforms' utility layer
+    ;;     is a genuine cold obligation of our world (attempt 10's
+    ;;     SCL:LOCF finding reaching one file further).
+    ;;   attempt 23 put the file back and stamped LT:COPYFORMS' function
+    ;;     cell to DTP-NULL at finalize.  The world died on the SAME
+    ;;     file, ONE STEP further along: trap 71 at #<PC 50 in
+    ;;     LT::LET-SUBST-COPYFORMS 20100576224> referencing #<LOCATIVE to
+    ;;     #'LT:COPYFORMS 20004026623>.  EXPAND-LOCF calls LET-SUBST
+    ;;     (clcp/setf.lisp:123, 201, 216) -> LET-SUBST-COPYFORMS
+    ;;     (clcp/subst.lisp:191) -> COPYFORMS (:198).  COPYFORMS is
+    ;;     genuinely reachable in the cold era, through the very LOCF
+    ;;     expansion attempt 10 established as a cold obligation.  The
+    ;;     claim that LET-SUBST-COPYFORMS has no cold-era caller was
+    ;;     WRONG; do not revive the disarm in any form.
+    ;;
+    ;; So we accept the armed probe -- DIGEST-FORM (sys/eval.lisp:864)
+    ;; eagerly macroexpands every interpreted form in our cold world,
+    ;; where stock Genera's does not -- and pay the price of admission:
+    ;; the one function eager expansion of (DESTRUCTURING-BIND ...) then
+    ;; requires, CLI::CONSTANT-FOLD-FORM, ships FSET to PROG1 from
+    ;; *COLD-EXTRA-FSET-STUBS* (cold-gen.lisp).  That pairing is itself
+    ;; gated, by CHECK-EAGER-MACROEXPANSION-CLOSURE below.
+    "COPYFORMS"
+    ;; RECORD-SOURCE-FILE-NAME's (NOT (VARIABLE-BOUNDP #'FORMAT))
     ;; (fspec.lisp:680) is armed in STOCK Genera too: FORMAT is
     ;; *COLD-LOAD-FUNCTION-INITIALIZATIONS*-stubbed to FORMAT-COLD-LOAD
     ;; before the deferred MAPC runs (cold-load.lisp:131, the alist in
@@ -5013,10 +5048,11 @@ SOURCE-TOKEN is how the source writes it.")
     ;; the switch is set -- so the arm is inert twice over.
     "SEARCH-FOR-NEXT-OPEN-FRAME")
   "Era probes reviewed and accepted as ARMED in the built world.  Adding
-a name here is a claim that the warm-only branch is either stock behavior
-or provably unreachable in the cold + inner-system + system-system era --
-write the evidence in a comment, and never add one merely to make the
-gate quiet.")
+a name here is a claim that the warm-only branch is stock behavior,
+provably unreachable in the cold + inner-system + system-system era, or
+-- COPYFORMS only -- deliberately taken with every function it then
+reaches supplied by the generator.  Write the evidence in a comment, and
+never add one merely to make the gate quiet.")
 
 (defun cold-bound-fcells-named (w name)
   "Sorted fdefs keys whose NAME part is NAME and whose (forward-followed)
@@ -5094,9 +5130,9 @@ LT:FORM-REFERENCES-ENVIRONMENT-P, LT::DEFCONSTANT-LOAD-2,
 LT::MAKE-VARIABLE-OBSOLETE) -- you do not stub what the cold load
 defines.
 
-ATTEMPT 22'S FIX WAS THE WRONG ONE.  Pruning SYS:CLCP;MAPFORMS out of the
-cold set answered the probe NO but took the rest of the file with it, and
-attempt 23 died EARLIER -- in the INNER-SYSTEM load, on
+BOTH ATTEMPTS TO ANSWER THE COPYFORMS PROBE *NO* WERE WRONG, and the
+guest said so twice.  Attempt 22 pruned SYS:CLCP;MAPFORMS out of the cold
+set; the pruned world died EARLIER, in the INNER-SYSTEM load, on
 SYS:SCHEDULER;COMETH.VBIN:
 
   #<ZL:FERROR 404005231> Error trap 71 at #<PC 4 in LT::EXPAND-LOCF
@@ -5114,15 +5150,28 @@ with DIGEST-FORM's eager path -- so LT:VARIABLEP (clcp/mapforms.lisp:492,
 called from EXPAND-LOCF at clcp/setf.lisp:733) is a genuine cold
 obligation of OUR world, exactly like attempt 10's SCL:LOCF finding.
 
-So the file is back in *COLD-LOAD-ORDER* and the fix is now surgical:
-COLD-DISARM-ERA-PROBES (cold-gen.lisp) stamps LT:COPYFORMS' function cell
-back to DTP-NULL at finalize, so the probe still answers NO while
-VARIABLEP and the rest of mapforms stay available.  See
-*COLD-DISARMED-ERA-PROBES* for the divergence rationale and the call-site
-safety evidence.  Defeated (--defeat disarm-era-probes), this gate fires
-on COPYFORMS.
+Attempt 23 put the file back and stamped LT:COPYFORMS' function cell to
+DTP-NULL at finalize instead.  That died on the SAME file, ONE STEP
+further along the SAME LOCF path:
 
-Deliberately blind to *COLD-DISARM-ERA-PROBES*: it reads the built
+  Error trap 71 at #<PC 50 in LT::LET-SUBST-COPYFORMS 20100576224>
+  referencing #<LOCATIVE to #'LT:COPYFORMS 20004026623>
+
+EXPAND-LOCF calls LET-SUBST (clcp/setf.lisp:123, 201, 216) ->
+LET-SUBST-COPYFORMS (clcp/subst.lisp:191) -> COPYFORMS (:198).  COPYFORMS
+is genuinely reachable in the cold era.
+
+So the probe is ACCEPTED ARMED (\"COPYFORMS\" is a reviewed
+*COLD-ARMED-ERA-PROBES* entry, with that history in its comment) and the
+price is paid on the other side: CLI::CONSTANT-FOLD-FORM ships FSET to
+PROG1 from *COLD-EXTRA-FSET-STUBS* (cold-gen.lisp).  The pairing --
+COPYFORMS bound IMPLIES CONSTANT-FOLD-FORM bound -- is CHECK-EAGER-
+MACROEXPANSION-CLOSURE below, which is the gate that fires under
+--defeat constant-fold-stub.  This gate keeps its COPYFORMS roster entry
+so the other eleven probes stay measured, and so the review claim itself
+stays written down.
+
+Deliberately blind to the generator's switches: it reads the built
 world's cells, not the generator's intent."
   (let ((armed 0))
     (dolist (probe *cold-era-probe-functions*)
@@ -5151,6 +5200,62 @@ cold world -- it is ARMED (~A), so the warm-only branch runs: ~A"
            (format nil "~?" consequence nil)))))
     (format t "  ~D era probe~:P, ~D armed (reviewed)~%"
             (length *cold-era-probe-functions*) armed))
+  t)
+
+(defun check-eager-macroexpansion-closure (w)
+  "QLD attempt-24 gate, the other half of CHECK-COLD-ERA-PROBE-FUNCTIONS:
+
+  IF LT:COPYFORMS IS BOUND, CLI::CONSTANT-FOLD-FORM MUST BE BOUND TOO.
+
+DIGEST-FORM (sys/eval.lisp:863-887) is
+
+  (IF (VARIABLE-BOUNDP #'LT:COPYFORMS)
+      (LT:COPYFORMS ... FORM :EXPAND-ALL-MACROS T :ENVIRONMENT ENV)
+      FORM)
+
+so a world that ships COPYFORMS bound EAGERLY MACROEXPANDS EVERY
+INTERPRETED FORM.  Our cold world does -- SYS:CLCP;MAPFORMS is cold for
+VARIABLEP and LET-SUBST-COPYFORMS on the SCL:LOCF path, and two attempts
+to take that back regressed on the guest (see *COLD-ARMED-ERA-PROBES*).
+Once eager expansion is on, EVERY interpreted (DESTRUCTURING-BIND ...)
+runs SCL:DESTRUCTURING-BIND's expander, whose first act is
+
+  (setq datum (cli::constant-fold-form datum env))     sys2/defmac.lisp:88
+
+and DESTRUCTURING-BIND heads the body of every interpreted combined
+method (flavor/ctypes.lisp:294), so any load-time MAKE-INSTANCE reaches
+it.  QLD attempt 22 is the proof: trap 71 at #<PC 24 in
+SCL:DESTRUCTURING-BIND> referencing #'CLI::CONSTANT-FOLD-FORM, loading
+SYS:SCT;MAKE-PLAN.VBIN.  CONSTANT-FOLD-FORM lives in SYS:CLCP;MACROS,
+which is in NO mini alist and loads with the SYSTEM defsystem's MACROS
+module group during \"Loading rest of world\" -- far too late.
+
+The generator therefore FSETs it to PROG1 at finalize
+(*COLD-EXTRA-FSET-STUBS* / COLD-INSTALL-EXTRA-FSET-STUBS, cold-gen.lisp),
+the same degraded-stand-in device cold-load.lisp:146 uses for
+(UNENCAPSULATE-FUNCTION-SPEC . PROG1); QLD's own load of clcp/macros
+FDEFINEs the real one over it.  Defeated (--defeat constant-fold-stub),
+this gate fires and names CONSTANT-FOLD-FORM.
+
+Measured, not assumed: both sides are read out of the BUILT world by
+COLD-BOUND-FCELLS-NAMED, package-insensitively, like every other name
+test in this file."
+  (let ((copyforms (cold-bound-fcells-named w "COPYFORMS"))
+        (folder (cold-bound-fcells-named w "CONSTANT-FOLD-FORM")))
+    (cold-check
+     (or (null copyforms) folder)
+     "LT:COPYFORMS is BOUND (~{~A~^ ~}) so DIGEST-FORM (sys/eval.lisp:864) ~
+macroexpands every interpreted form eagerly, but CLI::CONSTANT-FOLD-FORM ~
+is UNBOUND -- SCL:DESTRUCTURING-BIND's expander opens with ~
+(SETQ DATUM (CLI::CONSTANT-FOLD-FORM DATUM ENV)) (sys2/defmac.lisp:88) ~
+and DESTRUCTURING-BIND heads every interpreted combined method ~
+(flavor/ctypes.lisp:294), so the first load-time MAKE-INSTANCE traps 71 ~
+on it (QLD attempt 22, SYS:SCT;MAKE-PLAN.VBIN).  Ship the ~
+*COLD-EXTRA-FSET-STUBS* entry CONSTANT-FOLD-FORM -> PROG1, or take ~
+LT:COPYFORMS out of the cold world"
+     copyforms)
+    (format t "  eager-macroexpansion closure: COPYFORMS ~:[unbound~;bound~], ~
+CONSTANT-FOLD-FORM ~:[unbound~;bound~]~%" copyforms folder))
   t)
 
 (defparameter *cold-reviewed-unbound-value-cells*
@@ -5275,8 +5380,9 @@ cold world -- it is ARMED (~A), so the warm-only branch runs: ~A"
     ;; read only behind VARIABLE-BOUNDP guards
     ;; (lisp-database.lisp:95-98).  Never read unbound.
     ;;
-    ;; Unaffected by COLD-DISARM-ERA-PROBES: that stamps LT:COPYFORMS'
-    ;; FUNCTION cell, not any of these VALUE cells.
+    ;; Unaffected by COLD-INSTALL-EXTRA-FSET-STUBS: that writes
+    ;; CLI::CONSTANT-FOLD-FORM's FUNCTION cell, not any of these VALUE
+    ;; cells.
     "COMPILER:SPECIAL-PKG-LIST"
     "GLOBAL:ALL-SPECIAL-SWITCH"
     "LANGUAGE-TOOLS:*COPYFORMS-FLAG*"
@@ -5570,14 +5676,18 @@ prints the R1 unbound-function-cell audit."
         ;; attempt 21, trap 46 in FUNCTION-SPEC-DEFAULT-HANDLER).
         (check-code-operand-patch-tags w)
         ;; No cold-set addition ARMS a warm-only branch through a
-        ;; (VARIABLE-BOUNDP #'F) era probe: SYS:CLCP;MAPFORMS defines
-        ;; LT:COPYFORMS, so DIGEST-FORM (eval.lisp:864) started
-        ;; macroexpanding eagerly and SCL:DESTRUCTURING-BIND's expander
-        ;; reached the compiler-only CLI::CONSTANT-FOLD-FORM -- QLD
-        ;; attempt 22, trap 71 in SYS:SCT;MAKE-PLAN.VBIN.  The file stays
-        ;; (attempt 23 needs LT:VARIABLEP); COLD-DISARM-ERA-PROBES stamps
-        ;; the one function cell back to DTP-NULL at finalize.
+        ;; (VARIABLE-BOUNDP #'F) era probe unless it is reviewed:
+        ;; SYS:CLCP;MAPFORMS defines LT:COPYFORMS, so DIGEST-FORM
+        ;; (eval.lisp:864) macroexpands eagerly and SCL:DESTRUCTURING-
+        ;; BIND's expander reaches the warm-only CLI::CONSTANT-FOLD-FORM
+        ;; -- QLD attempt 22, trap 71 in SYS:SCT;MAKE-PLAN.VBIN.
         (check-cold-era-probe-functions w)
+        ;; ...and the paired obligation: mapforms STAYS cold (attempts 22
+        ;; and 23 both regressed on the LOCF path, needing LT:VARIABLEP
+        ;; and then LT:COPYFORMS itself), so the armed probe is accepted
+        ;; and CLI::CONSTANT-FOLD-FORM must ship bound -- FSET to PROG1
+        ;; by cold-install-extra-fset-stubs.
+        (check-eager-macroexpansion-closure w)
         ;; HALT's unguarded CLI:*CONSOLES* read (post-M3h issue 6):
         ;; stamped NIL by cold-stamp-storage-values in lieu of the QLD
         ;; console flavor stack.
@@ -5815,7 +5925,7 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("opcode-symbols" . *cold-opcode-symbols*)
     ("boundp-protocol-cells" . *cold-boundp-protocol-cells*)
     ("code-operand-patch-tags" . *cold-code-operand-patch-tags*)
-    ("disarm-era-probes" . *cold-disarm-era-probes*))
+    ("constant-fold-stub" . *cold-constant-fold-stub*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

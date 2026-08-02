@@ -367,129 +367,173 @@
     ;; .vbins (QLD alist files, reloaded warm like stringfns); the
     ;; other five were recompiled in the user's Genera 8.5 2026-07-31.
     "SYS: SYS; LISP-DATABASE"
-    ;; MAPFORMS is COLD, and QLD attempt 23 is why.  Attempt 22 pruned it
-    ;; (defining LT:COPYFORMS arms DIGEST-FORM's era probe, eval.lisp:864),
-    ;; and the pruned world died EARLIER, in the INNER-SYSTEM load of
-    ;; SYS:SCHEDULER;COMETH.VBIN: trap 71 at #<PC 4 in LT::EXPAND-LOCF>
-    ;; referencing #'LT:VARIABLEP.  EXPAND-LOCF (clcp/setf.lisp:731) opens
-    ;; (COND ((VARIABLEP REFERENCE ENV) ...)) and VARIABLEP is
-    ;; mapforms.lisp:492 -- so attempt 10's SCL:LOCF cold obligation
-    ;; reaches into mapforms' utility layer, LAZILY, at EVAL time.  (Cold
-    ;; set siblings agree: clcp/subst.lisp and flavor/defgeneric.lisp call
-    ;; VARIABLEP too.)  The file stays; the ERA PROBE alone is disarmed --
-    ;; COLD-DISARM-ERA-PROBES (below) stamps LT:COPYFORMS' function cell
-    ;; back to DTP-NULL at finalize, so DIGEST-FORM still answers NO.
+    ;; MAPFORMS is COLD, and two failed QLD attempts are why.  Defining
+    ;; LT:COPYFORMS ARMS DIGEST-FORM's era probe (eval.lisp:864), so the
+    ;; interpreter starts eagerly macroexpanding; attempts 22 and 23 both
+    ;; tried to make the probe read NO again, and both regressed:
+    ;;
+    ;;   attempt 22 PRUNED this file.  The pruned world died EARLIER, in
+    ;;     the INNER-SYSTEM load of SYS:SCHEDULER;COMETH.VBIN: trap 71 at
+    ;;     #<PC 4 in LT::EXPAND-LOCF> referencing #'LT:VARIABLEP.
+    ;;     EXPAND-LOCF (clcp/setf.lisp:731) opens (COND ((VARIABLEP
+    ;;     REFERENCE ENV) ...)) and VARIABLEP is mapforms.lisp:492 -- so
+    ;;     attempt 10's SCL:LOCF cold obligation reaches into mapforms'
+    ;;     utility layer, LAZILY, at EVAL time.
+    ;;   attempt 23 kept the file but stamped LT:COPYFORMS' function cell
+    ;;     to DTP-NULL at finalize.  That died too, on the same
+    ;;     cometh.vbin, one step further along: trap 71 at #<PC 50 in
+    ;;     LT::LET-SUBST-COPYFORMS> referencing #'LT:COPYFORMS.
+    ;;     EXPAND-LOCF calls LET-SUBST (clcp/setf.lisp:123,201,216) ->
+    ;;     LET-SUBST-COPYFORMS (clcp/subst.lisp:191) -> COPYFORMS (:198).
+    ;;     COPYFORMS is genuinely reachable in the cold era through the
+    ;;     very LOCF expansion attempt 10 established as a cold obligation.
+    ;;
+    ;; So the whole LT utility layer -- VARIABLEP, LET-SUBST-COPYFORMS AND
+    ;; COPYFORMS -- is a cold obligation of OUR world, the era probe is
+    ;; ARMED on purpose, and the price of admission is paid instead by
+    ;; COLD-INSTALL-EXTRA-FSET-STUBS (below): eager expansion of
+    ;; (DESTRUCTURING-BIND ...) needs CLI::CONSTANT-FOLD-FORM, so we ship
+    ;; it stubbed to PROG1 for the cold era.
     "SYS: CLCP; MAPFORMS" "SYS: CLCP; ANNOTATE" "SYS: CLCP; SUBST"
     "SYS: CLCP; SETF" "SYS: CLCP; SETF-INSTALL" "SYS: CLCP; LAMBDA-LIST"))
 
-;;; ---- Era-probe disarming --------------------------------------------------
+;;; ---- Generator-installed cold FSET stubs ---------------------------------
 
-(defparameter *cold-disarm-era-probes* t
-  "T = COLD-DISARM-ERA-PROBES runs at finalize, stamping every
-*COLD-DISARMED-ERA-PROBES* function cell back to DTP-NULL.  Defeat it
-\(coldtest --defeat disarm-era-probes) and the cold set's own definitions
-stand, so CHECK-COLD-ERA-PROBE-FUNCTIONS (cold-diff.lisp) can be proven
-to fire on the armed LT:COPYFORMS probe of DIGEST-FORM (eval.lisp:864).")
+(defparameter *cold-constant-fold-stub* t
+  "T = COLD-INSTALL-EXTRA-FSET-STUBS runs at finalize, copying each
+*COLD-EXTRA-FSET-STUBS* target's function-cell Q into the stubbed name's
+function cell.  Defeat it (coldtest --defeat constant-fold-stub) and
+CLI::CONSTANT-FOLD-FORM ships unbound while LT:COPYFORMS ships bound, so
+CHECK-EAGER-MACROEXPANSION-CLOSURE (cold-diff.lisp) can be proven to
+fire.")
 
-(defparameter *cold-disarmed-era-probes*
-  '(("LANGUAGE-TOOLS" . "COPYFORMS"))
-  "(PACKAGE . PNAME) of every function the cold load DEFINES but whose
-function cell must ship UNBOUND, because a (VARIABLE-BOUNDP #'F) ERA
-PROBE reads it as \"have we left the cold-load era yet?\".  Rostered and
-gated in *COLD-ERA-PROBE-FUNCTIONS* / CHECK-COLD-ERA-PROBE-FUNCTIONS.
+(defparameter *cold-extra-fset-stubs*
+  '((("COMMON-LISP-INTERNALS" . "CONSTANT-FOLD-FORM")
+     . ("SYSTEM-INTERNALS" . "PROG1")))
+  "((PACKAGE . PNAME) . (TARGET-PACKAGE . TARGET-PNAME)) of every function
+the generator FSETs to a degraded stand-in at finalize, the way Genera's
+own *COLD-LOAD-FUNCTION-INITIALIZATIONS* alist (sys/cold-load.lisp:131)
+FSETs 100-odd names at first boot.  PACKAGE is the CONTEXT package the
+home oracle resolves the pname from, as everywhere else in this file.
 
-This is a DELIBERATE, DOCUMENTED DIVERGENCE from stock Genera.  Stock has
-no LANGUAGE-TOOLS in its cold load at all; we need LT's utility layer
-early because our generator's deferred-form replay EVALUATES
-INTERPRETIVELY what stock Genera had already COMPILED -- attempt 10's
-SCL:LOCF obligation and attempt 23's LT:VARIABLEP one are both that.  But
-having the utility layer must not let the world CLAIM the era has
-advanced.  QLD reloads the LANGUAGE-TOOLS subsystem warm during \"Loading
-rest of world\", which FDEFINEs COPYFORMS properly, so the disarm spans
-only the cold + inner-system + system-system era -- exactly the era stock
-Genera runs with the probe reading NO.
+THE ONE ENTRY IS THE GENERATOR'S CENTRAL DIVERGENCE FROM STOCK GENERA.
 
-WHY THE DISARM IS SAFE.  LT:COPYFORMS is called from six cold-set files;
-every call site is unreachable in that era:
+Stock Genera's cold load carries NO LANGUAGE-TOOLS at all, so DIGEST-FORM
+(sys/eval.lisp:863-887)
 
-  flavor/combine.lisp:757 (SUBST-COMBINED-METHOD, defun :752) and :836
-    (SUBST-COMPONENT-METHOD, defun :801) -- SUBST-COMPONENT-METHOD is
-    called only from SUBST-COMBINED-METHOD (:779), and the only entry
-    into SUBST-COMBINED-METHOD from the instantiation path is
-    COMBINE-METHODS:1164, under (WHEN (GENERIC-FUNCTION-INLINE-METHODS
-    ...)).  MAKE-COMBINED-METHOD -- the one caller of COMBINE-METHODS on
-    that path (:953) -- bails out first at :918-925 whenever ENV is NIL,
-    (NOT (VARIABLE-BOUNDP #'COMPILE)), and the flavor has inline methods
-    or a wrapper; its own comment: \"we can't even figure out the
-    derivation of the combined method until the entire compiler is
-    loaded, including all macros and special forms AND THE LANGUAGE
-    TOOLS\".  COMPILE is unbound in our world (it is itself an entry in
-    *COLD-ERA-PROBE-FUNCTIONS*, measured unbound by the gate).  The
-    remaining COMBINE-METHODS callers (combine.lisp:1298/1326/1354,
-    flavor/examine.lisp, flavor/error.lisp) are the warm inspection
-    paths.
-  flavor/combine.lisp:1177 (COMBINE-METHODS) -- under (WHEN
-    WRAPPER-SOURCES ...), whose own comment reads \"WRAPPER-SOURCES check
-    is for bootstrapping reasons\"; the same MAKE-COMBINED-METHOD kludge
-    bails out for wrappers pre-COMPILE.
-  clcp/subst.lisp:198 (LET-SUBST-COPYFORMS) -- called from subst.lisp's
-    own LET/SUBST optimizer body (:139 :177 :682 :686), which is
-    COMPILER: machinery (it emits COMPILER:VARIABLE-INLINABLE
-    declarations and consults COMPILER:SELF-EVALUATING-SYMBOL-P), plus
-    warm clos/defstruct-macro.lisp:982.  MACROEXPAND-ALL (subst.lisp:821)
-    has no cold-era caller at all.
-  i-sys/float.lisp:766 :815 :831, io/stream.lisp:2031 :2148,
-    sys/expand-do.lisp:270 :289, sys2/bars.lisp:90 :300 -- all inside
-    MACRO EXPANDERS and their helpers (%UNBOXED-INTEGER-VALUES,
-    MODIFY-UNBOXED-INTEGER-INTERNAL, the DEFMACRO-IN-FLAVOR
-    WITH-CACHED-{INPUT,OUTPUT}-ARRAY-REGISTER pair,
-    STRENGTH-REDUCE-ONE-DO-FORM's aref hoister, EXTRACT-BLOCK-READS).
-    They run only while COMPILING the file that defines them, and those
-    files are compiled warm on a full Genera.  Stock Genera loads all six
-    of these files cold with COPYFORMS unbound, so any of these paths
-    firing in the cold era would break stock too.
+  (DEFUN DIGEST-FORM (FORM ENV)
+    (IF (VARIABLE-BOUNDP #'LT:COPYFORMS)
+        (LT:COPYFORMS ... FORM :EXPAND-ALL-MACROS T :ENVIRONMENT ENV)
+        FORM))
 
-Field evidence for the cold era itself: QLD attempt 23 ran the entire
-cold load, banner, QLD start and the inner-system load with COPYFORMS
-UNBOUND (the whole file pruned) and never trapped on it -- it died on
-VARIABLEP, which this fix restores.")
+reads its era probe NO, the interpreter never eagerly macroexpands, and
+SCL:DESTRUCTURING-BIND's expander is never entered in the cold +
+inner-system + system-system era.  OUR world cannot do that: the
+generator's deferred-form replay EVALUATES INTERPRETIVELY what stock
+Genera had already COMPILED, and that replay needs LT's utility layer --
+attempt 10's SCL:LOCF obligation, attempt 23's LT:VARIABLEP one
+(clcp/mapforms.lisp:492 <- clcp/setf.lisp:733), and attempt 24's
+LT:COPYFORMS one (clcp/subst.lisp:198 <- LET-SUBST-COPYFORMS :191 <-
+LET-SUBST <- EXPAND-LOCF, clcp/setf.lisp:123,201,216).  Two attempts to
+answer the probe NO anyway -- pruning SYS:CLCP;MAPFORMS (attempt 22) and
+stamping LT:COPYFORMS' cell to DTP-NULL (attempt 23) -- each regressed on
+SYS:SCHEDULER;COMETH.VBIN, on the LOCF path, one step apart.
 
-(defun cold-disarm-era-probes (w)
-  "Stamp each *COLD-DISARMED-ERA-PROBES* function cell back to the
-never-defined shape -- tag DTP-NULL, data = the symbol's own block VMA,
-exactly what COLD-SYMBOL writes at +2 for a fresh symbol.  The cell is
-the one COLD-FDEFINITION-CELL already registered in the world's fdefs
-table, so no bookkeeping diverges: CHECK-COLD-ERA-PROBE-FUNCTIONS,
-COLD-FCELL-BOUND-P, the R1 unbound-fcell audit and
-CHECK-EAGER-INITIALIZATION-CALLEES all read the same Q back and agree
-that the name is unbound.  (If a deferred form ever calls one of these,
-that last gate SHOULD fail -- that is the point of doing it this way
-rather than suppressing the FDEFINE.)
+So the probe is ARMED here on purpose, and we must supply the one
+function that eager expansion then requires.  QLD attempt 22's own
+failure names it: loading SYS:SCT;MAKE-PLAN.VBIN instantiates a flavor at
+load time (make-plan.lisp:292), the compiler is absent so the :PASS-ON
+combined method stays INTERPRETED, its body is headed by
+(DESTRUCTURING-BIND ,LAMBDA-LIST ,ARGS ...) (flavor/ctypes.lisp:294), and
+the expander's first act is (SETQ DATUM (CLI::CONSTANT-FOLD-FORM DATUM
+ENV)) (sys2/defmac.lisp:88) -> COMPILER:OPTIMIZE-FORM
+(clcp/macros.lisp:115, compiler/optimize.lisp:97).  SYS:CLCP;MACROS is in
+NO mini alist -- it loads with the SYSTEM defsystem's MACROS module group
+(sys/sysdcl.lisp:70-78) during QLD's \"Loading rest of world\", which
+FDEFINEs the real CONSTANT-FOLD-FORM over this stub.
+
+WHY PROG1 IS THE RIGHT STAND-IN, in three parts:
+
+1. The cold-era CALLER consumes only the PRIMARY value.  sys2/defmac.lisp
+   :88 is (setq datum (cli::constant-fold-form datum env)).  Constant
+   folding is a pure OPTIMIZATION; with DATUM returned unchanged the
+   expander's subsequent tests -- (listp datum), (memq (car datum) '(list
+   xr-bq-list ...)), the quote/cons/list* special cases at :106-125 --
+   simply fall through to the general runtime-destructuring path.
+   Nothing is miscompiled; an optimization is skipped.
+2. The multiple-value contract has no cold-era consumer.  CONSTANT-FOLD-
+   FORM is (declare (values optimized-form constant-p constant-value)),
+   and its other four callers are all inside clcp/macros.lisp itself
+   (:136 :175 :237 :404) -- a file that is never in the cold set.  PROG1
+   returns ONE value, so constant-p reads NIL, i.e. \"not a constant\":
+   precisely the conservative answer.
+3. PROG1 is a two-argument function returning its first argument
+   (sys/lispfn.lisp:441, a cold-set file), and Genera's own
+   *COLD-LOAD-FUNCTION-INITIALIZATIONS* already uses it as exactly this
+   kind of degraded stand-in: (UNENCAPSULATE-FUNCTION-SPEC . PROG1),
+   sys/cold-load.lisp:146.  This is the entry Symbolics would have
+   written had their cold load carried LANGUAGE-TOOLS.")
+
+(defun cold-install-extra-fset-stubs (w)
+  "Copy each *COLD-EXTRA-FSET-STUBS* target's function-cell Q into the
+stubbed name's function cell -- the emit-time equivalent of the FSET
+LISP-INITIALIZE-FIRST-TIME does for *COLD-LOAD-FUNCTION-INITIALIZATIONS*
+at first boot, done here because our stub must be live for the whole
+cold + inner-system + system-system era.
+
+The cell written is the one COLD-FDEFINITION-CELL already registered in
+the world's fdefs table, so no bookkeeping diverges: the R1 unbound-fcell
+audit, COLD-FCELL-BOUND-P, CHECK-EAGER-MACROEXPANSION-CLOSURE and
+CHECK-DEFERRED-CALLEE-BOUNDNESS all read the same Q back and agree the
+name is BOUND.
 
 Runs at finalize, after every vbin is loaded, so nothing can redefine the
-cell afterwards.  Allocates nothing when the cold set really defines the
-name: COLD-FDEFINITION-CELL hits the existing fdefs entry.  A name the
-cold set never defined is a hard error -- a stale roster entry would
-otherwise silently disarm nothing.  Returns the list of disarmed names."
-  (when *cold-disarm-era-probes*
+cell afterwards, and allocates nothing (both symbols and the fdefs entry
+already exist).  Three hard errors, all of them staleness guards:
+
+  * the name was never interned -- a roster entry that stubs nothing;
+  * the TARGET's cell is unbound -- the stand-in is not in the cold set,
+    so the stub would install a DTP-NULL and read as a fix that worked;
+  * the name's cell is ALREADY bound -- the real definition is present
+    (the file joined the cold set), so the entry is stale and would
+    OVERWRITE a real definition with the degraded one.
+
+Returns a list of \"PKG:NAME -> PKG:NAME\" strings."
+  (when *cold-constant-fold-stub*
     (let ((dtp-null (cold-dtp w "NULL"))
-          (disarmed nil))
-      (dolist (entry *cold-disarmed-era-probes* (nreverse disarmed))
-        (destructuring-bind (package . pname) entry
-          (let ((vma (cold-find-symbol-vma w pname package)))
-            (unless vma
-              (error "era probe ~A:~A: the cold set never interned it -- ~
-a stale *COLD-DISARMED-ERA-PROBES* entry disarms nothing"
-                     package pname))
-            (let ((cell (cold-fdefinition-cell w (make-vsym package pname))))
+          (installed nil))
+      (dolist (entry *cold-extra-fset-stubs* (nreverse installed))
+        (let ((package (car (car entry))) (pname (cdr (car entry)))
+              (tpackage (car (cdr entry))) (tpname (cdr (cdr entry))))
+          (unless (cold-find-symbol-vma w pname package)
+            (error "cold FSET stub ~A:~A: the cold set never interned it ~
+-- a stale *COLD-EXTRA-FSET-STUBS* entry stubs nothing"
+                   package pname))
+          (unless (cold-find-symbol-vma w tpname tpackage)
+            (error "cold FSET stub ~A:~A -> ~A:~A: the cold set never ~
+interned the TARGET"
+                   package pname tpackage tpname))
+          (let ((cell (cold-follow-cell
+                       w (cold-fdefinition-cell w (make-vsym package pname))))
+                (tcell (cold-follow-cell
+                        w (cold-fdefinition-cell
+                           w (make-vsym tpackage tpname)))))
+            (multiple-value-bind (ttag tdata) (cw-ref w tcell)
+              (when (= (tag-type ttag) dtp-null)
+                (error "cold FSET stub ~A:~A -> ~A:~A: the TARGET's ~
+function cell is UNBOUND at finalize -- the stand-in is not in the cold ~
+set, so the stub would install a null definition"
+                       package pname tpackage tpname))
               (multiple-value-bind (tag data) (cw-ref w cell)
                 (declare (ignore data))
-                (when (= (tag-type tag) dtp-null)
-                  (error "era probe ~A:~A: already unbound at finalize -- ~
-the cold set no longer defines it, so the disarm is dead code"
-                         package pname))
-                (cw-set w cell (tag 0 dtp-null) vma)
-                (push (format nil "~A:~A" package pname) disarmed)))))))))
+                (unless (= (tag-type tag) dtp-null)
+                  (error "cold FSET stub ~A:~A: ALREADY BOUND at ~
+finalize -- the cold set now defines it, so the stub is stale and would ~
+overwrite the real definition with ~A:~A"
+                         package pname tpackage tpname)))
+              (cw-set w cell ttag tdata)
+              (push (format nil "~A:~A -> ~A:~A" package pname tpackage tpname)
+                    installed))))))))
 
 ;;; ---- M3f: finalization and the full pipeline -----------------------------
 
@@ -923,10 +967,11 @@ QLD time.  Returns (values baked considered)."
    so BUILD-INITIAL-PACKAGES can EVAL those forms at first boot.  Done
    last: the PKGDCL pass and the deferred-list materialization both
    intern keywords.
-5b. the era-probe function cells are stamped back to DTP-NULL
-   (cold-disarm-era-probes): the cold set defines LT:COPYFORMS but
-   DIGEST-FORM's (VARIABLE-BOUNDP #'LT:COPYFORMS) probe must keep
-   reading NO for the whole pre-compiler era (QLD attempts 22/23).
+5b. the generator's own cold FSET stubs are installed
+   (cold-install-extra-fset-stubs): the cold set defines LT:COPYFORMS, so
+   DIGEST-FORM (eval.lisp:864) macroexpands eagerly and every
+   interpreted (DESTRUCTURING-BIND ...) reaches CLI::CONSTANT-FOLD-FORM,
+   which is warm -- it ships FSET to PROG1 (QLD attempts 22/23/24).
 6. the storage tables are RE-stamped (cold-fill-storage-tables, M3h boot
    47): every step above ALLOCATES -- deferred-list conses, patch forms,
    strings, and every symbol first referenced by a deferred form (the
@@ -1087,16 +1132,19 @@ baked as symbols (SYS:I-SYS;OPDEF)~%" baked considered)))
       ;;    Done last: the PKGDCL pass and the deferred-list
       ;;    materialization above both intern keywords.
       (cold-forward-all-keywords w)
-      ;; 5b. Disarm the era probes: the cold set DEFINES LT:COPYFORMS
-      ;;     (mapforms is cold for VARIABLEP/EXPAND-LOCF, QLD attempt 23)
-      ;;     but its function cell must ship UNBOUND, so DIGEST-FORM
-      ;;     (eval.lisp:864) keeps answering "we have not left the cold
-      ;;     era".  After the last vbin, so nothing redefines it;
-      ;;     allocates nothing (the fdefs cell already exists).
-      (let ((disarmed (cold-disarm-era-probes w)))
-        (when disarmed
-          (format t "~&  ~D era-probe function cell~:P stamped back to ~
-DTP-NULL: ~{~A~^, ~}~%" (length disarmed) disarmed)))
+      ;; 5b. Install the generator's cold FSET stubs: the cold set DEFINES
+      ;;     LT:COPYFORMS (mapforms is cold for VARIABLEP, EXPAND-LOCF and
+      ;;     LET-SUBST-COPYFORMS -- QLD attempts 22/23), so DIGEST-FORM
+      ;;     (eval.lisp:864) macroexpands eagerly and SCL:DESTRUCTURING-
+      ;;     BIND's expander reaches the warm-only CLI::CONSTANT-FOLD-FORM
+      ;;     (sys2/defmac.lisp:88; QLD attempt 22's trap 71).  It ships
+      ;;     FSET to PROG1, exactly the way cold-load.lisp:146 FSETs
+      ;;     UNENCAPSULATE-FUNCTION-SPEC.  After the last vbin, so nothing
+      ;;     redefines the cell; allocates nothing.
+      (let ((stubbed (cold-install-extra-fset-stubs w)))
+        (when stubbed
+          (format t "~&  ~D cold FSET stub~:P installed: ~{~A~^, ~}~%"
+                  (length stubbed) stubbed)))
       (when (plusp revived)
         (format t "~&  ~D deferred defvar value~:P stamped at finalize~%"
                 revived))
