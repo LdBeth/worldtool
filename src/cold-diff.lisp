@@ -428,7 +428,7 @@ arrays, nested vword operands)."
                   (declare (ignore form))
                   (incf evals)
                   (cold-nil-q w))))
-          (dolist (spec *cold-load-order*)
+          (dolist (spec (cold-load-order))
             (let ((vbin (read-vbin (sys-pathname spec))))
               (incf files)
               (dolist (event (vbin-file-events vbin))
@@ -1114,7 +1114,7 @@ fspecs are skipped (we only name symbols)."
   "fspec-key -> vfun over the whole cold set (first definition wins), so a
 deferred call head can be resolved to the compiled body it names."
   (let ((map (make-hash-table :test #'equal)))
-    (dolist (spec *cold-load-order*)
+    (dolist (spec (cold-load-order))
       (let ((vbin (read-vbin (sys-pathname spec))))
         (dolist (event (vbin-file-events vbin))
           (walk-vfuns (cdr event)
@@ -3799,16 +3799,17 @@ stubbed generic ~A has no deflecting GF (~A) (~A): ~S"
     ;; (make-instance areg-caching-buffered-{input,output}-stream-mixin
     ;; :after) (+2).  QLD attempt 10, the LANGUAGE-TOOLS cold subsystem:
     ;; clcp/mapforms.lisp:1242 (DEFMETHOD (MAKE-INSTANCE FORM-NOT-
-    ;; UNDERSTOOD) ...) (+1).  Contributors: vanilla 1 + useful-streams 5
-    ;; + stream 2 + mapforms 1.  Note what is NOT withheld here: the
-    ;; finalize pass *COLD-WITHHOLD-UNCOMPOSABLE-CFMS* drops only
+    ;; UNDERSTOOD) ...) (+1) -- and QLD attempt 22 took that one back out
+    ;; again with the SYS:CLCP;MAPFORMS prune (*COLD-PRUNE-MAPFORMS*,
+    ;; cold-gen.lisp), so defeating prune-mapforms trips this count too.
+    ;; Contributors now: vanilla 1 + useful-streams 5 + stream 2.  Note
+    ;; what is NOT withheld here: the finalize pass
+    ;; *COLD-WITHHOLD-UNCOMPOSABLE-CFMS* drops only
     ;; COMPILE-FLAVOR-METHODS-LOAD-TIME forms (pure composition
-    ;; optimizations, and mapforms' FORM-NOT-UNDERSTOOD CFM is one of
-    ;; them) -- method fdefines stay deferred, always.
-    (cold-check (= make-instance-methods 9)
+    ;; optimizations) -- method fdefines stay deferred, always.
+    (cold-check (= make-instance-methods 8)
                 "~D deferred MAKE-INSTANCE method fdefine~:P (expect ~
-9: vanilla 1 + useful-streams 5 + stream 2 + mapforms 1; withholding ~
-loses them)"
+8: vanilla 1 + useful-streams 5 + stream 2; withholding loses them)"
                 make-instance-methods)
     ;; The forged object's 7-Q DEFSTORAGE shape (defgeneric.lisp:75).
     (let ((gf (getf (cold-world-machinery w) :make-instance-generic))
@@ -4885,6 +4886,243 @@ set."
        key-of)
       (sort rows #'string<))))
 
+;;; Era probes: (VARIABLE-BOUNDP #'F) as a "have we left the cold load?"
+;;; question, and the cold set's obligation to keep answering NO.
+
+(defparameter *cold-era-probe-functions*
+  '(("COPYFORMS" "LT:COPYFORMS" "sys/eval.lisp:864"
+     "DIGEST-FORM runs LT:COPYFORMS with :EXPAND-ALL-MACROS T over every ~
+interpreted form, so SCL:DESTRUCTURING-BIND's expander (sys2/defmac.lisp:88) ~
+opens with (CLI::CONSTANT-FOLD-FORM DATUM ENV) -> COMPILER:OPTIMIZE-FORM ~
+(clcp/macros.lisp:115, compiler/optimize.lisp:97), which no pre-compiler era ~
+has -- QLD attempt 22")
+    ("COMPILE" "COMPILE" "flavor/compose.lisp:576, flavor/combine.lisp:922"
+     "COMPILE-FUNCTION-LIST hands the combined-method DEFUNs to ~
+COMPILER:COMPILE-FORMS instead of limping along with (MAPC #'EVAL FORMS), and ~
+MAKE-COMBINED-METHOD drops its pre-compiler bootstrap guess for inline ~
+methods and wrappers")
+    ("DEFUN-COMPATIBILITY" "DEFUN-COMPATIBILITY"
+     "sys/eval.lisp:2138, sys/fspec.lisp:1450"
+     "the DEFUN macro and STYLE-CHECK-DEFINITION-FORM rewrite MacLisp DEFUNs ~
+through DEFUN-COMPATIBILITY (compiler/comfile.lisp:347, a LISP-COMPILER file)")
+    ("RENAME-WITHIN-NEW-DEFINITION-MAYBE" "RENAME-WITHIN-NEW-DEFINITION-MAYBE"
+     "sys/fspec.lisp:175"
+     "FDEFINE carries the previous definition's renamings over through the ~
+encapsulation machinery (sys2/encaps.lisp:221)")
+    ("FORMAT" "FORMAT" "sys/fspec.lisp:680"
+     "RECORD-SOURCE-FILE-NAME stops taking the PRINT/PRINC \"being ~
+redefined\" arm and may reach QUERY-ABOUT-REDEFINITION")
+    ("PAGE-IN-ARRAY" "PAGE-IN-ARRAY" "sys/package.lisp:1216"
+     "GROW-PACKAGE pages the old package array in before rehashing it ~
+(storage/user-storage.lisp:345)")
+    ("BREAKPOINTS-IN-FUNCTION" "DBG:BREAKPOINTS-IN-FUNCTION"
+     "sys/lcode.lisp:909"
+     "COMPILED-FUNCTION-INSTRUCTION consults the debugger's breakpoint table ~
+on every instruction read")
+    ("DRAW-INITIAL-WINDOW" "DRAW-INITIAL-WINDOW" "sys/command-loop.lisp:275"
+     "DO-INITIAL-DIALOGUE takes the window-system herald path -- (SEND (SEND ~
+WINDOW :SCREEN) :INSIDE-SIZE) -- instead of the plain PRINT-HERALD")
+    ("MAJOR-MODE-FROM-KEYWORD" "ZWEI:MAJOR-MODE-FROM-KEYWORD"
+     "l-bin/load.lisp:261"
+     "BIN-LOAD-FILE routes the whole load through the editor major mode's ~
+:LOAD-BINARY-FILE method")
+    ("STANDARDIZE-EXTRA-INFO" "STANDARDIZE-EXTRA-INFO"
+     "l-bin/load.lisp:875, l-bin/load.lisp:1042"
+     "the compiled-function loader rewrites each function's debugging ~
+extra-info into standard format as it loads")
+    ("SEARCH-FOR-NEXT-OPEN-FRAME" "DBG:SEARCH-FOR-NEXT-OPEN-FRAME"
+     "storage/stack-wiring.lisp:183"
+     "VERIFY-WIRING-FOR-STACK-GROUP-SWITCH's *DEBUG-STACK-WIRING* arm walks ~
+the saved wired frame with the debugger's frame searcher and WIRED-FERRORs ~
+\"Trap-on-exit vanished!\"")
+    ("WHO-LINE-RUN-STATE" "TV:WHO-LINE-RUN-STATE"
+     "storage/user-storage.lisp:445"
+     "HALT drives the who-line -- (SETQ TV:WHO-LINE-RUN-STATE \"Machine ~
+Halt\") then (TV:WHO-LINE-RUN-STATE TV:WHO-LINE-RUN-STATE-SHEET NIL NIL) -- ~
+the window-system path guarded three ways (CLI:*CONSOLES* is the first ~
+guard, stamped NIL for exactly this reason; post-M3h issue 6)"))
+  "Every (VARIABLE-BOUNDP #'F) feature probe that appears in a COLD-SET
+source file, as (PNAME SOURCE-TOKEN SITE CONSEQUENCE).  Extracted with
+
+  grep -arni \"variable-boundp #'\" --include=*.lisp .
+
+over /Users/ldbeth/Public/symbolics/rel-8-5/sys (case-INSENSITIVE -- half
+the tree is lowercase, and an uppercase-only grep silently drops
+storage/stack-wiring and storage/user-storage), keeping the hits whose
+file is in *COLD-LOAD-ORDER*.  The sweep's other ~55 hits are all in warm
+files -- among them debugger/debugger-support.lisp:447's (WHEN
+\(VARIABLE-BOUNDP #'LT:MAPFORMS) ...), the debugger asking whether
+LANGUAGE-TOOLS is loaded yet, which is the same question DIGEST-FORM asks
+and more evidence that mapforms is a warm subsystem.  sys2/lmmac.lisp:1941
+is the probe in macro form, (DEFMACRO FUNCTION-DEFINED-P (FSPEC)
+`(VARIABLE-BOUNDP #',FSPEC)); its one caller is warm
+(gc/reorder-memory.lisp:1265).  PNAME is what the gate looks up: matched
+by NAME, package-insensitively, like every other name test in this file,
+because a probe's symbol is whatever package its own file compiled it in.
+SOURCE-TOKEN is how the source writes it.")
+
+(defparameter *cold-armed-era-probes*
+  '(;; RECORD-SOURCE-FILE-NAME's (NOT (VARIABLE-BOUNDP #'FORMAT))
+    ;; (fspec.lisp:680) is armed in STOCK Genera too: FORMAT is
+    ;; *COLD-LOAD-FUNCTION-INITIALIZATIONS*-stubbed to FORMAT-COLD-LOAD
+    ;; before the deferred MAPC runs (cold-load.lisp:131, the alist in
+    ;; *COLD-BOOT-FSET-STUBS*), so the distribution's own cold world
+    ;; answers this probe YES.  The clause above it -- (AND (NOT (NULL
+    ;; PROPERTY)) (STRINGP PATHNAME)), "Kludge during world loading" --
+    ;; still takes cold redefinitions down the PRINT/PRINC arm.  Not
+    ;; ours to answer differently.
+    "FORMAT"
+    ;; The next two are probes for a COLD file's own machinery, and the
+    ;; distribution's cold load arms them too -- the giveaway is that
+    ;; both definers are in *COLD-LOAD-ORDER* for reasons that predate
+    ;; this gate, and the dist's fcell bands agree.
+    ;;
+    ;; PAGE-IN-ARRAY is (DEFUN PAGE-IN-ARRAY (ARRAY &OPTIONAL FROM TO ...)
+    ;; storage/user-storage.lisp:345 -- a swap-in utility, not a window-
+    ;; system entry point.  Dist ground truth: the symbol block at
+    ;; #x800DFD69 holds fcell 05:8820069B, band #x882 = COLD.  So
+    ;; GROW-PACKAGE (package.lisp:1216) pages the old package array in on
+    ;; the stock cold world exactly as on ours.
+    "PAGE-IN-ARRAY"
+    ;; RENAME-WITHIN-NEW-DEFINITION-MAYBE is sys2/encaps.lisp:221, and
+    ;; SYS:SYS2;ENCAPS loads BEFORE SYS:SYS;FSPEC in the cold order (both
+    ;; here and in sysdcl), so fspec.lisp:175's probe is armed from the
+    ;; moment fspec's own FDEFINEs start running -- in any cold world
+    ;; built from that declaration order.  The branch stays inside encaps
+    ;; (RENAME-WITHIN-RENAMINGS-SLOT, RENAME-WITHIN-REPLACE-FUNCTION,
+    ;; both in the same vbin) and only runs for a CAREFULLY-FLAG
+    ;; redefinition of an already-FDEFINEDP spec.  Dist bands are the
+    ;; documented mixed pattern of a QLD-reloaded cold file:
+    ;; RENAME-WITHIN-REPLACE-FUNCTION 05:8820ADA5 (#x882, cold) beside
+    ;; RENAME-WITHIN-NEW-DEFINITION-MAYBE 05:82231A82 and
+    ;; RENAME-WITHIN-RENAMINGS-SLOT 05:82231CF8 (#x822, the INNER-SYSTEM
+    ;; reload) -- one #x882 sibling convicts the file as cold.
+    "RENAME-WITHIN-NEW-DEFINITION-MAYBE"
+    ;; DBG:SEARCH-FOR-NEXT-OPEN-FRAME is debugger/frame-support.lisp,
+    ;; which joined the cold set post-M3h as the mini-debugger's
+    ;; backtrace core.  Dist ground truth is stronger than a band here:
+    ;; the symbol at #x800ED388 holds fcell 05:F0006463 -- #xF000, the
+    ;; WIRED region -- so the distribution's own cold load not only
+    ;; defines it but WIRES it.  And the probe sits INSIDE
+    ;; (COMPILER:%ERROR-WHEN *DEBUG-STACK-WIRING* ...), a runtime test on
+    ;; a (DEFVAR-SAFEGUARDED *DEBUG-STACK-WIRING* NIL)
+    ;; (stack-wiring.lisp:95) -- the disassembly of
+    ;; VERIFY-WIRING-FOR-STACK-GROUP-SWITCH returns at word 20-22 unless
+    ;; the switch is set -- so the arm is inert twice over.
+    "SEARCH-FOR-NEXT-OPEN-FRAME")
+  "Era probes reviewed and accepted as ARMED in the built world.  Adding
+a name here is a claim that the warm-only branch is either stock behavior
+or provably unreachable in the cold + inner-system + system-system era --
+write the evidence in a comment, and never add one merely to make the
+gate quiet.")
+
+(defun cold-bound-fcells-named (w name)
+  "Sorted fdefs keys whose NAME part is NAME and whose (forward-followed)
+definition cell is BOUND in the built world.  Package-insensitive on
+purpose: an era probe names whatever symbol its own file's package
+interned, which the manifest does not record."
+  (let ((dtp-null (cold-dtp w "NULL")) (hits nil))
+    (maphash
+     (lambda (key cell)
+       (when (and (stringp key) (equal (fspec-key-name key) name))
+         (multiple-value-bind (tag data) (cw-ref w (cold-follow-cell w cell))
+           (declare (ignore data))
+           (unless (= (tag-type tag) dtp-null) (push key hits)))))
+     (cold-world-fdefs w))
+    (sort hits #'string<)))
+
+(defun check-cold-era-probe-functions (w)
+  "QLD attempt-22 gate: no cold-set addition may ARM a warm-only code
+path through a (VARIABLE-BOUNDP #'F) feature probe.
+
+Stock Genera uses those probes to ask \"have we left the cold-load era
+yet?\", and the answer is supposed to be NO until QLD's \"Loading rest of
+world\" pass.  Adding the file that DEFINES F flips the answer and runs
+code written for a fully loaded world.  Every probe in a cold-set source
+file is rostered in *COLD-ERA-PROBE-FUNCTIONS* with the branch it opens;
+each must read UNBOUND at emit unless it is a reviewed
+*COLD-ARMED-ERA-PROBES* entry.  A probe counts as armed if ANY same-named
+fdefinition cell is bound in the image OR the name is FSET-stubbed at
+first boot (*COLD-BOOT-FSET-STUBS*) -- the stubs are installed before the
+deferred MAPC (cold-load.lisp:547), so they arm the probe just as well.
+
+The founding member is LT:COPYFORMS.  sys/eval.lisp:863-887 reads
+
+  (DEFUN DIGEST-FORM (FORM ENV)
+    (IF (VARIABLE-BOUNDP #'LT:COPYFORMS)
+        (LT:COPYFORMS ... FORM :EXPAND-ALL-MACROS T :ENVIRONMENT ENV)
+        FORM))
+
+-- with COPYFORMS (clcp/mapforms.lisp:391) unbound the interpreter does
+NOT eagerly macroexpand, and that is how real Genera survives the whole
+cold + inner-system + system-system era.  QLD attempt 10 added the
+LANGUAGE-TOOLS block to the cold set wholesale for its SCL:LOCF
+obligation, mapforms with it, so our world answered YES.  QLD attempt 22
+then died loading SYS:SCT;MAKE-PLAN.VBIN (7th file of
+SI:SYSTEM-SYSTEM-FILE-ALIST) with
+
+  Error trap 71 at #<PC 24 in SCL:DESTRUCTURING-BIND> referencing
+  #<LOCATIVE to #'CLI::CONSTANT-FOLD-FORM>
+
+(71 octal = microstate #x39 = unbound-cell read).  The chain, every link
+verified in the halt dump's stack: make-plan.lisp:292's top-level
+\(DEFCONST *KLUDGE-FOR-NULL-MODULE* (MAKE-INSTANCE 'LISP-MODULE ...))
+instantiates a flavor at load time -> PREPARE-FOR-INSTANTIATION ->
+COMPOSE-METHOD-COMBINATION -> COMPILE-FUNCTION-LIST, which with no
+compiler loaded EVALs the DEFUNs (flavor/compose.lisp:576), leaving the
+:PASS-ON combined method INTERPRETED (flavor/bootstrap.lisp:128 registers
+\"Compile interpreted combined methods\" for exactly this) -> its body is
+headed by (DESTRUCTURING-BIND ,LAMBDA-LIST ,ARGS ...)
+\(flavor/ctypes.lisp:294; combine.lisp:792-794 pre-expands that subform
+only on the COMPILED path) -> DIGEST-FORM -> LT:COPYFORMS ->
+MACROEXPAND-1 -> SCL:DESTRUCTURING-BIND's expander, whose FIRST act is
+\(CLI::CONSTANT-FOLD-FORM DATUM ENV) (sys2/defmac.lisp:85-88) ->
+COMPILER:OPTIMIZE-FORM (clcp/macros.lisp:115, compiler/optimize.lisp:97).
+CONSTANT-FOLD-FORM lives in SYS:CLCP;MACROS, which is in NO mini alist:
+it loads with the SYSTEM defsystem's MACROS module group
+\(sys/sysdcl.lisp:70-78, (:in-order-to :load (:load macros))) during
+QLD's \"Loading rest of world\".  So stock Genera can never macroexpand
+SCL:DESTRUCTURING-BIND in that era either -- it is spared only because
+the probe reads NO.  Corroboration that LANGUAGE-TOOLS is not a cold
+subsystem at all: *COLD-LOAD-FUNCTION-INITIALIZATIONS* FSET-stubs eight
+LT: functions (LT:REMOVE-ARGUMENTS-FROM-LAMBDA-LIST -> NTHCDR,
+LT:FUNCTION-INLINE-FORM-METHOD -> IGNORE, LT:NAMED-CONSTANT-P,
+LT:SYMBOL-MACRO-P, LT:GLOBAL-SPECIAL-VARIABLE-P,
+LT:FORM-REFERENCES-ENVIRONMENT-P, LT::DEFCONSTANT-LOAD-2,
+LT::MAKE-VARIABLE-OBSOLETE) -- you do not stub what the cold load
+defines.  The fix is the SYS:CLCP;MAPFORMS prune (*COLD-PRUNE-MAPFORMS*,
+cold-gen.lisp); defeated, this gate fires on COPYFORMS.
+
+Deliberately blind to *COLD-PRUNE-MAPFORMS*: it reads the built world."
+  (let ((armed 0))
+    (dolist (probe *cold-era-probe-functions*)
+      (destructuring-bind (pname token site consequence) probe
+        (let* ((bound (cold-bound-fcells-named w pname))
+               (stubbed (and (member pname *cold-boot-fset-stubs*
+                                     :test #'string=)
+                             t))
+               (reviewed (and (member pname *cold-armed-era-probes*
+                                      :test #'string=)
+                              t)))
+          (when (or bound stubbed) (incf armed))
+          (cold-check
+           (or (not (or bound stubbed)) reviewed)
+           "era probe (VARIABLE-BOUNDP #'~A) at ~A reads UNBOUND in the ~
+cold world -- it is ARMED (~A), so the warm-only branch runs: ~A"
+           token site
+           (format nil "~{~A~^; ~}"
+                   (append (when bound
+                             (list (format nil "bound in the image: ~{~A~^ ~}"
+                                           bound)))
+                           (when stubbed
+                             (list "FSET-stubbed at first boot"))))
+           ;; The roster's CONSEQUENCE strings carry ~<newline> line
+           ;; continuations, so they must be interpreted, not printed.
+           (format nil "~?" consequence nil)))))
+    (format t "  ~D era probe~:P, ~D armed (reviewed)~%"
+            (length *cold-era-probe-functions*) armed))
+  t)
+
 (defparameter *cold-reviewed-unbound-value-cells*
   '(
     "CLOS-INTERNALS:*DECL-TYPES-INHERITED-FROM-METHOD*"
@@ -5001,41 +5239,32 @@ set."
     ;; copyforms/subst walker's dynamic state -- argless DEFVARs
     ;; (mapforms.lisp:66-101, subst.lisp), LET-bound by MAPFORMS-1 /
     ;; COPYFORMS-1 / SUBST-EXPAND around every walk before any reader.
-    ;; EXPR is a special LET-bound at mapforms.lisp:1060/1067.
     ;; COMPILER:{SPECIAL-PKG-LIST,ALL-SPECIAL-SWITCH} (the GLOBAL:
     ;; ALL-SPECIAL-SWITCH row is the same MacLisp-compat switch) are
     ;; read only behind VARIABLE-BOUNDP guards
     ;; (lisp-database.lisp:95-98).  Never read unbound.
+    ;;
+    ;; QLD attempt 22 pruned SYS:CLCP;MAPFORMS from the cold set (see
+    ;; *COLD-PRUNE-MAPFORMS*), which removed 17 rows that only that file
+    ;; referenced: *COPYFORMS-FLAG*, the 15 remaining *MAPFORMS-...*
+    ;; specials, and EXPR (a special LET-bound at mapforms.lisp:
+    ;; 1060/1067).  What is left is annotate/subst's own state --
+    ;; *MAPFORMS-STATE* survives because annotate.lisp reads it too.
+    ;; Defeating prune-mapforms puts the 17 back as UNREVIEWED rows, so
+    ;; the negative test sees this gate fail alongside the era-probe gate.
     "COMPILER:SPECIAL-PKG-LIST"
     "GLOBAL:ALL-SPECIAL-SWITCH"
-    "LANGUAGE-TOOLS:*COPYFORMS-FLAG*"
     "LANGUAGE-TOOLS:*FREE-BLOCKS*"
     "LANGUAGE-TOOLS:*FREE-FUNCTIONS*"
     "LANGUAGE-TOOLS:*FREE-TAGS*"
     "LANGUAGE-TOOLS:*FREE-VARIABLES*"
     "LANGUAGE-TOOLS:*IN-LOOP*"
     "LANGUAGE-TOOLS:*LOOP-JOIN-QUEUE*"
-    "LANGUAGE-TOOLS:*MAPFORMS-APPLY-FUNCTION*"
-    "LANGUAGE-TOOLS:*MAPFORMS-BLOCK-ALIST*"
-    "LANGUAGE-TOOLS:*MAPFORMS-BLOCK-NAMES*"
-    "LANGUAGE-TOOLS:*MAPFORMS-BOUND-VARIABLES*"
-    "LANGUAGE-TOOLS:*MAPFORMS-EXPAND-SUBSTS*"
-    "LANGUAGE-TOOLS:*MAPFORMS-FUNCTION*"
-    "LANGUAGE-TOOLS:*MAPFORMS-GO-TAGS*"
-    "LANGUAGE-TOOLS:*MAPFORMS-ITERATION-HOOK*"
-    "LANGUAGE-TOOLS:*MAPFORMS-LEVEL*"
-    "LANGUAGE-TOOLS:*MAPFORMS-LEXICAL-FUNCTION-ENVIRONMENT*"
-    "LANGUAGE-TOOLS:*MAPFORMS-LOCATOR-END*"
-    "LANGUAGE-TOOLS:*MAPFORMS-LOCATOR-START*"
-    "LANGUAGE-TOOLS:*MAPFORMS-PARALLEL-BINDS*"
     "LANGUAGE-TOOLS:*MAPFORMS-STATE*"
-    "LANGUAGE-TOOLS:*MAPFORMS-TEMPLATE-FORM*"
-    "LANGUAGE-TOOLS:*MAPFORMS-TEMPLATE-USAGE*"
     "LANGUAGE-TOOLS:*PARENT-ENVIRONMENT*"
     "LANGUAGE-TOOLS:*REPLICABILITY*"
     "LANGUAGE-TOOLS:*SUBST-ALIST*"
     "LANGUAGE-TOOLS:*SUBST-NOTEPAD*"
-    "LANGUAGE-TOOLS:EXPR"
     "LISP:*DEBUG-IO*"
     "LISP:*ERROR-OUTPUT*"
     "LISP:*QUERY-IO*"
@@ -5298,6 +5527,13 @@ prints the R1 unbound-function-cell audit."
         ;; cannot retype the slot to the boot value's own type (QLD
         ;; attempt 21, trap 46 in FUNCTION-SPEC-DEFAULT-HANDLER).
         (check-code-operand-patch-tags w)
+        ;; No cold-set addition ARMS a warm-only branch through a
+        ;; (VARIABLE-BOUNDP #'F) era probe: SYS:CLCP;MAPFORMS defined
+        ;; LT:COPYFORMS, so DIGEST-FORM (eval.lisp:864) started
+        ;; macroexpanding eagerly and SCL:DESTRUCTURING-BIND's expander
+        ;; reached the compiler-only CLI::CONSTANT-FOLD-FORM -- QLD
+        ;; attempt 22, trap 71 in SYS:SCT;MAKE-PLAN.VBIN.
+        (check-cold-era-probe-functions w)
         ;; HALT's unguarded CLI:*CONSOLES* read (post-M3h issue 6):
         ;; stamped NIL by cold-stamp-storage-values in lieu of the QLD
         ;; console flavor stack.
@@ -5534,7 +5770,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("block-write-functions" . *cold-block-write-functions*)
     ("opcode-symbols" . *cold-opcode-symbols*)
     ("boundp-protocol-cells" . *cold-boundp-protocol-cells*)
-    ("code-operand-patch-tags" . *cold-code-operand-patch-tags*))
+    ("code-operand-patch-tags" . *cold-code-operand-patch-tags*)
+    ("prune-mapforms" . *cold-prune-mapforms*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

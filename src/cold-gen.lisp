@@ -367,8 +367,78 @@
     ;; .vbins (QLD alist files, reloaded warm like stringfns); the
     ;; other five were recompiled in the user's Genera 8.5 2026-07-31.
     "SYS: SYS; LISP-DATABASE"
-    "SYS: CLCP; MAPFORMS" "SYS: CLCP; ANNOTATE" "SYS: CLCP; SUBST"
+    ;; QLD attempt 22: "SYS: CLCP; MAPFORMS" USED TO SIT HERE, and is
+    ;; pruned -- it was never a cold-load file, and loading it ARMS a
+    ;; warm-only path in the interpreter.  DIGEST-FORM (sys/eval.lisp:
+    ;; 863-887) is written
+    ;;
+    ;;   (IF (VARIABLE-BOUNDP #'LT:COPYFORMS)
+    ;;       (LT:COPYFORMS ... FORM :EXPAND-ALL-MACROS T ...)
+    ;;       FORM)
+    ;;
+    ;; -- an ERA PROBE: with LT:COPYFORMS (mapforms.lisp:391) unbound the
+    ;; interpreter does NOT eagerly macroexpand, and stock Genera runs the
+    ;; whole cold + inner-system + system-system era that way.  Attempt 22
+    ;; loaded SYS:SCT;MAKE-PLAN.VBIN, whose top-level (DEFCONST
+    ;; *KLUDGE-FOR-NULL-MODULE* (MAKE-INSTANCE 'LISP-MODULE ...))
+    ;; (make-plan.lisp:292) composes a method combination at load time;
+    ;; with no compiler loaded COMPILE-FUNCTION-LIST (flavor/compose.lisp:
+    ;; 576) EVALs the DEFUNs, so the :PASS-ON combined method stays
+    ;; INTERPRETED (flavor/bootstrap.lisp:128 anticipates exactly this and
+    ;; recompiles them later).  Its body is headed by (DESTRUCTURING-BIND
+    ;; ,LAMBDA-LIST ,ARGS ...) (flavor/ctypes.lisp:294; combine.lisp:
+    ;; 792-794 pre-expands that subform only on the COMPILED path).  With
+    ;; COPYFORMS bound, DIGEST-FORM expanded it, and SCL:DESTRUCTURING-
+    ;; BIND's expander (sys2/defmac.lisp:85-88) opens with (CLI::CONSTANT-
+    ;; FOLD-FORM DATUM ENV) -> COMPILER:OPTIMIZE-FORM (clcp/macros.lisp:
+    ;; 115 -> compiler/optimize.lisp:97).  CONSTANT-FOLD-FORM lives in
+    ;; SYS:CLCP;MACROS, which is in NO mini alist -- it loads with the
+    ;; SYSTEM defsystem's MACROS module group (sys/sysdcl.lisp:70-78,
+    ;; (:in-order-to :load (:load macros))) during QLD's "Loading rest of
+    ;; world" -- so it is unavailable for the entire pre-compiler era, and
+    ;; stock Genera can NEVER macroexpand SCL:DESTRUCTURING-BIND there.
+    ;; Trap 71 (microstate #x39, unbound cell) at #<PC 24 in SCL:
+    ;; DESTRUCTURING-BIND> referencing #'CLI::CONSTANT-FOLD-FORM.
+    ;; Corroboration that LANGUAGE-TOOLS is not a cold subsystem:
+    ;; *COLD-LOAD-FUNCTION-INITIALIZATIONS* FSET-stubs eight LT:
+    ;; functions (LT:REMOVE-ARGUMENTS-FROM-LAMBDA-LIST -> NTHCDR,
+    ;; LT:FUNCTION-INLINE-FORM-METHOD -> IGNORE, LT:NAMED-CONSTANT-P,
+    ;; LT:SYMBOL-MACRO-P, LT:GLOBAL-SPECIAL-VARIABLE-P,
+    ;; LT:FORM-REFERENCES-ENVIRONMENT-P, LT::DEFCONSTANT-LOAD-2,
+    ;; LT::MAKE-VARIABLE-OBSOLETE) -- you do not stub what the cold load
+    ;; defines.  The other five files STAY: annotate and subst are inert
+    ;; without mapforms (every top-level form definitional -- DEFUN/
+    ;; DEFVAR/DEFPROP/PROCLAIM/EXPORT/DEFSTRUCT/DEFMACRO/DEFPARAMETER/
+    ;; COMPILER:MAKE-OBSOLETE, no :INCLUDE of a mapforms struct, and
+    ;; nothing in the cold set calls them); setf/setf-install carry
+    ;; attempt 10's proven SCL:LOCF obligation, which is a LAZY expansion
+    ;; at EVAL time and is untouched by this prune; lisp-database and
+    ;; lambda-list are unrelated.  Defeat with *COLD-PRUNE-MAPFORMS* NIL
+    ;; (coldtest --defeat prune-mapforms); the gate is
+    ;; CHECK-COLD-ERA-PROBE-FUNCTIONS (cold-diff.lisp).
+    "SYS: CLCP; ANNOTATE" "SYS: CLCP; SUBST"
     "SYS: CLCP; SETF" "SYS: CLCP; SETF-INSTALL" "SYS: CLCP; LAMBDA-LIST"))
+
+(defparameter *cold-prune-mapforms* t
+  "T = \"SYS: CLCP; MAPFORMS\" stays OUT of the cold set (the QLD
+attempt-22 fix; see the comment in its old slot in *COLD-LOAD-ORDER*).
+Defeating it splices the file back in immediately before
+\"SYS: CLCP; ANNOTATE\", its cold-sysdcl serial position, so
+CHECK-COLD-ERA-PROBE-FUNCTIONS can be proven to fire on the armed
+LT:COPYFORMS probe of DIGEST-FORM (sys/eval.lisp:864).")
+
+(defun cold-load-order ()
+  "The cold set as the loader should see it: *COLD-LOAD-ORDER* verbatim,
+plus \"SYS: CLCP; MAPFORMS\" spliced back at its cold-sysdcl serial
+position (right before \"SYS: CLCP; ANNOTATE\") when
+*COLD-PRUNE-MAPFORMS* is NIL.  Every reader of the manifest goes through
+here; *COLD-LOAD-ORDER* itself stays the manifest of record."
+  (if *cold-prune-mapforms*
+      *cold-load-order*
+      (loop for spec in *cold-load-order*
+            when (equal spec "SYS: CLCP; ANNOTATE")
+              collect "SYS: CLCP; MAPFORMS"
+            collect spec)))
 
 ;;; ---- M3f: finalization and the full pipeline -----------------------------
 
