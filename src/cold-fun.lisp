@@ -78,6 +78,24 @@ Out of scope, deliberately: DTP-CALL-INDIRECT constants (tag byte AA)
 naming function cells.  Stock also links those to the callee's CCA once
 it is defined; doing so here is a separate change with its own gate.")
 
+(defparameter *cold-code-operand-patch-tags* t
+  "T: a first-boot patch into a compiled-code operand slot whose tag came
+from the INSTRUCTION (op bit 8, TFT) carries that tag byte, and
+cold-finalize emits (SYS:%SET-TAG value tagbyte) so %P-STORE-CONTENTS --
+which writes a COMPLETE Q -- cannot retype the slot to whatever the
+boot-time value happens to be tagged.
+
+NIL exists for the gate negative test only
+(CHECK-CODE-OPERAND-PATCH-TAGS; `worldtool coldtest ... --defeat
+code-operand-patch-tags').  Defeated, the generic-function operands go
+back to being retyped DTP-LIST by FLAVOR:FIND-GENERIC-FUNCTION-AS-
+CONSTANT's cold FSET stub -- QLD attempt 21, guest trap 46 in
+FUNCTION-SPEC-DEFAULT-HANDLER.
+
+The flag deliberately does NOT reach non-TFT patches: there the baked
+tag came from the PLACEHOLDER value's own type, and forcing it onto the
+real boot-time value would be a fresh bug of the same family.")
+
 (defun cold-cell-ref-type-p (w type)
   "True for the constant tag types that name a CELL and therefore get
 snapped through one-q-forwards: EVCP and DTP-LOCATIVE."
@@ -155,12 +173,22 @@ free-pointer re-stamp.  Returns the number of Qs changed."
                                (cold-cell-ref-type-p w (tag-type tagbyte)))
                       (push (+ fn i) (cold-world-cell-ref-sites w))
                       (setf vdata (cold-follow-cell w vdata)))
-                    (cw-set w (+ fn i) tagbyte vdata))
-                  ;; A load-time-eval operand the mini-eval could not value
-                  ;; leaves a first-boot patch request for the Q just stored.
-                  (when *cold-eval-patch-form*
-                    (cold-note-patch w (+ fn i)
-                                     (shiftf *cold-eval-patch-form* nil)))))))
+                    (cw-set w (+ fn i) tagbyte vdata)
+                    ;; A load-time-eval operand the mini-eval could not value
+                    ;; leaves a first-boot patch request for the Q just
+                    ;; stored.  TFT (op bit 8) means the tag byte came from
+                    ;; the INSTRUCTION -- a call-kind operand slot -- so the
+                    ;; patch must re-stamp it; %P-STORE-CONTENTS would
+                    ;; otherwise retype the slot to the boot value's own type
+                    ;; (QLD attempt 21, trap 46).  When TFT is false the tag
+                    ;; was derived from the PLACEHOLDER value's type instead,
+                    ;; and forcing it onto the real value would be a new bug
+                    ;; of the same shape -- leave those patches untagged.
+                    (when *cold-eval-patch-form*
+                      (cold-note-patch w (+ fn i)
+                                       (shiftf *cold-eval-patch-form* nil)
+                                       (and *cold-code-operand-patch-tags*
+                                            tft tagbyte))))))))
           fn))))
 
 (defun cold-fun-entry-pc (w fn &key pc-to-entry-p)

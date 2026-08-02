@@ -92,9 +92,35 @@ CCA-relative.")
 the Q-store site that consumed the placeholder records a first-boot patch
 (cold-note-patch) and clears this.")
 
-(defun cold-note-patch (w vma form)
-  "Queue a first-boot %P-STORE-CONTENTS of (eval FORM) into VMA."
-  (push (list vma *cold-default-package* form) (cold-world-patches w)))
+(defun cold-note-patch (w vma form &optional tagbyte)
+  "Queue a first-boot %P-STORE-CONTENTS of (eval FORM) into VMA.
+
+TAGBYTE, when non-NIL, is the full 8-bit tag byte (cdr code included)
+the Q at VMA must KEEP.  %P-STORE-CONTENTS stores a COMPLETE Q -- tag
+and all -- so at a site whose tag is dictated by the INSTRUCTION rather
+than by the value it holds, the plain store silently retypes the slot to
+whatever the boot-time value happens to be tagged.  That is exactly a
+compiled-code operand slot whose data type encodes the CALL KIND
+\(DTP-CALL-GENERIC-PREFETCH and friends, cold-fun's TFT operands).
+cold-finalize wraps such a patch's value form in (SYS:%SET-TAG value
+TAGBYTE) so the stored Q carries the instruction's tag, which is what
+stock Genera's cold loader leaves there.
+
+Witness (QLD attempt 21, 2026-08-02): a generic-function constant's
+patch form is (FLAVOR:FIND-GENERIC-FUNCTION-AS-CONSTANT 'GETHASH), whose
+first-boot FSET stub returns a LIST; the store stamped DTP-LIST (21) over
+the baked DTP-CALL-GENERIC-PREFETCH (47) in FUNCTION-SPEC-DEFAULT-HANDLER
+instruction 108.  BOOTSTRAP-DEFGENERIC-CONSTANT-REFERENCES then snapped
+the real GF in but PRESERVED the wrong tag ((%SET-TAG gf (%TAG VAL))), so
+START-CALL-GENERIC-PREFETCH dispatched on nothing and the PC ran off the
+end of the function -- guest trap 46.
+
+Pass NIL (the default) whenever the Q's tag belongs to the VALUE.  Never
+pass a tag derived from the PLACEHOLDER's own type: forcing e.g. DTP-NIL
+onto the real boot-time object would be a fresh bug of the same family.
+See CHECK-CODE-OPERAND-PATCH-TAGS (cold-diff.lisp)."
+  (push (list vma *cold-default-package* form tagbyte)
+        (cold-world-patches w)))
 
 (defparameter *cold-guarded-patch-heads*
   '("LOAD-TIME-FIND-FLAVOR")

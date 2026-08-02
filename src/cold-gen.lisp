@@ -838,7 +838,9 @@ Returns (values deferred-count patch-count package-count)."
            (withheld-cfms (cold-withhold-uncomposable-cfms w))
            (deferred (reverse (cold-world-deferred w)))
            (store (make-vsym "SYSTEM" "%P-STORE-CONTENTS"))
+           (set-tag (make-vsym "SYSTEM" "%SET-TAG"))
            (loc-tag (tag 0 (cold-dtp w "LOCATIVE")))
+           (fix-tag (tag 0 (cold-dtp w "FIXNUM")))
            (add-name (make-vsym "SYSTEM-INTERNALS" "PKG-ADD-RELATIVE-NAME"))
            (patches nil)
            (deferred-qs nil)
@@ -874,8 +876,19 @@ Returns (values deferred-count patch-count package-count)."
               do (when (> round 100)
                    (error "Patch materialization did not converge"))
                  (dolist (p pending)
-                   (destructuring-bind (vma pkg form) p
-                     (let ((base (list store (make-vraw loc-tag vma) form)))
+                   (destructuring-bind (vma pkg form &optional tagbyte) p
+                     ;; TAGBYTE = the Q's tag belongs to the INSTRUCTION,
+                     ;; not to the value (a call-kind compiled-code operand
+                     ;; slot; cold-note-patch's docstring, QLD attempt 21).
+                     ;; %P-STORE-CONTENTS writes a COMPLETE Q, so the value
+                     ;; is re-stamped first: DoSetTag takes the FULL 8-bit
+                     ;; tag byte, cdr bits included, and traps unless its
+                     ;; second operand is a fixnum.
+                     (let* ((value (if tagbyte
+                                       (list set-tag form
+                                             (make-vraw fix-tag tagbyte))
+                                       form))
+                            (base (list store (make-vraw loc-tag vma) value)))
                        ;; Warm-only value heads: no-op pre-banner
                        ;; (*COLD-GUARDED-PATCH-HEADS*, M3h boot 28).
                        (when (and (consp form) (vsym-p (first form))

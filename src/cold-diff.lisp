@@ -893,6 +893,44 @@ got #x~8,'0X" button bits shd))
                                            :test #'string=)))
                          "no first-boot mouse-char patch: ~S" form))))
 
+(defun check-code-operand-patch-tags (w)
+  "QLD attempt 21 gate (guest trap 46 in FUNCTION-SPEC-DEFAULT-HANDLER,
+2026-08-02): a first-boot patch into a compiled-code operand slot whose
+data type is a CALL type must carry the slot's tag byte, so cold-finalize
+re-stamps it with (SYS:%SET-TAG value tagbyte).
+
+The call types (DTP-CALL-COMPILED-EVEN .. DTP-CALL-GENERIC-PREFETCH)
+encode the CALL KIND the instruction performs; the tag belongs to the
+instruction, not to the value in the slot.  %P-STORE-CONTENTS stores a
+COMPLETE Q, so an untagged patch retypes the slot to whatever the
+boot-time value is tagged -- (FLAVOR:FIND-GENERIC-FUNCTION-AS-CONSTANT
+'GETHASH) is FSET-stubbed to a cold version returning a LIST, which
+stamped DTP-LIST over the baked DTP-CALL-GENERIC-PREFETCH.  QLD's own
+snapper BOOTSTRAP-DEFGENERIC-CONSTANT-REFERENCES then filled in the real
+generic function but PRESERVED the corrupted tag, so
+START-CALL-GENERIC-PREFETCH did no dispatch and the PC ran off the end of
+the function.  Byte witness, same slot in three worlds: the distribution
+world holds EF:8800A137, the bake holds EF:F8041200 (NIL placeholder,
+correct tag), the runtime dump held D5:88E00458 -- tag 0xD5 = cdr 3 +
+DTP-LIST.  fresh.ilod bakes 18 such placeholder Qs."
+  (let ((lo (cold-dtp w "CALL-COMPILED-EVEN"))
+        (hi (cold-dtp w "CALL-GENERIC-PREFETCH"))
+        (bad nil))
+    (dolist (p (cold-world-patches w))
+      (destructuring-bind (vma pkg form &optional tagbyte) p
+        (declare (ignore pkg form))
+        (multiple-value-bind (tag data present) (cw-ref w vma)
+          (declare (ignore data))
+          (when (and present (<= lo (tag-type tag) hi)
+                     (not (eql tagbyte tag)))
+            (push (list vma tag tagbyte) bad)))))
+    (cold-check (null bad)
+                "every call-type code-operand patch re-stamps its tag ~
+\(untagged or mistagged: ~{~%      #x~8,'0X slot tag #x~2,'0X, patch ~
+tag ~:[NONE~;~:*#x~2,'0X~]~})"
+                (loop for (vma tag tagbyte) in (nreverse bad)
+                      append (list vma tag tagbyte)))))
+
 (defun check-cold-markers (w)
   "M3h boot-28/41 gate: both cold-load-generator marker DEFVARs --
 *COLD-FIND-GENERIC-FUNCTION-MARKER* (cold-load.lisp:409) and
@@ -5255,6 +5293,11 @@ prints the R1 unbound-function-cell audit."
         ;; symbols, and every FIND-RESOURCE compiled constant a (marker
         ;; name) list BOOTSTRAP-RESOURCE-REFERENCES snaps (M3h boot 41).
         (check-cold-markers w)
+        ;; Every first-boot patch into a CALL-type compiled-code operand
+        ;; slot re-stamps the instruction's tag, so %P-STORE-CONTENTS
+        ;; cannot retype the slot to the boot value's own type (QLD
+        ;; attempt 21, trap 46 in FUNCTION-SPEC-DEFAULT-HANDLER).
+        (check-code-operand-patch-tags w)
         ;; HALT's unguarded CLI:*CONSOLES* read (post-M3h issue 6):
         ;; stamped NIL by cold-stamp-storage-values in lieu of the QLD
         ;; console flavor stack.
@@ -5490,7 +5533,8 @@ OUT.unbound-fcells.txt)~%" (- (length rows) 10))))))))
     ("macroexpand-compiler-hooks" . *cold-macroexpand-compiler-hooks*)
     ("block-write-functions" . *cold-block-write-functions*)
     ("opcode-symbols" . *cold-opcode-symbols*)
-    ("boundp-protocol-cells" . *cold-boundp-protocol-cells*))
+    ("boundp-protocol-cells" . *cold-boundp-protocol-cells*)
+    ("code-operand-patch-tags" . *cold-code-operand-patch-tags*))
   "Generator fixes a coldtest run can switch OFF, by name, so the gate
 that guards each one can be proven to fire.  A gate that has never been
 seen to fail is a comment, not a gate: tests/run-tests.sh runs coldtest

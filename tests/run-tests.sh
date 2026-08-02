@@ -361,6 +361,38 @@ failure was not check-boundp-protocol-cells"; fail=1; }
         || { echo "FAIL: negative test (boundp-protocol-cells): gate did \
 not name SI:GC-PROCESS"; fail=1; }
     rm -f "$neg"
+
+    # code-operand-patch-tags: a compiled-code operand slot whose data
+    # type is a CALL type (DTP-CALL-COMPILED-EVEN .. DTP-CALL-GENERIC-
+    # PREFETCH) carries the tag the INSTRUCTION dictates, not the value's.
+    # The generator bakes a placeholder plus a first-boot
+    # (SYS:%P-STORE-CONTENTS <locative> <form>) -- and %P-STORE-CONTENTS
+    # writes a COMPLETE Q, tag included.  For a generic-function constant
+    # the form is (FLAVOR:FIND-GENERIC-FUNCTION-AS-CONSTANT 'GETHASH),
+    # FSET-stubbed at first boot to the cold version returning a LIST, so
+    # the store stamped DTP-LIST (21) over DTP-CALL-GENERIC-PREFETCH (47).
+    # QLD's own BOOTSTRAP-DEFGENERIC-CONSTANT-REFERENCES then snapped the
+    # real GF in but PRESERVED the wrong tag ((%SET-TAG gf (%TAG VAL))),
+    # so START-CALL-GENERIC-PREFETCH did no dispatch and the PC ran off the
+    # end of FUNCTION-SPEC-DEFAULT-HANDLER -- guest trap 46, QLD attempt
+    # 21.  Byte witness at that slot: dist EF:8800A137, bake EF:F8041200,
+    # corrupted runtime D5:88E00458.  The fix wraps the patch's value in
+    # (SYS:%SET-TAG value <baked tag byte>); defeated, the 18 placeholder
+    # Qs go back to untagged patches and the gate names them.
+    neg="${TMPDIR:-/tmp}/worldtool-negtest-optags.$$"
+    if "$WT" coldtest "$here/cold-layout.sexp" "$tmp" \
+            --reference-data "$here/reference-data.lisp" $coldsys \
+            --defeat code-operand-patch-tags > "$neg" 2>&1; then
+        echo "FAIL: negative test (code-operand-patch-tags) built GREEN -- \
+check-code-operand-patch-tags does not fire"; fail=1
+    fi
+    grep -q "FAIL every call-type code-operand patch re-stamps its tag" "$neg" \
+        || { echo "FAIL: negative test (code-operand-patch-tags): the \
+failure was not check-code-operand-patch-tags"; fail=1; }
+    grep -q "slot tag #xEF, patch tag NONE" "$neg" \
+        || { echo "FAIL: negative test (code-operand-patch-tags): gate did \
+not name an untagged DTP-CALL-GENERIC-PREFETCH slot"; fail=1; }
+    rm -f "$neg"
 else
     echo "skip: negative tests need --sys and reference-data.lisp"
 fi
